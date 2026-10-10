@@ -1,0 +1,38 @@
+﻿# Manifest template, rendered per game by ..\..\build.ps1 into build\cheats\<game>\mod.toml.
+# Built-in placeholders: {{MOD_ID}} {{GAME_ID}} {{GAME_TITLE}} {{SYMS}}; PRESET_OPTIONS comes
+# from generate.ps1; the rest from mod.psd1.
+
+[manifest]
+id = "{{MOD_ID}}"
+version = "0.3.0"
+display_name = "Cheat Codes"
+short_description = "Toggle cheats or enter GameShark codes in this mod's options."
+description = """
+Cheats for {{GAME_TITLE}}. Turn on the cheats below, or type GameShark codes into the \
+Codes option, separated by spaces (e.g. 8109940A FFFF).
+
+Supported codes: 80/A0 (8-bit write), 81/A1 (16-bit write), D0-D3 (conditionals), \
+50 (repeater). Master/enabler codes are not needed and are ignored.
+
+Turning a cheat off doesn't undo it: the game keeps whatever was written, and may save it.{{DESCRIPTION_EXTRA}}"""
+authors = [ "jessetbh" ]
+game_id = "{{GAME_ID}}"
+minimum_recomp_version = "0.1.0"
+dependencies = []
+optional_dependencies = []
+native_libraries = []
+{{PRESET_OPTIONS}}
+{{EXTRA_OPTIONS}}
+[[manifest.config_options]]
+id = "codes"
+name = "Codes"
+description = "Your own GameShark codes, separated by spaces. Applied together with any cheats turned on above."
+type = "String"
+default = ""
+
+[inputs]
+elf_path = "mod.elf"
+mod_filename = "{{MOD_ID}}"
+func_reference_syms_file = "{{SYMS}}"
+data_reference_syms_files = []
+additional_files = []

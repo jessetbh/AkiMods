@@ -1,0 +1,55 @@
+﻿# Manifest template, rendered per game by ..\..\build.ps1 into build\camera\<game>\mod.toml.
+
+[manifest]
+id = "{{MOD_ID}}"
+version = "0.7.0"
+display_name = "Camera"
+short_description = "Free camera: fly around with the keyboard and mouse (F6)."
+description = """
+A free camera for {{GAME_TITLE}}. Press F6 to take the camera: the mouse looks around, the mouse wheel moves in and out, W and S move up and down relative to the camera, A and D move sideways, Space and Ctrl move straight up and down, and Shift moves faster. Press F6 again to give the camera back to the game.
+
+While the free camera is on, the keyboard only controls the camera (controllers still play the game) and the cursor is locked to the window; opening the menu frees it. The game only draws what its own camera would see, so flying far away can show unfinished edges or make things pop in."""
+authors = [ "jessetbh" ]
+game_id = "{{GAME_ID}}"
+minimum_recomp_version = "0.1.0"
+dependencies = []
+optional_dependencies = []
+native_libraries = []
+
+[[manifest.config_options]]
+id = "mouse_sensitivity"
+name = "Mouse sensitivity"
+description = "How fast the mouse turns the free camera."
+type = "Number"
+min = 10
+max = 300
+step = 10
+precision = 0
+percent = true
+default = 100
+
+[[manifest.config_options]]
+id = "move_speed"
+name = "Move speed"
+description = "How fast the wheel, WASD, Space and Ctrl move the free camera. Hold Shift to go four times faster."
+type = "Number"
+min = 10
+max = 300
+step = 10
+precision = 0
+percent = true
+default = 100
+
+[[manifest.config_options]]
+id = "invert_y"
+name = "Invert mouse Y"
+description = "Moving the mouse up looks down."
+type = "Bool"
+default = false
+
+[inputs]
+elf_path = "mod.elf"
+mod_filename = "{{MOD_ID}}"
+func_reference_syms_file = "{{SYMS}}"
+data_reference_syms_files = []
+additional_files = []

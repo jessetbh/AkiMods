@@ -1,0 +1,89 @@
+# Builds AKI family mods: one .nrm per (mod, game).
+#   .\build.ps1                    every mod for every game it supports
+#   .\build.ps1 cheats             one mod, all its games
+#   .\build.ps1 cheats nomercy     one mod, one game
+#   .\build.ps1 camera nomercy -Define CAMERA_DEBUG    extra -D flags (debug builds)
+# Output: build\<mod>\<game>\<mod id>.nrm
+param([string]$Mod = 'all', [string]$Game = 'all', [string[]]$Define = @())
+# Native tools print warnings on stderr; failures are caught via $LASTEXITCODE below.
+$ErrorActionPreference = 'Continue'
+
+$root = $PSScriptRoot
+$depot = Split-Path $root -Parent
+$games = Import-PowerShellDataFile "$root\common\games.psd1"
+
+$modNames = @(Get-ChildItem "$root\mods" -Directory | Where-Object { Test-Path "$($_.FullName)\mod.psd1" } | ForEach-Object Name)
+if ($Mod -ne 'all' -and $Mod -notin $modNames) { throw "Unknown mod '$Mod' (known: $($modNames -join ', '), all)" }
+if ($Game -ne 'all' -and -not $games.ContainsKey($Game)) { throw "Unknown game '$Game' (known: $($games.Keys -join ', '), all)" }
+$selectedMods = if ($Mod -eq 'all') { $modNames } else { @($Mod) }
+
+# MIPS cross-compiler: zig cc, as WT's patches use. The VS BuildTools clang, the llvm.org
+# installer and the clang+llvm archive in toolchains\ all lack a MIPS backend.
+# ld.lld's MIPS support is unconditional, so VS's lld is fine.
+$zig = 'C:\Users\selki\toolchains\zig-windows-x86_64-0.14.0\zig.exe'
+$lld = 'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\Llvm\x64\bin\ld.lld.exe'
+$modTool = "$depot\N64Recomp\build\RecompModTool.exe"
+# RecompModTool is a MinGW build: it needs MinGW's runtime DLLs on PATH.
+$env:PATH = "C:\Users\selki\toolchains\mingw64\bin;$env:PATH"
+
+# No odd single-precision FPRs: in FR=0 an odd single is the high half of a double pair, and
+# the mod recompiler mis-handles it (garbage floats). zig cc ignores -mno-odd-spreg, so the
+# feature goes straight to clang.
+$baseFlags = @('-target', 'mips-freestanding-none', '-mcpu=mips2', '-mabi=32', '-O2', '-G0', '-mno-abicalls',
+    '-mno-odd-spreg', '-Xclang', '-target-feature', '-Xclang', '+nooddspreg', '-mno-check-zero-division', '-fomit-frame-pointer', '-fno-builtin', '-nostdinc',
+    '-ffreestanding', '-ffunction-sections', '-Wall', '-Wextra', '-Wno-unused-parameter', '-Werror=section',
+    '-I', "$root\common\include")
+
+foreach ($m in $selectedMods) {
+    $modDir = "$root\mods\$m"
+    $cfg = Import-PowerShellDataFile "$modDir\mod.psd1"
+    $modGames = if ($cfg.Games -eq 'all') { @($games.Keys) } else { @($cfg.Games) }
+    $targetGames = if ($Game -eq 'all') { $modGames } elseif ($Game -in $modGames) { @($Game) } else { @() }
+    if ($targetGames.Count -eq 0) { Write-Warning "$m doesn't support $Game; skipped"; continue }
+
+    foreach ($g in ($targetGames | Sort-Object)) {
+        $info = $games[$g] # not $game: PowerShell names are case-insensitive, and [string]$Game would coerce it
+        $over = if ($cfg.PerGame -and $cfg.PerGame.ContainsKey($g)) { $cfg.PerGame[$g] } else { @{} }
+        $out = "$root\build\$m\$g"
+        New-Item -ItemType Directory -Force $out | Out-Null
+
+        # Optional per-mod generator: writes headers into $out (on the include path) and
+        # returns extra manifest values.
+        $generated = @{}
+        if (Test-Path "$modDir\generate.ps1") {
+            $generated = & "$modDir\generate.ps1" -Game $g -Overrides $over -OutDir $out
+            if (-not ($generated -is [hashtable])) { throw "${m}/${g}: generate.ps1 must return a hashtable" }
+        }
+
+        # Compile each source with the game's frame hook and AKI_GAME_<KEY> defined.
+        $flags = $baseFlags + @('-I', "$modDir\include", '-I', $out, "-DAKI_FRAME_HOOK=$($info.FrameHook)",
+            "-DAKI_GAME_$($g.ToUpper())=1") + @($over.Defines | Where-Object { $_ }) + @($Define | ForEach-Object { "-D$_" })
+        $objects = @(foreach ($src in $cfg.Sources) {
+            $obj = "$out\$([IO.Path]::GetFileNameWithoutExtension($src)).o"
+            # Out-Host: compiler output must not leak into $objects.
+            & $zig cc @flags -c "$modDir\$src" -o $obj 2>&1 | Where-Object { "$_" -notmatch 'small-data accesses' } | Out-Host
+            if ($LASTEXITCODE) { throw "${m}/${g}: compiling $src failed" }
+            $obj
+        }) # @(): one source would otherwise be a bare string, which splats char by char
+        & $lld @objects -nostdlib -T "$root\common\mod.ld" -Map "$out\mod.map" `
+            --unresolved-symbols=ignore-all --emit-relocs -e 0 --no-nmagic -gc-sections -o "$out\mod.elf"
+        if ($LASTEXITCODE) { throw "${m}/${g}: link failed" }
+
+        # Render the manifest: built-in values, then the mod's, per-game overrides, generated.
+        $values = @{
+            MOD_ID     = $cfg.Id
+            GAME_ID    = $info.GameId
+            GAME_TITLE = $info.Title
+            SYMS       = ("$depot\$($info.Repo)\$($info.Syms)" -replace '\\', '/') # TOML: no bare backslashes
+        }
+        foreach ($src in @($cfg.Values, $over.Values, $generated)) { if ($src) { foreach ($k in $src.Keys) { $values[$k] = $src[$k] } } }
+        $toml = Get-Content "$modDir\mod.template.toml" -Raw
+        foreach ($k in $values.Keys) { $toml = $toml.Replace("{{$k}}", "$($values[$k])") }
+        $toml = [regex]::Replace($toml, '\{\{[A-Z0-9_]+\}\}', '') # unset placeholders render empty
+        [IO.File]::WriteAllText("$out\mod.toml", $toml) # no BOM: RecompModTool's TOML parser rejects one
+
+        & $modTool "$out\mod.toml" $out
+        if ($LASTEXITCODE) { throw "${m}/${g}: RecompModTool failed" }
+        Get-Item "$out\$($cfg.Id).nrm" | Select-Object @{n = 'Mod'; e = { $m } }, @{n = 'Game'; e = { $g } }, Length, FullName
+    }
+}

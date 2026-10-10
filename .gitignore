@@ -1,0 +1,6 @@
+build/
+
+# Local-only agent instructions and plans (never committed)
+AGENTS.md
+CLAUDE.md
+docs/*-plan.md
