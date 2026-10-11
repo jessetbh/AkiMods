@@ -40,34 +40,40 @@
                 @{ Name = '10 minutes'; Id = 2 }
                 @{ Name = '30 minutes'; Id = 4 }
             )
+            # Venue ids (func_800EE3C4): 0-9 ring arenas, 10-19 the same arenas' entrance stages (id + 10),
+            # 20-24 backstage. Identified 2026-10-11 by forcing each id (RT venue log + screenshots; stage
+            # 17/18/19 show the WrestleMania / Backlash / Armageddon logos). Arenas 3, 4, 6: names unconfirmed.
             Venues  = @(
-                @{ Name = 'Venue 0'; Id = 0 }
-                @{ Name = 'Venue 1'; Id = 1 }
-                @{ Name = 'Venue 2'; Id = 2 }
-                @{ Name = 'Venue 3'; Id = 3 }
-                @{ Name = 'Venue 4'; Id = 4 }
-                @{ Name = 'Venue 5'; Id = 5 }
-                @{ Name = 'Venue 6'; Id = 6 }
-                @{ Name = 'Venue 7'; Id = 7 }
-                @{ Name = 'Venue 8'; Id = 8 }
-                @{ Name = 'Venue 9'; Id = 9 }
-                @{ Name = 'Venue 10'; Id = 10 }
-                @{ Name = 'Venue 11'; Id = 11 }
-                @{ Name = 'Venue 12'; Id = 12 }
-                @{ Name = 'Venue 13'; Id = 13 }
-                @{ Name = 'Venue 14'; Id = 14 }
-                @{ Name = 'Venue 15'; Id = 15 }
-                @{ Name = 'Venue 16'; Id = 16 }
-                @{ Name = 'Venue 17'; Id = 17 }
-                @{ Name = 'Venue 18'; Id = 18 }
-                @{ Name = 'Venue 19'; Id = 19 }
-                @{ Name = 'Venue 20'; Id = 20 }
-                @{ Name = 'Venue 21'; Id = 21 }
-                @{ Name = 'Venue 22'; Id = 22 }
-                @{ Name = 'Venue 23'; Id = 23 }
-                @{ Name = 'Venue 24'; Id = 24 }
+                @{ Name = 'Raw'; Id = 0 }
+                @{ Name = 'No Mercy'; Id = 1 }
+                @{ Name = 'SmackDown'; Id = 2 }
+                @{ Name = 'Arena 3'; Id = 3 }
+                @{ Name = 'Arena 4'; Id = 4 }
+                @{ Name = 'Survivor Series'; Id = 5 }
+                @{ Name = 'Arena 6'; Id = 6 }
+                @{ Name = 'WrestleMania'; Id = 7 }
+                @{ Name = 'Backlash'; Id = 8 }
+                @{ Name = 'Armageddon'; Id = 9 }
+                @{ Name = 'Raw stage'; Id = 10 }
+                @{ Name = 'No Mercy stage'; Id = 11 }
+                @{ Name = 'SmackDown stage'; Id = 12 }
+                @{ Name = 'Arena 3 stage'; Id = 13 }
+                @{ Name = 'Arena 4 stage'; Id = 14 }
+                @{ Name = 'Survivor Series stage'; Id = 15 }
+                @{ Name = 'Arena 6 stage'; Id = 16 }
+                @{ Name = 'WrestleMania stage'; Id = 17 }
+                @{ Name = 'Backlash stage'; Id = 18 }
+                @{ Name = 'Armageddon stage'; Id = 19 }
+                @{ Name = 'Backstage hallway'; Id = 20 }
+                @{ Name = 'Backstage bar'; Id = 21 }
+                @{ Name = 'Parking garage'; Id = 22 }
+                @{ Name = 'Boiler room'; Id = 23 }
+                @{ Name = 'Locker room'; Id = 24 }
             )
-            Matches = @('Set 1', 'Set 2', 'Set 3', 'Set 4', 'Set 5', 'Set 6', 'Set 7', 'Set 8', 'Set 9')
+            # Demo sets in category order (func_800EF478: table 0x80102998, ranges 0x80102AE4; match flags
+            # 0x800A957C per set: 0x42, 1, 0x11, 1, 0x48, 0x20200, 2, 4, 8). Named from screenshots.
+            Matches = @('Tag team', 'Singles A', 'Singles B', 'Singles C', 'Three wrestlers A', 'Royal Rumble',
+                'Four wrestlers', 'Triple threat', 'Three wrestlers B')
         }
     }
 }
