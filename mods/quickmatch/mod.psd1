@@ -9,6 +9,7 @@
     Id      = 'aki_quickmatch'
     Sources = @('src\quickmatch.c')
     Games   = @('nomercy')
+    Bundle  = $false   # developer tool: stage.ps1 never copies it into the games' assets\mods
     Values  = @{}
     PerGame = @{
         # WWF No Mercy (USA, Rev 1)
