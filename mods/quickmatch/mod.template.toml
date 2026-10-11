@@ -1,0 +1,55 @@
+# Manifest template, rendered per game by ..\..\build.ps1 into build\quickmatch\<game>\mod.toml.
+
+[manifest]
+id = "{{MOD_ID}}"
+version = "0.1.0"
+display_name = "Quick Match (testing)"
+short_description = "Developer tool: boot straight into the demo match in a chosen venue."
+description = """
+A testing tool for {{GAME_TITLE}}: with Enabled on, the game skips its intro and starts the attract-mode demo match right away, in the venue you pick, instead of after a minute or more of intro and title screen. The demo is the game's own CPU-vs-CPU match, so there is no HUD and no controller input.
+
+Off by default. Turn it off again for normal play: while it's on, the title screen never waits for you."""
+authors = [ "jessetbh" ]
+game_id = "{{GAME_ID}}"
+minimum_recomp_version = "0.1.0"
+dependencies = []
+optional_dependencies = []
+native_libraries = []
+
+[[manifest.config_options]]
+id = "enabled"
+name = "Enabled"
+description = "Skip the intro and title wait, and start the demo match with the settings below."
+type = "Bool"
+default = false
+
+[[manifest.config_options]]
+id = "venue"
+name = "Venue"
+description = "Where the demo match takes place."
+type = "Enum"
+options = {{VENUE_OPTIONS}}
+default = "Game's pick"
+
+[[manifest.config_options]]
+id = "match"
+name = "Match"
+description = "Which of the game's demo matches to play (wrestlers and match type)."
+type = "Enum"
+options = {{MATCH_OPTIONS}}
+default = "Game's rotation"
+
+[[manifest.config_options]]
+id = "length"
+name = "Demo length"
+description = "How long the demo match runs before the game goes back to the title (and the next demo starts). A pinfall or submission still ends it early."
+type = "Enum"
+options = {{LENGTH_OPTIONS}}
+default = {{LENGTH_DEFAULT}}
+
+[inputs]
+elf_path = "mod.elf"
+mod_filename = "{{MOD_ID}}"
+func_reference_syms_file = "{{SYMS}}"
+data_reference_syms_files = []
+additional_files = []
