@@ -2,7 +2,8 @@
 
 A **developer/testing** mod: with **Enabled** on, the game skips its intro and title wait and starts its own
 attract-mode demo match (CPU vs CPU, no HUD, no controller input) within seconds, in the venue you pick. Off
-by default, so it does nothing for players until switched on.
+by default, so it does nothing for players until switched on. Bundled with No Mercy (`stage.ps1`), so it is in
+every No Mercy install's Mods menu.
 
 Options (Mods menu, or `mod_config\aki_quickmatch.json`):
 
