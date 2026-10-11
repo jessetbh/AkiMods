@@ -8,7 +8,7 @@ every game.
 |---|---|
 | [cheats](mods/cheats/README.md) | Curated cheat toggles per game, plus any GameShark code |
 | [camera](mods/camera/README.md) | Keyboard + mouse free camera: F6, mouse look, wheel in/out, W/S up/down, A/D sideways (all six games) |
-| [quickmatch](mods/quickmatch/README.md) | Testing tool: skip the intro and start the demo match in a chosen venue within seconds (No Mercy so far; off by default, not bundled) |
+| [quickmatch](mods/quickmatch/README.md) | Testing tool: skip the intro and start the demo match in a chosen venue within seconds (No Mercy so far; bundled, off by default) |
 
 ## Build
 
