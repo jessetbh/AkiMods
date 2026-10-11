@@ -28,7 +28,20 @@
                 '-DQM_MATCH_INIT_FUNC=func_80113E30', # ovl_e: match init; sets the demo's time limit
                 '-DQM_TIME_LIMIT=0x8009FE6Cu',       # s8: time limit index (0 = none), read by the clock
                 '-DQM_DEMO_FLAGS=0x80097EC0u',       # u32: match flags; the clock ends demos on its limit
-                '-DQM_DEMO_FLAG=0x02000000u'         #   bit set for attract demos
+                '-DQM_DEMO_FLAG=0x02000000u',        #   bit set for attract demos
+                '-DQM_DEMO_MODE=-6',                 # QM_MODE value while the demo match runs
+                # Entrance stages (10-19) are only reached through an exit mid-match; started directly,
+                # the ring's collision stays and wrestlers float above the stage. So: start in the
+                # stage's arena (id - 10), then request the game's area change like the exit handler
+                # func_800EDCF4 does (0x80159670 = target, func_800DA2F0: 0x80151EF4 = target,
+                # 0x80151EF8 = 1), once the opening fade-in is over. The game's own demos start in
+                # backstage areas (20-24) directly.
+                '-DQM_STAGED_FIRST=10', '-DQM_STAGED_END=20', '-DQM_STAGED_PARENT=10',
+                '-DQM_AREA_REQUEST=0x80151EF8u',     # s16, cleared by the match driver func_800D9990
+                '-DQM_AREA_TARGET=0x80151EF4u',      # s32: venue the driver loads (func_800E1980)
+                '-DQM_AREA_NEXT=0x80159670u',        # s32: match init(1) makes it the current area 0x80159628
+                '-DQM_MATCH_FRAMES=0x801532C0u',     # u16: match frames (func_800DE58C), 0xFFFF before
+                '-DQM_MATCH_FADING=0x80151ED0u'      # s8: opening fade-in running (func_800D9990)
             )
             # Time limit indexes (minutes table at 0x80146574 in ovl_e: 0 = none, 1=5, 2=10, 3=15,
             # 4=30, 5=60, 6=3, 7=1, 8=2); the game gives demos index 7.

@@ -49,4 +49,21 @@ static inline int qm_length_index(int option, const unsigned char* ids, int coun
     return ids[option];
 }
 
+// Venues the game only reaches mid-match, through an exit (No Mercy's entrance stages): starting a
+// match there leaves the ring's collision in place, so wrestlers fight in the air above the stage.
+// Instead the match starts in the venue's parent arena and the game's own area change moves it there.
+// Returns the venue to start in for a chosen id (the id itself unless first_staged <= id < last_staged).
+static inline int qm_start_venue(int id, int first_staged, int last_staged, int parent_offset) {
+    if (id >= first_staged && id < last_staged) {
+        return id - parent_offset;
+    }
+    return id;
+}
+
+// Whether to request the area change now: once, after the match has run `delay` frames, while no
+// other area change is pending.
+static inline int qm_area_change_due(int pending_id, int match_frames, int delay, int request_busy) {
+    return pending_id >= 0 && match_frames >= delay && match_frames < 0x8000 && !request_busy;
+}
+
 #endif

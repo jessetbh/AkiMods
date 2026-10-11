@@ -23,12 +23,29 @@
 //   QM_ATTRACT_COUNTER   u8: odd = intro movie next, even = demo match (category = value / 2)
 //   QM_DEMO_SETUP_FUNC   picks the demo match (wrestlers, match type, venue)
 //   QM_VENUE             u8 venue id the match loads
+//   QM_STAGED_FIRST / QM_STAGED_END / QM_STAGED_PARENT   venue ids [first, end) are reached through
+//                        the area change: start in id - PARENT, then move (optional; see quickmatch_logic.h)
+//   QM_AREA_REQUEST      s16 area change request (the match driver handles it, then clears it)
+//   QM_AREA_TARGET       s32 venue the area change loads
+//   QM_AREA_NEXT         s32 venue the match init records as current after an area change
+//   QM_MATCH_FRAMES      u16 match frame counter (0xFFFF before the match runs)
+//   QM_MATCH_FADING      s8 nonzero while the match's opening fade-in runs
+//   QM_DEMO_MODE         QM_MODE value while the demo match runs
 //   QM_MATCH_INIT_FUNC   match init; gives demos their time limit
 //   QM_TIME_LIMIT        s8 time limit index the match clock checks (0 = none)
 //   QM_DEMO_FLAGS / QM_DEMO_FLAG   u32 match flags and the bit set for attract demos
 
 static const u8 venue_ids[] = { QM_VENUE_IDS };
 static const u8 length_ids[] = { QM_LENGTH_IDS };
+
+#ifndef QM_STAGED_FIRST
+#define QM_STAGED_FIRST 0
+#define QM_STAGED_END 0
+#define QM_STAGED_PARENT 0
+#endif
+#define QM_AREA_DELAY 45 // match frames before the area change (1.5 s at 30 fps), after the fade-in
+
+static int pending_area = -1; // venue the area change still has to move the demo to
 
 static int enabled(void) {
     return recomp_get_config_u32("enabled") != 0;
@@ -62,10 +79,41 @@ RECOMP_HOOK_RETURN(AKI_STRINGIFY(QM_DEMO_SETUP_FUNC)) void qm_after_demo_setup(v
         return;
     }
     int id = qm_venue_id((int)recomp_get_config_u32("venue"), venue_ids, (int)sizeof(venue_ids));
+    pending_area = -1;
     if (id >= 0) {
-        RDRAM_U8(QM_VENUE) = (u8)id;
+        int start = qm_start_venue(id, QM_STAGED_FIRST, QM_STAGED_END, QM_STAGED_PARENT);
+        RDRAM_U8(QM_VENUE) = (u8)start;
+        if (start != id) {
+            pending_area = id;
+        }
     }
 }
+
+#ifdef QM_AREA_REQUEST
+// Moves a staged venue's demo from its parent arena, the way an exit does (func_800EDCF4 in No Mercy).
+AKI_ON_FRAME void qm_on_frame(void) {
+    if (pending_area < 0) {
+        return;
+    }
+    if (!enabled()) {
+        pending_area = -1;
+        return;
+    }
+    if (RDRAM_S32(QM_MODE) != QM_DEMO_MODE) { // demo not running yet (each demo setup resets pending_area)
+        return;
+    }
+    int frames = *(volatile u16*)QM_MATCH_FRAMES;
+    // Busy while the match's opening fade-in runs: an area change requested during it never finishes
+    // (stuck on a black screen).
+    int busy = *(volatile s16*)QM_AREA_REQUEST != 0 || *(volatile s8*)QM_MATCH_FADING != 0;
+    if (qm_area_change_due(pending_area, frames, QM_AREA_DELAY, busy)) {
+        RDRAM_S32(QM_AREA_NEXT) = pending_area;
+        RDRAM_S32(QM_AREA_TARGET) = pending_area;
+        *(volatile s16*)QM_AREA_REQUEST = 1;
+        pending_area = -1;
+    }
+}
+#endif
 
 // Demo length: the match init gives demos a short time limit; replace it (demos only).
 RECOMP_HOOK_RETURN(AKI_STRINGIFY(QM_MATCH_INIT_FUNC)) void qm_after_match_init(void) {

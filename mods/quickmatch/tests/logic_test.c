@@ -53,11 +53,26 @@ static void test_length_index(void) {
     CHECK_EQ(qm_length_index(-1, ids, 3), -1);
 }
 
+static void test_staged_venues(void) {
+    CHECK_EQ(qm_start_venue(0, 10, 20, 10), 0);   // arena: as is
+    CHECK_EQ(qm_start_venue(9, 10, 20, 10), 9);
+    CHECK_EQ(qm_start_venue(10, 10, 20, 10), 0);  // stage: start in its arena
+    CHECK_EQ(qm_start_venue(19, 10, 20, 10), 9);
+    CHECK_EQ(qm_start_venue(20, 10, 20, 10), 20); // backstage: the game starts demos there itself
+    CHECK_EQ(qm_start_venue(12, 0, 0, 0), 12);    // game without staged venues
+    CHECK_EQ(qm_area_change_due(11, 45, 45, 0), 1);
+    CHECK_EQ(qm_area_change_due(11, 44, 45, 0), 0);      // too early
+    CHECK_EQ(qm_area_change_due(11, 0xFFFF, 45, 0), 0);  // counter not started (0xFFFF)
+    CHECK_EQ(qm_area_change_due(11, 60, 45, 1), 0);      // fade-in running or another change pending
+    CHECK_EQ(qm_area_change_due(-1, 60, 45, 0), 0);      // nothing pending
+}
+
 int main(void) {
     test_idle_timer();
     test_attract_counter();
     test_venue_id();
     test_length_index();
+    test_staged_venues();
     printf("[quickmatch tests] %d checks, %d failed\n", checks, failures);
     return failures != 0;
 }
