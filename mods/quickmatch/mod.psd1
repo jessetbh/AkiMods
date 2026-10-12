@@ -108,9 +108,11 @@
                 '-DQM_MENU_SCREEN=0x8003DD04u',      # s16: menu screen id
                 '-DQM_MENU_SCRIPT=0x8011BC84u',      # s32: transition/prompt script (48 = the title's Rumble Pak prompt)
                 '-DQM_MENU_SCREENS=0x8016ECA0u',     # screen records, 0x138 bytes each (ovl_c func_8011EB10):
-                '-DQM_MENU_STRIDE=0x138',            #   +0 item list (count at +5), +5 cursor
+                '-DQM_MENU_STRIDE=0x138',            #   +5 cursor
+                '-DQM_MATCH_SCREEN=5',               # Exhibition screen: cursor = match type
+                '-DQM_PER_MATCH=2,5,3,2',            # "Watch" item per match type (single, tag, 3 way, cage)
                 # Screens: 0 title, 1 main menu (0 = Exhibition), 5 Exhibition (match type), 3 venue,
-                # 4 players (last item = Watch), 10 belt, 19/20 wrestlers, 17 rules, 18 VS. A = 0x8000, Start = 0x1000.
+                # 4 players (Watch, per match type), 10 belt, 19/20 wrestlers, 17 rules, 18 VS. A = 0x8000, Start = 0x1000.
                 '-DQM_MENU_STEPS={0,-1,0x1000},{1,-1,0x8000},{5,-3,0x8000},{3,-2,0x8000},{4,-4,0x8000},{10,-1,0x8000},{19,-1,0x8000},{20,-1,0x8000},{17,-1,0x8000},{18,-1,0x8000}'
             )
             # No Lengths: the match keeps the game's own rules (time limit 30 minutes unless changed on

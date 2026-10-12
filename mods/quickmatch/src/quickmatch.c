@@ -11,7 +11,6 @@
 
 #define RDRAM_U8(addr)  (*(volatile u8*)(addr))
 #define RDRAM_S32(addr) (*(volatile s32*)(addr))
-#define RDRAM_U32(addr) (*(volatile u32*)(addr))
 
 // Per game (mod.psd1 PerGame.Defines):
 //   QM_INTRO_FUNC        intro (logos + intro movie) main, per frame
@@ -44,8 +43,9 @@
 //   QM_MENU_SIG / QM_MENU_SIG_WORD   u32 at QM_MENU_SIG equals QM_MENU_SIG_WORD while the menus are loaded
 //   QM_MENU_SCREEN       s16 current menu screen
 //   QM_MENU_SCRIPT       s32 screen transition/prompt script (some prompts wait for a press while it runs)
-//   QM_MENU_SCREENS / QM_MENU_STRIDE   screen n's record at QM_MENU_SCREENS + n * stride: u32 +0 = its
-//                        item list (u8 item count at +5), u8 +5 = its cursor
+//   QM_MENU_SCREENS / QM_MENU_STRIDE   screen n's record at QM_MENU_SCREENS + n * stride; u8 +5 = its cursor
+//   QM_MATCH_SCREEN      the screen whose cursor is the match type; QM_PER_MATCH = { value per match type }
+//                        for QM_CURSOR_PER_MATCH steps
 //   QM_MENU_STEPS        { screen, cursor, buttons } list
 
 static const u8 venue_ids[] = { QM_VENUE_IDS };
@@ -154,6 +154,7 @@ RECOMP_HOOK_RETURN(AKI_STRINGIFY(QM_MATCH_INIT_FUNC)) void qm_after_match_init(v
 #define QM_MENU_REPEAT 30 // frames between presses on the same screen
 
 static const qm_menu_step menu_steps[] = { QM_MENU_STEPS };
+static const u8 per_match_values[] = { QM_PER_MATCH };
 static int menu_screen = -1;
 static int menu_script = -1;
 static int menu_idle = 0;
@@ -186,12 +187,12 @@ RECOMP_HOOK_RETURN(AKI_STRINGIFY(QM_PAD_FUNC)) void qm_after_pad(void) {
         // The cursor is set only together with the press: writing it while a screen slides in breaks
         // the screen's own animation (WM2000's main menu lost its highlight).
         u32 record = QM_MENU_SCREENS + (u32)screen * QM_MENU_STRIDE;
-        u32 list = RDRAM_U32(record);
-        int items = (list >= 0x80000000u && list < 0x80800000u) ? RDRAM_U8(list + 5) : 0;
+        int match_type = RDRAM_U8(QM_MENU_SCREENS + QM_MATCH_SCREEN * QM_MENU_STRIDE + 5);
+        int per_match = qm_per_match(per_match_values, (int)sizeof(per_match_values), match_type);
         int venue = qm_venue_id((int)recomp_get_config_u32("venue"), venue_ids, (int)sizeof(venue_ids));
         int option = (int)recomp_get_config_u32("match");
         int match = (option > 0 && option <= QM_CATEGORIES) ? option - 1 : -1;
-        int cursor = qm_menu_cursor(step, venue, match, items);
+        int cursor = qm_menu_cursor(step, venue, match, per_match);
         if (cursor >= 0) {
             RDRAM_U8(record + 5) = (u8)cursor;
         }
