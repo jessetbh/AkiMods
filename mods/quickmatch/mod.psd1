@@ -62,7 +62,7 @@
                 @{ Name = 'No Mercy'; Id = 1 }
                 @{ Name = 'SmackDown'; Id = 2 }
                 @{ Name = 'Arena 3'; Id = 3 }
-                @{ Name = 'Arena 4'; Id = 4 }
+                @{ Name = 'Dome (entrance)'; Id = 4 }
                 @{ Name = 'Survivor Series'; Id = 5 }
                 @{ Name = 'Arena 6'; Id = 6 }
                 @{ Name = 'WrestleMania'; Id = 7 }
@@ -164,15 +164,16 @@
                 '-DQM_VENUE=0x800B5D14u',            # u8: the demo record's venue nibble
                 '-DQM_DEMO_MODE=-6'
             )
-            # Venue = the demo record's venue nibble (0x800B5D14). The exhibition venue screen lists four: Budokan,
-            # Dome, AKI Hall, Ballpark. Ids 0-4 load distinct arenas (forced 2026-10-12, RT venue logs + screenshots);
-            # 5 and 6 load a bare ring, 7+ fall back to AKI Hall or fail: left out.
+            # Venue = the demo record's venue nibble (0x800B5D14). Ids 0-3 = the exhibition venue screen's order
+            # (Budokan, Dome, AKI Hall, Ballpark), identified by free-camera surveys 2026-10-12 (octagonal gold-lit
+            # roof; fabric dome roof; small hall; open night sky over a city). 4 = the Dome with an entrance ramp
+            # and light towers (name not confirmed). 5 and 6 load a bare ring, 7+ fall back to AKI Hall or fail.
             Venues  = @(
-                @{ Name = 'Ballpark'; Id = 0 }
-                @{ Name = 'Budokan'; Id = 1 }
+                @{ Name = 'Budokan'; Id = 0 }
+                @{ Name = 'Dome'; Id = 1 }
                 @{ Name = 'AKI Hall'; Id = 2 }
-                @{ Name = 'Dome'; Id = 3 }
-                @{ Name = 'Arena 4'; Id = 4 }
+                @{ Name = 'Ballpark'; Id = 3 }
+                @{ Name = 'Dome (entrance)'; Id = 4 }
             )
             # Demo sets: the game passes the even attract counter (0, 2, 4) straight to the demo setup (table
             # 0x80171084). No Demo length: the demo's 1-minute limit wasn't located; the mod forces the venue on

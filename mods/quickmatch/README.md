@@ -2,11 +2,11 @@
 
 A **developer/testing** mod: with **Enabled** on, the game skips its intro and title wait and starts a CPU-vs-CPU
 match within seconds, in the venue you pick. Off by default, so it does nothing for players until switched on.
-Bundled with No Mercy and WrestleMania 2000 (`stage.ps1`), so it is in every install's Mods menu.
+Bundled with No Mercy, WrestleMania 2000 and Virtual Pro Wrestling 2 (`stage.ps1`), so it is in every install's Mods menu.
 
 How it gets there depends on the game:
 
-- **Attract demo** (No Mercy): the game's own attract-mode demo match (no HUD, no controller input), started
+- **Attract demo** (No Mercy, VPW2): the game's own attract-mode demo match (no HUD, no controller input), started
   right away, with its venue and length replaced.
 - **Menu-driven** (WrestleMania 2000, whose attract sequence has no demo match): the mod walks the game's own menus,
   pressing one button per known screen, to an Exhibition match in **Watch** mode (CPU vs CPU). The match keeps the
@@ -159,6 +159,38 @@ no separate stage ids. No backstage areas.
 | 4 | Survivor Series | venue screen logo; match screenshots |
 | 5 | WrestleMania | venue screen logo; match screenshots |
 | 6 | SummerSlam | venue screen logo; match screenshots |
+
+## How it works (Virtual Pro Wrestling 2)
+
+VPW2 is No Mercy's engine: the same attract sequence (intro movie, title, 900-frame idle wait, attract counter with odd =
+intro movie and even = demo match) and the same pieces, at its own addresses (Japanese ROM NA2J):
+
+| Step | Hook | What the mod does |
+|---|---|---|
+| Intro (ovl_b) | `RECOMP_HOOK func_8011B1F8` | What Start does: once `0x8012C504` != 0 and no transition is pending (`0x800A33B4` == 0), mode `0x8003ED30` = 1 |
+| Title (ovl_c) | `RECOMP_HOOK func_80124810` | Idle timer `0x801763F0` to 899; attract counter `0x8003ED40` kept even (or the chosen demo set) |
+| Demo setup (ovl_c) | `RECOMP_HOOK_RETURN func_8014C4A0` | Overwrites the demo record's venue `0x800B5D14` |
+
+No hooked function has a post-recompile repair in Vpw2Recomp (fresh N64Recomp output vs the fixed `RecompiledFuncs`:
+15 functions differ, none hooked). The demo's 1-minute limit was not located (VPW2 has no `0x02000000` demo-flag time
+limit like No Mercy's), so there is no Demo length option: when a demo ends, the next one starts at once in the same
+venue. Mode is -6 while a demo runs; demo set = the even attract counter passed straight to the demo setup (sets at
+`0x80171084`).
+
+### VPW2 venues
+
+The exhibition venue screen lists 武道館, ドーム, AKIホール, 球場 (Budokan, Dome, AKI Hall, Ballpark); the venue ids are in
+that order. Each id was forced and surveyed with the free camera (2026-10-12).
+
+| Id | Option | Evidence |
+|---|---|---|
+| 0 | Budokan | octagonal hall, gold ceiling lamp grid (scene ~4300 wide) |
+| 1 | Dome | huge hall under a fabric roof, "'99 ALL JAPAN WRESTLING" banners |
+| 2 | AKI Hall | small hall, low ceiling (~690), wall lamps, "東" sign; also what invalid ids fall back to |
+| 3 | Ballpark | open-air at night: stars, city skyline, scene ~11000 wide |
+| 4 | Dome (entrance) | the Dome plus an entrance ramp and truss light towers at the ring corners; name not confirmed |
+
+Ids 5 and 6 load a bare ring with no arena, 7 and up fall back to AKI Hall or never start: not offered.
 
 ## Option 2: a real exhibition match
 
