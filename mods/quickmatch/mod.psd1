@@ -8,8 +8,8 @@
 @{
     Id      = 'aki_quickmatch'
     Sources = @('src\quickmatch.c')
-    Games   = @('nomercy', 'wm2k')
-    # Bundled with No Mercy (owner, 2026-10-11) and WrestleMania 2000 (2026-10-12): off by default, so it does nothing until enabled.
+    Games   = @('nomercy', 'wm2k', 'vpw2')
+    # Bundled with No Mercy (owner, 2026-10-11), WrestleMania 2000 and VPW2 (2026-10-12): off by default, so it does nothing until enabled.
     Values  = @{}
     PerGame = @{
         # WWF No Mercy (USA, Rev 1)
@@ -62,7 +62,7 @@
                 @{ Name = 'No Mercy'; Id = 1 }
                 @{ Name = 'SmackDown'; Id = 2 }
                 @{ Name = 'Arena 3'; Id = 3 }
-                @{ Name = 'Arena 4'; Id = 4 }
+                @{ Name = 'Dome (entrance)'; Id = 4 }
                 @{ Name = 'Survivor Series'; Id = 5 }
                 @{ Name = 'Arena 6'; Id = 6 }
                 @{ Name = 'WrestleMania'; Id = 7 }
@@ -147,6 +147,38 @@
             EntranceOption = $true
             # Exhibition match types, in the menu's order (cursor = option - 1).
             Matches = @('Single Match', 'Tag Match', '3 Way Match', 'Cage Match')
+        }
+
+        # Virtual Pro Wrestling 2 (Japan): No Mercy's engine and attract sequence (README, "How it works (VPW2)").
+        vpw2 = @{
+            Defines = @(
+                '-DQM_INTRO_FUNC=func_8011B1F8',     # ovl_b: intro main, per frame (takes A/Start)
+                '-DQM_INTRO_SCENE=0x800A33B4u',      # s32: pending transition (0 = none)
+                '-DQM_INTRO_SKIPPABLE=0x8012C504u',  # s32: nonzero once Start may skip the intro
+                '-DQM_MODE=0x8003ED30u',             # s32: 1 = leave the intro; -6 while the demo runs
+                '-DQM_TITLE_FUNC=func_80124810',     # ovl_c: title/menu state machine, per frame
+                '-DQM_IDLE_TIMER=0x801763F0u',       # s32: title idle frames; -1 = not counting
+                '-DQM_IDLE_LIMIT=900',
+                '-DQM_ATTRACT_COUNTER=0x8003ED40u',  # u8: odd = intro movie next, even = demo
+                '-DQM_DEMO_SETUP_FUNC=func_8014C4A0',# ovl_c: picks the demo match (table 0x80171084)
+                '-DQM_VENUE=0x800B5D14u',            # u8: the demo record's venue nibble
+                '-DQM_DEMO_MODE=-6'
+            )
+            # Venue = the demo record's venue nibble (0x800B5D14). Ids 0-3 = the exhibition venue screen's order
+            # (Budokan, Dome, AKI Hall, Ballpark), identified by free-camera surveys 2026-10-12 (octagonal gold-lit
+            # roof; fabric dome roof; small hall; open night sky over a city). 4 = the Dome with an entrance ramp
+            # and light towers (name not confirmed). 5 and 6 load a bare ring, 7+ fall back to AKI Hall or fail.
+            Venues  = @(
+                @{ Name = 'Budokan'; Id = 0 }
+                @{ Name = 'Dome'; Id = 1 }
+                @{ Name = 'AKI Hall'; Id = 2 }
+                @{ Name = 'Ballpark'; Id = 3 }
+                @{ Name = 'Dome (entrance)'; Id = 4 }
+            )
+            # Demo sets: the game passes the even attract counter (0, 2, 4) straight to the demo setup (table
+            # 0x80171084). No Demo length: the demo's 1-minute limit wasn't located; the mod forces the venue on
+            # every demo, so the next one starts in the same place.
+            Matches = @('Demo set A', 'Demo set B', 'Demo set C')
         }
     }
 }
