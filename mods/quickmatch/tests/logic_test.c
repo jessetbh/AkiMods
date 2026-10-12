@@ -67,12 +67,40 @@ static void test_staged_venues(void) {
     CHECK_EQ(qm_area_change_due(-1, 60, 45, 0), 0);      // nothing pending
 }
 
+static void test_menu_steps(void) {
+    static const qm_menu_step steps[] = {
+        { 0, QM_CURSOR_KEEP, 0x1000 }, { 5, QM_CURSOR_MATCH, 0x8000 }, { 3, QM_CURSOR_VENUE, 0x8000 },
+        { 4, QM_CURSOR_LAST, 0x8000 }, { 17, 0, 0x8000 },
+    };
+    CHECK_EQ(qm_menu_find(steps, 5, 3) == &steps[2], 1);
+    CHECK_EQ(qm_menu_find(steps, 5, 0) == &steps[0], 1); // screen 0 is a real screen
+    CHECK_EQ(qm_menu_find(steps, 5, 34) == 0, 1);        // unknown screen (the match): hands off
+    CHECK_EQ(qm_menu_find(steps, 0, 3) == 0, 1);
+    // Cursor values
+    CHECK_EQ(qm_menu_cursor(&steps[0], 4, 1, 8), -1);  // keep
+    CHECK_EQ(qm_menu_cursor(&steps[1], 4, 3, 4), 3);   // match type
+    CHECK_EQ(qm_menu_cursor(&steps[1], 4, -1, 4), -1); // "Game's rotation": keep
+    CHECK_EQ(qm_menu_cursor(&steps[2], 6, 0, 7), 6);   // venue
+    CHECK_EQ(qm_menu_cursor(&steps[2], 0, 0, 7), 0);   // venue 0 is real
+    CHECK_EQ(qm_menu_cursor(&steps[2], -1, 0, 7), -1); // "Game's pick": keep
+    CHECK_EQ(qm_menu_cursor(&steps[3], 0, 0, 3), 2);   // last item: singles "Watch"
+    CHECK_EQ(qm_menu_cursor(&steps[3], 0, 0, 6), 5);   // tag "Watch"
+    CHECK_EQ(qm_menu_cursor(&steps[3], 0, 0, 0), -1);  // item count unknown: keep
+    CHECK_EQ(qm_menu_cursor(&steps[4], 3, 3, 9), 0);   // fixed value
+    // Press timing: settle first, then repeat
+    CHECK_EQ(qm_menu_press_due(19, 100, 20, 30), 0);
+    CHECK_EQ(qm_menu_press_due(20, 100, 20, 30), 1);
+    CHECK_EQ(qm_menu_press_due(50, 29, 20, 30), 0);
+    CHECK_EQ(qm_menu_press_due(50, 30, 20, 30), 1);
+}
+
 int main(void) {
     test_idle_timer();
     test_attract_counter();
     test_venue_id();
     test_length_index();
     test_staged_venues();
+    test_menu_steps();
     printf("[quickmatch tests] %d checks, %d failed\n", checks, failures);
     return failures != 0;
 }
