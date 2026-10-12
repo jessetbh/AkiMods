@@ -2,13 +2,13 @@
 
 A **developer/testing** mod: with **Enabled** on, the game skips its intro and title wait and starts a CPU-vs-CPU
 match within seconds, in the venue you pick. Off by default, so it does nothing for players until switched on.
-Bundled with No Mercy, WrestleMania 2000 and Virtual Pro Wrestling 2 (`stage.ps1`), so it is in every install's Mods menu.
+Bundled with No Mercy, WrestleMania 2000, Virtual Pro Wrestling 2 and WCW/nWo Revenge (`stage.ps1`), so it is in every install's Mods menu.
 
 How it gets there depends on the game:
 
 - **Attract demo** (No Mercy, VPW2): the game's own attract-mode demo match (no HUD, no controller input), started
   right away, with its venue and length replaced.
-- **Menu-driven** (WrestleMania 2000, whose attract sequence has no demo match): the mod walks the game's own menus,
+- **Menu-driven** (WrestleMania 2000 and Revenge, whose attract sequences have no demo match): the mod walks the game's own menus,
   pressing one button per known screen, to an Exhibition match in **Watch** mode (CPU vs CPU). The match keeps the
   game's rules and entrances, with its HUD.
 
@@ -20,7 +20,7 @@ Options (Mods menu, or `mod_config\aki_quickmatch.json`):
 | Venue | Game's pick, or one of the game's venues (list per game below) |
 | Match | Game's rotation, or one of the game's demo match sets (menu-driven games: match types) |
 | Demo length | No time limit (default), 1 minute (the game's demo length), 2 / 3 / 5 / 10 / 30 minutes (attract-demo games only) |
-| Entrances | Skip (default) / Show (menu-driven games: WrestleMania 2000) |
+| Entrances | Skip (default) / Show (menu-driven games: WrestleMania 2000, Revenge) |
 
 A pinfall or submission still ends the match; the next demo then starts at once, in the same venue.
 
@@ -191,6 +191,47 @@ that order. Each id was forced and surveyed with the free camera (2026-10-12).
 | 4 | Dome (entrance) | the Dome plus an entrance ramp and truss light towers at the ring corners; name not confirmed |
 
 Ids 5 and 6 load a bare ring with no arena, 7 and up fall back to AKI Hall or never start: not offered.
+
+## How it works (Revenge)
+
+The same menu driver as WrestleMania 2000. Revenge keeps the intro, title and menus in one overlay (ovl_a) with one
+screen variable, so there is no separate intro hook: screen 0 is both the intro and the title, and Start leaves either.
+
+| Piece | Revenge |
+|---|---|
+| Pad hook | `RECOMP_HOOK_RETURN func_800C5718` (button words `0x800EA0C0/C2/C4`; also controller 1's record `0x8006E17C/E`, which the VS screen reads) |
+| Menus loaded | first word of `func_800AC144` = `0x27BDFFA0` (the match overlay ovl_b sits at the same vram) |
+| Screen / script / mode | `0x80038A90` (s16) / `0x800E7C90` / `0x80038A8C` (-2 during the match) |
+| Screen records | `0x800E8230 + screen * 0x138`, cursor at +5 (not on the rules screen 11) |
+
+| Screen | What it is | The mod |
+|---|---|---|
+| 0 | Intro and title (Rumble Pak prompt = script 44) | Start |
+| 1 | Main menu | cursor 1 (Exhibition), A |
+| 5 | Exhibition: Single / Tag | the Match option's type, A |
+| 2 | Venue | the Venue option's venue, A |
+| 3 | Players (single: 1P vs 2P / 1P vs CPU / CPU vs CPU; tag: six, CPU vs CPU last) | CPU vs CPU (2 single, 5 tag), A |
+| 13, 14 | Wrestlers | A |
+| 12 | VS | Start |
+| 11 | Rules | A (Decision) |
+| 23 | Entrances (mode 0), then the match keeps screen 23 with mode -2 | Start skips the entrances unless **Entrances** = Show |
+
+Neither hooked function has a repair (fresh N64Recomp output vs `RecompiledFuncs`: only `func_80001C28` and
+`func_80002CC4` differ). USA addresses.
+
+### Revenge venues
+
+The venue screen's cursor, in its order; forced 2026-10-12 (ring aprons, set logos). Each arena has its own entrance
+set, drawn in the entrance scene before the match (Entrances = Show).
+
+| Id | Option | Evidence |
+|---|---|---|
+| 0 | Monday Nitro | NITRO apron, Nitro set |
+| 1 | Souled Out | Souled Out banners |
+| 2 | SuperBrawl | red carpet entrance |
+| 3 | Bash at the Beach | beach hut set, BASH apron |
+| 4 | Halloween Havoc | HALLOWEEN HAVOC mat |
+| 5 | Starrcade | STARRCADE apron and set |
 
 ## Option 2: a real exhibition match
 

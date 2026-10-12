@@ -200,7 +200,7 @@
                 '-DQM_MENU_SCREENS=0x800E8230u',     # screen records, 0x138 bytes each: +5 cursor
                 '-DQM_MENU_STRIDE=0x138',
                 '-DQM_MATCH_SCREEN=5',               # Exhibition screen: cursor = match type
-                '-DQM_PER_MATCH=2,2',                # players screen: CPU vs CPU (single, tag)
+                '-DQM_PER_MATCH=2,5',                # players screen: CPU vs CPU (item 2 single, 5 tag)
                 # Screens: 0 intro + title (Start), 1 main menu (1 = Exhibition), 5 Exhibition (Single / Tag), 2 venue,
                 # 3 players (2 = CPU vs CPU), 13/14 wrestlers, 12 VS (Start), 11 rules (A on Decision), 23 entrances.
                 '-DQM_ENTRANCE_SCREEN=23',           # entrances (mode 0; the match keeps screen 23 with mode -2)
@@ -215,20 +215,15 @@
                 VENUE_DESCRIPTION   = 'Where the match takes place.'
                 MATCH_DESCRIPTION   = 'Exhibition match type.'
             }
-            # Venue = the venue screen's cursor (screen 2).
+            # Venue = the venue screen's cursor (screen 2), in its order; forced 2026-10-12 (screenshots, ring aprons
+            # and set logos). 6 and up are not accepted by the screen (it waits).
             Venues  = @(
-                @{ Name = 'Venue 0'; Id = 0 }
-                @{ Name = 'Venue 1'; Id = 1 }
-                @{ Name = 'Venue 2'; Id = 2 }
-                @{ Name = 'Venue 3'; Id = 3 }
-                @{ Name = 'Venue 4'; Id = 4 }
-                @{ Name = 'Venue 5'; Id = 5 }
-                @{ Name = 'Venue 6'; Id = 6 }
-                @{ Name = 'Venue 7'; Id = 7 }
-                @{ Name = 'Venue 8'; Id = 8 }
-                @{ Name = 'Venue 9'; Id = 9 }
-                @{ Name = 'Venue 10'; Id = 10 }
-                @{ Name = 'Venue 11'; Id = 11 }
+                @{ Name = 'Monday Nitro'; Id = 0 }
+                @{ Name = 'Souled Out'; Id = 1 }
+                @{ Name = 'SuperBrawl'; Id = 2 }
+                @{ Name = 'Bash at the Beach'; Id = 3 }
+                @{ Name = 'Halloween Havoc'; Id = 4 }
+                @{ Name = 'Starrcade'; Id = 5 }
             )
             Matches = @('Single Match', 'Tag Match')
         }
