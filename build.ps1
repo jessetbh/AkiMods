@@ -78,7 +78,8 @@ foreach ($m in $selectedMods) {
         }
         foreach ($src in @($cfg.Values, $over.Values, $generated)) { if ($src) { foreach ($k in $src.Keys) { $values[$k] = $src[$k] } } }
         $toml = Get-Content "$modDir\mod.template.toml" -Raw
-        foreach ($k in $values.Keys) { $toml = $toml.Replace("{{$k}}", "$($values[$k])") }
+        # Twice: a generated value may itself contain placeholders (e.g. {{GAME_TITLE}} in a description).
+        foreach ($pass in 1..2) { foreach ($k in $values.Keys) { $toml = $toml.Replace("{{$k}}", "$($values[$k])") } }
         $toml = [regex]::Replace($toml, '\{\{[A-Z0-9_]+\}\}', '') # unset placeholders render empty
         [IO.File]::WriteAllText("$out\mod.toml", $toml) # no BOM: RecompModTool's TOML parser rejects one
 

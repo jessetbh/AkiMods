@@ -8,8 +8,8 @@
 @{
     Id      = 'aki_quickmatch'
     Sources = @('src\quickmatch.c')
-    Games   = @('nomercy')
-    # Bundled with No Mercy (owner, 2026-10-11): off by default, so it does nothing until enabled.
+    Games   = @('nomercy', 'wm2k')
+    # Bundled with No Mercy (owner, 2026-10-11) and WrestleMania 2000 (2026-10-12): off by default, so it does nothing until enabled.
     Values  = @{}
     PerGame = @{
         # WWF No Mercy (USA, Rev 1)
@@ -88,6 +88,65 @@
             # 0x800A957C per set: 0x42, 1, 0x11, 1, 0x48, 0x20200, 2, 4, 8). Named from screenshots.
             Matches = @('Tag team', 'Singles A', 'Singles B', 'Singles C', 'Three wrestlers A', 'Royal Rumble',
                 'Four wrestlers', 'Triple threat', 'Three wrestlers B')
+        }
+
+        # WWF WrestleMania 2000 (USA, V1.2). Its attract sequence has no demo match (in-engine intro
+        # movie, then the title), so the mod drives the menus to Exhibition > <match> > <venue> > Watch
+        # (CPU vs CPU) itself: README.md, "How it works (WrestleMania 2000)".
+        wm2k = @{
+            Defines = @(
+                '-DQM_INTRO_FUNC=func_8011F078',     # ovl_b: intro main, per frame (takes A/Start)
+                '-DQM_INTRO_SCENE=0x8011BC84u',      # s32: transition script running (0 = none)
+                '-DQM_INTRO_SKIPPABLE=0x8012A2A4u',  # s32: nonzero once Start may skip the intro
+                '-DQM_MODE=0x8003DD00u',             # s32: 1 = leave (fades out; -1 at the end)
+                '-DQM_PAD_FUNC=func_800E24D4',       # ovl_a: controllers -> menu button words, per frame
+                '-DQM_PAD_HELD=0x8011C37Cu',         # u16 button words the menus read
+                '-DQM_PAD_PRESSED=0x8011C37Eu',
+                '-DQM_PAD_REPEAT=0x8011C380u',
+                '-DQM_MENU_SIG=0x801255E4u',         # first word of ovl_c's menu state machine:
+                '-DQM_MENU_SIG_WORD=0x3C038004u',    #   lui $v1, 0x8004 (menus loaded)
+                '-DQM_MENU_SCREEN=0x8003DD04u',      # s16: menu screen id
+                '-DQM_MENU_SCRIPT=0x8011BC84u',      # s32: transition/prompt script (48 = the title's Rumble Pak prompt)
+                '-DQM_MENU_SCREENS=0x8016ECA0u',     # screen records, 0x138 bytes each (ovl_c func_8011EB10):
+                '-DQM_MENU_STRIDE=0x138',            #   +5 cursor
+                '-DQM_MATCH_SCREEN=5',               # Exhibition screen: cursor = match type
+                '-DQM_PER_MATCH=2,5,3,2',            # "Watch" item per match type (single, tag, 3 way, cage)
+                # Screens: 0 title, 1 main menu (0 = Exhibition), 5 Exhibition (match type), 3 venue,
+                # 4 players (Watch, per match type), 10 belt, 19/20 wrestlers, 17 rules, 18 VS, 22 results (0 = Rematch). A = 0x8000, Start = 0x1000.
+                # Entrances play on menu screen 34 (ovl_a + ovl_c still loaded; ovl_d loads at the bell); Start skips them.
+                # After the finish the match code (ovl_d) loops a replay until a button: A ends it (in Watch mode A does
+                # nothing during play; Start would pause). Then the results screen 22: Rematch.
+                '-DQM_PAD_READ_FUNC=func_80004628',  # per-pad records at 0x80095180, 0xC each: +4 held, +6 pressed
+                '-DQM_PAD0_PRESSED=0x80095186u',
+                '-DQM_MATCH_SIG=0x800E1BC0u',        # ovl_d's match loop: addiu $sp, $sp, -0x40 (ovl_a has
+                '-DQM_MATCH_SIG_WORD=0x27BDFFC0u',   #   0x00002821 there)
+                '-DQM_MATCH_BUTTONS=0x8000',
+                '-DQM_ENTRANCE_SCREEN=34',
+                '-DQM_ENTRANCE_BUTTONS=0x1000',
+                '-DQM_MENU_STEPS={0,-1,0x1000},{1,-1,0x8000},{5,-3,0x8000},{3,-2,0x8000},{4,-4,0x8000},{10,-1,0x8000},{19,-1,0x8000},{20,-1,0x8000},{17,-1,0x8000},{18,-1,0x8000},{22,0,0x8000}'
+            )
+            # No Lengths: the match keeps the game's own rules (time limit 30 minutes unless changed on
+            # the rules screen; a pinfall or submission ends it). No "Demo length" option for this game.
+            Text = @{
+                SHORT_DESCRIPTION   = 'Developer tool: boot straight into a CPU-vs-CPU exhibition match in a chosen venue.'
+                DESCRIPTION         = "A testing tool for {{GAME_TITLE}}: with Enabled on, the game skips its intro and walks its own menus to an Exhibition match in Watch mode (CPU vs CPU), in the venue you pick, within about 15 seconds of starting. The match keeps the game's rules (time limit, entrances); when it ends, the next one starts the same way.`n`nOff by default. Turn it off again for normal play: while it's on, the menus press their own buttons."
+                ENABLED_DESCRIPTION = 'Skip the intro and menus, and start a CPU-vs-CPU match with the settings below.'
+                VENUE_DESCRIPTION   = 'Where the match takes place.'
+                MATCH_DESCRIPTION   = 'Exhibition match type.'
+            }
+            # Venue = the venue screen's cursor (0x8016F04D), stored by the game at 0x8009E99B.
+            Venues  = @(
+                @{ Name = 'Raw is War'; Id = 0 }
+                @{ Name = 'Sunday Night Heat'; Id = 1 }
+                @{ Name = 'Royal Rumble'; Id = 2 }
+                @{ Name = 'King of the Ring'; Id = 3 }
+                @{ Name = 'Survivor Series'; Id = 4 }
+                @{ Name = 'WrestleMania'; Id = 5 }
+                @{ Name = 'SummerSlam'; Id = 6 }
+            )
+            EntranceOption = $true
+            # Exhibition match types, in the menu's order (cursor = option - 1).
+            Matches = @('Single Match', 'Tag Match', '3 Way Match', 'Cage Match')
         }
     }
 }

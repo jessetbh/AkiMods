@@ -66,4 +66,60 @@ static inline int qm_area_change_due(int pending_id, int match_frames, int delay
     return pending_id >= 0 && match_frames >= delay && match_frames < 0x8000 && !request_busy;
 }
 
+// Menu-driven quick match, for games whose attract sequence has no demo match (WrestleMania 2000): the
+// mod walks the game's own menus to a CPU-vs-CPU exhibition ("Watch"), one button press per known screen.
+// A step says what to do on one menu screen: which value to put in the screen's cursor, then which
+// buttons to press. Unknown screens are left alone.
+#define QM_CURSOR_KEEP (-1)  // leave the cursor where the game has it
+#define QM_CURSOR_VENUE (-2) // the configured venue (or keep, for "Game's pick")
+#define QM_CURSOR_MATCH (-3) // the configured match type (or keep, for "Game's rotation")
+#define QM_CURSOR_PER_MATCH (-4) // a value per match type (WM2000's "Watch" item: 2 singles, 5 tag, 3 three-way)
+
+typedef struct {
+    short screen;
+    short cursor;
+    unsigned short buttons;
+} qm_menu_step;
+
+// The step for a screen, or 0 when the mod has nothing to do there.
+static inline const qm_menu_step* qm_menu_find(const qm_menu_step* steps, int count, int screen) {
+    for (int i = 0; i < count; i++) {
+        if (steps[i].screen == screen) {
+            return &steps[i];
+        }
+    }
+    return 0;
+}
+
+// The per-match-type value for the match type the menus have selected, or -1 if out of range.
+static inline int qm_per_match(const unsigned char* values, int count, int match_type) {
+    if (match_type < 0 || match_type >= count) {
+        return -1;
+    }
+    return values[match_type];
+}
+
+// Cursor value to store for a step, or -1 to leave it. venue / match are the cursor values chosen in
+// the options (-1 = the game's own choice); per_match = qm_per_match for the selected match type.
+static inline int qm_menu_cursor(const qm_menu_step* step, int venue, int match, int per_match) {
+    if (step->cursor == QM_CURSOR_VENUE) {
+        return venue;
+    }
+    if (step->cursor == QM_CURSOR_MATCH) {
+        return match;
+    }
+    if (step->cursor == QM_CURSOR_PER_MATCH) {
+        return per_match;
+    }
+    return step->cursor;
+}
+
+// Whether to press the step's buttons this frame. idle_frames: frames the screen has been up with no
+// transition running; since_press: frames since the mod last pressed. The first press waits `settle`
+// frames (screens ignore input while they slide in), later ones repeat every `repeat` frames in case
+// the screen missed one.
+static inline int qm_menu_press_due(int idle_frames, int since_press, int settle, int repeat) {
+    return idle_frames >= settle && since_press >= repeat;
+}
+
 #endif
