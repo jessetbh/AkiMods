@@ -9,7 +9,7 @@
     Id      = 'aki_quickmatch'
     Sources = @('src\quickmatch.c')
     Games   = @('nomercy', 'wm2k')
-    # Bundled with No Mercy (owner, 2026-10-11): off by default, so it does nothing until enabled.
+    # Bundled with No Mercy (owner, 2026-10-11) and WrestleMania 2000 (2026-10-12): off by default, so it does nothing until enabled.
     Values  = @{}
     PerGame = @{
         # WWF No Mercy (USA, Rev 1)
