@@ -130,13 +130,15 @@ screen's cursor (u8) at +5.
 | 17 | Rules | A (Decision; the game's saved rules, 30 minutes by default) |
 | 18 | VS | A |
 | 34 | Entrances (still ovl_a + ovl_c; ovl_d loads at the bell) | Start, which skips both entrances, unless **Entrances** = Show |
+| (match) | ovl_d's match loop `func_800E1BC0` (checked by its first word, `0x27BDFFC0`) | `RECOMP_HOOK_RETURN func_80004628` (reads the controllers into the per-pad records `0x80095180`): A on controller 1 every 2 s. In Watch mode A does nothing during play; after the finish it ends the replay loop |
+| 22 | Results (Rematch / Quit) | A on Rematch (cursor 0): the same match again, so a test run keeps going |
 
 **Entrances** option (WM2000): Skip (default; the bell rings ~20 s after launch) or Show (both entrances on the
 stage and ramp first; the bell at ~115 s). Start during the match proper would open the pause menu, but by then ovl_c
 is gone and the mod does nothing.
 
-The match runs as screen 34; the mod then has nothing to do until the menus come back after it. Neither hooked
-function has a hand-edit or a post-recompile repair in Wm2kRecomp (checked by diffing a fresh N64Recomp output
+The match runs as screen 34. None of the three hooked functions (`func_8011F078`, `func_800E24D4`, `func_80004628`)
+has a hand-edit or a post-recompile repair in Wm2kRecomp (checked by diffing a fresh N64Recomp output
 against the fixed `RecompiledFuncs`: 28 functions differ, none of them hooked). WM2000 V1.2 (USA) addresses.
 
 No match length option: the rules screen keeps the game's own time limit (its popup list has no stable byte the mod

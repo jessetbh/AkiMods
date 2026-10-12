@@ -48,6 +48,12 @@
 //   QM_MATCH_SCREEN      the screen whose cursor is the match type; QM_PER_MATCH = { value per match type }
 //                        for QM_CURSOR_PER_MATCH steps
 //   QM_MENU_STEPS        { screen, cursor, buttons } list
+// During the match (optional):
+//   QM_PAD_READ_FUNC     reads the controllers into the per-pad records, once per frame (menus and match loop)
+//   QM_PAD0_PRESSED      u16 controller 1's newly pressed buttons in its record
+//   QM_MATCH_SIG / QM_MATCH_SIG_WORD   u32 at QM_MATCH_SIG equals QM_MATCH_SIG_WORD while the match code is loaded
+//   QM_MATCH_BUTTONS     pressed every QM_MATCH_REPEAT frames there (WM2000: A ends the post-match replay; in
+//                        Watch mode it does nothing during play)
 //   QM_ENTRANCE_SCREEN / QM_ENTRANCE_BUTTONS   screen where the entrances play and the button that skips them,
 //                        pressed there unless the "entrances" option says Show (optional)
 
@@ -214,3 +220,21 @@ RECOMP_HOOK_RETURN(AKI_STRINGIFY(QM_PAD_FUNC)) void qm_after_pad(void) {
 }
 #endif
 
+#ifdef QM_MATCH_SIG
+#define QM_MATCH_REPEAT 60 // frames between presses during the match (2 s at 30 fps)
+
+static int match_since_press = 0;
+
+// After the game reads the controllers, while the match code runs: press QM_MATCH_BUTTONS now and then, so the
+// replay after the finish ends and the results screen (a menu step) comes up.
+RECOMP_HOOK_RETURN(AKI_STRINGIFY(QM_PAD_READ_FUNC)) void qm_after_pad_read(void) {
+    if (!enabled() || RDRAM_U32(QM_MATCH_SIG) != QM_MATCH_SIG_WORD) {
+        match_since_press = 0;
+        return;
+    }
+    if (++match_since_press >= QM_MATCH_REPEAT) {
+        *(volatile u16*)QM_PAD0_PRESSED |= QM_MATCH_BUTTONS;
+        match_since_press = 0;
+    }
+}
+#endif

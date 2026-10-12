@@ -112,11 +112,18 @@
                 '-DQM_MATCH_SCREEN=5',               # Exhibition screen: cursor = match type
                 '-DQM_PER_MATCH=2,5,3,2',            # "Watch" item per match type (single, tag, 3 way, cage)
                 # Screens: 0 title, 1 main menu (0 = Exhibition), 5 Exhibition (match type), 3 venue,
-                # 4 players (Watch, per match type), 10 belt, 19/20 wrestlers, 17 rules, 18 VS. A = 0x8000, Start = 0x1000.
+                # 4 players (Watch, per match type), 10 belt, 19/20 wrestlers, 17 rules, 18 VS, 22 results (0 = Rematch). A = 0x8000, Start = 0x1000.
                 # Entrances play on menu screen 34 (ovl_a + ovl_c still loaded; ovl_d loads at the bell); Start skips them.
+                # After the finish the match code (ovl_d) loops a replay until a button: A ends it (in Watch mode A does
+                # nothing during play; Start would pause). Then the results screen 22: Rematch.
+                '-DQM_PAD_READ_FUNC=func_80004628',  # per-pad records at 0x80095180, 0xC each: +4 held, +6 pressed
+                '-DQM_PAD0_PRESSED=0x80095186u',
+                '-DQM_MATCH_SIG=0x800E1BC0u',        # ovl_d's match loop: addiu $sp, $sp, -0x40 (ovl_a has
+                '-DQM_MATCH_SIG_WORD=0x27BDFFC0u',   #   0x00002821 there)
+                '-DQM_MATCH_BUTTONS=0x8000',
                 '-DQM_ENTRANCE_SCREEN=34',
                 '-DQM_ENTRANCE_BUTTONS=0x1000',
-                '-DQM_MENU_STEPS={0,-1,0x1000},{1,-1,0x8000},{5,-3,0x8000},{3,-2,0x8000},{4,-4,0x8000},{10,-1,0x8000},{19,-1,0x8000},{20,-1,0x8000},{17,-1,0x8000},{18,-1,0x8000}'
+                '-DQM_MENU_STEPS={0,-1,0x1000},{1,-1,0x8000},{5,-3,0x8000},{3,-2,0x8000},{4,-4,0x8000},{10,-1,0x8000},{19,-1,0x8000},{20,-1,0x8000},{17,-1,0x8000},{18,-1,0x8000},{22,0,0x8000}'
             )
             # No Lengths: the match keeps the game's own rules (time limit 30 minutes unless changed on
             # the rules screen; a pinfall or submission ends it). No "Demo length" option for this game.
