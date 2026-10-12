@@ -2,13 +2,13 @@
 
 A **developer/testing** mod: with **Enabled** on, the game skips its intro and title wait and starts a CPU-vs-CPU
 match within seconds, in the venue you pick. Off by default, so it does nothing for players until switched on.
-Bundled with No Mercy, WrestleMania 2000, Virtual Pro Wrestling 2 and WCW/nWo Revenge (`stage.ps1`), so it is in every install's Mods menu.
+Bundled with No Mercy, WrestleMania 2000, Virtual Pro Wrestling 2, WCW/nWo Revenge and WCW vs. nWo World Tour (`stage.ps1`), so it is in every install's Mods menu.
 
 How it gets there depends on the game:
 
 - **Attract demo** (No Mercy, VPW2): the game's own attract-mode demo match (no HUD, no controller input), started
   right away, with its venue and length replaced.
-- **Menu-driven** (WrestleMania 2000 and Revenge, whose attract sequences have no demo match): the mod walks the game's own menus,
+- **Menu-driven** (WrestleMania 2000, Revenge and World Tour, whose attract sequences have no demo match): the mod walks the game's own menus,
   pressing one button per known screen, to an Exhibition match in **Watch** mode (CPU vs CPU). The match keeps the
   game's rules and entrances, with its HUD.
 
@@ -232,6 +232,42 @@ set, drawn in the entrance scene before the match (Entrances = Show).
 | 3 | Bash at the Beach | beach hut set, BASH apron |
 | 4 | Halloween Havoc | HALLOWEEN HAVOC mat |
 | 5 | Starrcade | STARRCADE apron and set |
+
+## How it works (World Tour)
+
+The Revenge driver with two additions, both generic: a screen that takes a **sequence** of presses, and a venue
+written straight into the rules.
+
+| Piece | World Tour |
+|---|---|
+| Pad hook | `RECOMP_HOOK_RETURN func_800C383C` (button words `0x800E630C/0E/10`; controller 1's record `0x80047B24/26`) |
+| Menus loaded | first word of `func_800A9910` = `0x3C04800E` (ovl_b has `0x3C04800F` there) |
+| Screen / mode | `0x80034824` (s16) / `0x80034820` |
+| Screen records | `0x800DD430 + screen * 0x138`, cursor at +5 |
+
+| Screen | What it is | The mod |
+|---|---|---|
+| 0 | Intro and title (the intro ignores Start for ~30 s) | Start |
+| 1 | Mode select (1 = Exhibition) | cursor 1, A |
+| 9 | Exhibition: Single / Tag / Handicap / Battle Royal | Single only, A |
+| 10 | Corners: player or CPU each | sequence: down (red to CPU), right, down (blue to CPU), A |
+| 23, 24 | Wrestlers | A |
+| 17 | Rules | the **Arena** setting at `0x8038311C` (+1, +2; fixed address), then A |
+| 22 | Handicap | A |
+| 35 | Match | (nothing) |
+
+World Tour has **one arena in four federation themes** (the rules screen's Arena: WCW, NWO, DOA, IU; 4 = RANDOM, the
+game's pick). The Venue option picks the theme. A fresh save without a Controller Pak note asks to create one before
+the title; answer it once (the mod doesn't).
+
+No repaired functions (fresh N64Recomp output = `RecompiledFuncs`); WT's own patches replace none of the hooks.
+
+| Id | Option | Evidence |
+|---|---|---|
+| 0 | WCW | blue WCW mat, white light panels on the floor |
+| 1 | NWO | black nWo mat, blue floor panels |
+| 2 | DOA | teal Dead or Alive mat, floodlight banks |
+| 3 | IU | blue Independent Union mat, wooden gym floor |
 
 ## Option 2: a real exhibition match
 

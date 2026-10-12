@@ -8,8 +8,8 @@
 @{
     Id      = 'aki_quickmatch'
     Sources = @('src\quickmatch.c')
-    Games   = @('nomercy', 'wm2k', 'vpw2', 'revenge')
-    # Bundled with No Mercy (owner, 2026-10-11), WrestleMania 2000, VPW2 and Revenge (2026-10-12): off by default, so it does nothing until enabled.
+    Games   = @('nomercy', 'wm2k', 'vpw2', 'revenge', 'wt')
+    # Bundled with No Mercy (owner, 2026-10-11), WrestleMania 2000, VPW2, Revenge and World Tour (2026-10-12): off by default, so it does nothing until enabled.
     Values  = @{}
     PerGame = @{
         # WWF No Mercy (USA, Rev 1)
@@ -226,6 +226,53 @@
                 @{ Name = 'Starrcade'; Id = 5 }
             )
             Matches = @('Single Match', 'Tag Match')
+        }
+
+        # WCW vs. nWo World Tour (USA). Menu-driven like Revenge (the 1997 engine: intro, title and menus in ovl_a). The
+        # arena is the rules screen's "Arena" (the ring mat design), set through the rules struct: README "(World Tour)".
+        wt = @{
+            Defines = @(
+                '-DQM_MODE=0x80034820u',             # s32: nonzero while leaving the menus
+                '-DQM_PAD_FUNC=func_800C383C',       # ovl_a: controllers -> menu button words, per frame
+                '-DQM_PAD_HELD=0x800E630Cu',
+                '-DQM_PAD_PRESSED=0x800E630Eu',
+                '-DQM_PAD_REPEAT=0x800E6310u',
+                '-DQM_PAD1_HELD=0x80047B24u',        # controller 1's record
+                '-DQM_PAD1_PRESSED=0x80047B26u',
+                '-DQM_MENU_SIG=0x800A9910u',         # first word of ovl_a's menu state machine func_800A9910:
+                '-DQM_MENU_SIG_WORD=0x3C04800Eu',    #   lui $a0, 0x800E (ovl_b has 0x3C04800F there)
+                '-DQM_MENU_SCREEN=0x80034824u',      # s16: menu screen id (0 = title)
+                '-DQM_MENU_SCRIPT=0x80034824u',      # no separate prompt script found: the screen id itself
+                '-DQM_MENU_SCREENS=0x800DD430u',     # screen records, 0x138 bytes each: +5 cursor
+                '-DQM_MENU_STRIDE=0x138',
+                '-DQM_MATCH_SCREEN=9',               # Exhibition screen: cursor = match type
+                '-DQM_PER_MATCH=0',
+                # Corners (screen 10): red to CPU (down), select blue (right), blue to CPU (down), A.
+                '-DQM_SEQ_SCREEN=10',
+                '-DQM_SEQ_BUTTONS=0x0400,0x0100,0x0400,0x8000',
+                # Rules (screen 17): arena = the mat, u8 at 0x8038311C (also +1, +2), the same in every session.
+                '-DQM_VENUE_SCREEN=17',
+                '-DQM_VENUE_ADDR=0x8038311Cu',
+                '-DQM_VENUE_OFFSETS=0,1,2',
+                # Screens: 0 title (Start), 1 mode select (1 = Exhibition), 9 match type, 10 corners, 23/24 wrestlers,
+                # 17 rules (A), 22 handicap (A).
+                '-DQM_MENU_STEPS={0,-1,0x1000},{1,1,0x8000},{9,-3,0x8000},{23,-1,0x8000},{24,-1,0x8000},{17,-1,0x8000},{22,-1,0x8000}'
+            )
+            Text = @{
+                SHORT_DESCRIPTION   = 'Developer tool: boot straight into a CPU-vs-CPU exhibition match.'
+                DESCRIPTION         = "A testing tool for {{GAME_TITLE}}: with Enabled on, the game walks its own menus to an Exhibition match, CPU vs CPU, on the ring mat you pick, within about 20 seconds of starting. The match keeps the game's rules.`n`nOff by default. Turn it off again for normal play: while it's on, the menus press their own buttons."
+                ENABLED_DESCRIPTION = 'Skip the menus, and start a CPU-vs-CPU match with the settings below.'
+                VENUE_DESCRIPTION   = "The ring mat (the rules screen's Arena setting; World Tour has one arena)."
+                MATCH_DESCRIPTION   = 'Exhibition match type.'
+            }
+            # Arena = the rules' mat index: 0 WCW, 1 NWO, 2 DOA, 3 IU (4 = RANDOM, the game's pick).
+            Venues  = @(
+                @{ Name = 'WCW'; Id = 0 }
+                @{ Name = 'NWO'; Id = 1 }
+                @{ Name = 'DOA'; Id = 2 }
+                @{ Name = 'IU'; Id = 3 }
+            )
+            Matches = @('Single Match')
         }
     }
 }
