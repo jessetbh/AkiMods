@@ -114,6 +114,15 @@ static inline int qm_menu_cursor(const qm_menu_step* step, int venue, int match,
     return step->cursor;
 }
 
+// A screen that needs several presses in order (World Tour's corner screen: down, right, down, A). Returns the
+// buttons for the index-th press; the last entry repeats once the sequence is used up.
+static inline unsigned short qm_seq_buttons(const unsigned short* seq, int count, int index) {
+    if (count <= 0) {
+        return 0;
+    }
+    return seq[(index >= 0 && index < count) ? index : count - 1];
+}
+
 // Whether to press the step's buttons this frame. idle_frames: frames the screen has been up with no
 // transition running; since_press: frames since the mod last pressed. The first press waits `settle`
 // frames (screens ignore input while they slide in), later ones repeat every `repeat` frames in case

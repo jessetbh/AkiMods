@@ -99,6 +99,16 @@ static void test_menu_steps(void) {
     CHECK_EQ(qm_menu_press_due(50, 30, 20, 30), 1);
 }
 
+static void test_sequences(void) {
+    static const unsigned short seq[] = { 0x0400, 0x0100, 0x0400, 0x8000 };
+    CHECK_EQ(qm_seq_buttons(seq, 4, 0), 0x0400);
+    CHECK_EQ(qm_seq_buttons(seq, 4, 1), 0x0100);
+    CHECK_EQ(qm_seq_buttons(seq, 4, 3), 0x8000);
+    CHECK_EQ(qm_seq_buttons(seq, 4, 9), 0x8000); // used up: keeps pressing the last (A)
+    CHECK_EQ(qm_seq_buttons(seq, 4, -1), 0x8000);
+    CHECK_EQ(qm_seq_buttons(seq, 0, 0), 0);
+}
+
 int main(void) {
     test_idle_timer();
     test_attract_counter();
@@ -106,6 +116,7 @@ int main(void) {
     test_length_index();
     test_staged_venues();
     test_menu_steps();
+    test_sequences();
     printf("[quickmatch tests] %d checks, %d failed\n", checks, failures);
     return failures != 0;
 }

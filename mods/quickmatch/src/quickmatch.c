@@ -56,6 +56,9 @@
 //   QM_MATCH_SIG / QM_MATCH_SIG_WORD   u32 at QM_MATCH_SIG equals QM_MATCH_SIG_WORD while the match code is loaded
 //   QM_MATCH_BUTTONS     pressed every QM_MATCH_REPEAT frames there (WM2000: A ends the post-match replay; in
 //                        Watch mode it does nothing during play)
+//   QM_SEQ_SCREEN / QM_SEQ_BUTTONS   a screen that takes a sequence of presses instead of one step (optional)
+//   QM_VENUE_SCREEN / QM_VENUE_PTR / QM_VENUE_OFFSETS   on that screen, before pressing, store the venue at
+//                        *(u32*)QM_VENUE_PTR + each offset (World Tour: the rules' arena/mat setting) (optional)
 //   QM_ENTRANCE_SCREEN / QM_ENTRANCE_BUTTONS   screen where the entrances play and the button that skips them,
 //                        pressed there unless the "entrances" option says Show (optional). The menu driver only
 //                        presses while QM_MODE is 0, so a screen the match itself keeps (Revenge: 23, mode -2 in
@@ -174,6 +177,10 @@ static int menu_screen = -1;
 static int menu_script = -1;
 static int menu_idle = 0;
 static int menu_since_press = 0;
+#ifdef QM_SEQ_SCREEN
+static const unsigned short seq_buttons[] = { QM_SEQ_BUTTONS };
+static int seq_index = 0;
+#endif
 
 // After the game reads the controllers: on each known menu screen, set its cursor and press the
 // step's buttons for one frame (the button words are rebuilt from the controllers every frame).
@@ -187,6 +194,11 @@ RECOMP_HOOK_RETURN(AKI_STRINGIFY(QM_PAD_FUNC)) void qm_after_pad(void) {
     int busy = RDRAM_S32(QM_MODE) != 0; // leaving the menus
     // A screen counts as settled once neither it nor its transition/prompt script has changed for a while.
     if (screen != menu_screen || script != menu_script || busy) {
+        if (screen != menu_screen) {
+#ifdef QM_SEQ_SCREEN
+            seq_index = 0;
+#endif
+        }
         menu_screen = screen;
         menu_script = script;
         menu_idle = 0;
@@ -195,6 +207,13 @@ RECOMP_HOOK_RETURN(AKI_STRINGIFY(QM_PAD_FUNC)) void qm_after_pad(void) {
     }
     menu_since_press++;
     const qm_menu_step* step = qm_menu_find(menu_steps, (int)(sizeof(menu_steps) / sizeof(menu_steps[0])), screen);
+#ifdef QM_SEQ_SCREEN
+    qm_menu_step seq_step = { QM_SEQ_SCREEN, QM_CURSOR_KEEP, 0 };
+    if (screen == QM_SEQ_SCREEN) {
+        seq_step.buttons = qm_seq_buttons(seq_buttons, (int)(sizeof(seq_buttons) / sizeof(seq_buttons[0])), seq_index);
+        step = &seq_step;
+    }
+#endif
 #ifdef QM_ENTRANCE_SCREEN
     // "entrances" option: 0 = skip, 1 = show
     static const qm_menu_step skip_entrances = { QM_ENTRANCE_SCREEN, QM_CURSOR_KEEP, QM_ENTRANCE_BUTTONS };
@@ -218,6 +237,17 @@ RECOMP_HOOK_RETURN(AKI_STRINGIFY(QM_PAD_FUNC)) void qm_after_pad(void) {
         if (cursor >= 0) {
             RDRAM_U8(record + 5) = (u8)cursor;
         }
+#ifdef QM_VENUE_SCREEN
+        if (screen == QM_VENUE_SCREEN && venue >= 0) {
+            static const u8 venue_offsets[] = { QM_VENUE_OFFSETS };
+            u32 base = RDRAM_U32(QM_VENUE_PTR);
+            if (base >= 0x80000000u && base < 0x80800000u) {
+                for (int i = 0; i < (int)sizeof(venue_offsets); i++) {
+                    RDRAM_U8(base + venue_offsets[i]) = (u8)venue;
+                }
+            }
+        }
+#endif
         *(volatile u16*)QM_PAD_HELD |= step->buttons;
         *(volatile u16*)QM_PAD_PRESSED |= step->buttons;
         *(volatile u16*)QM_PAD_REPEAT |= step->buttons;
@@ -227,6 +257,11 @@ RECOMP_HOOK_RETURN(AKI_STRINGIFY(QM_PAD_FUNC)) void qm_after_pad(void) {
         *(volatile u16*)QM_PAD1_PRESSED |= step->buttons;
 #endif
         menu_since_press = 0;
+#ifdef QM_SEQ_SCREEN
+        if (screen == QM_SEQ_SCREEN) {
+            seq_index++;
+        }
+#endif
     }
 }
 #endif
