@@ -11,6 +11,7 @@
 
 #define RDRAM_U8(addr)  (*(volatile u8*)(addr))
 #define RDRAM_S32(addr) (*(volatile s32*)(addr))
+#define RDRAM_U32(addr) (*(volatile u32*)(addr))
 
 // Per game (mod.psd1 PerGame.Defines):
 //   QM_INTRO_FUNC        intro (logos + intro movie) main, per frame
@@ -47,6 +48,8 @@
 //   QM_MATCH_SCREEN      the screen whose cursor is the match type; QM_PER_MATCH = { value per match type }
 //                        for QM_CURSOR_PER_MATCH steps
 //   QM_MENU_STEPS        { screen, cursor, buttons } list
+//   QM_ENTRANCE_SCREEN / QM_ENTRANCE_BUTTONS   screen where the entrances play and the button that skips them,
+//                        pressed there unless the "entrances" option says Show (optional)
 
 static const u8 venue_ids[] = { QM_VENUE_IDS };
 #ifdef QM_LENGTH_IDS
@@ -163,7 +166,7 @@ static int menu_since_press = 0;
 // After the game reads the controllers: on each known menu screen, set its cursor and press the
 // step's buttons for one frame (the button words are rebuilt from the controllers every frame).
 RECOMP_HOOK_RETURN(AKI_STRINGIFY(QM_PAD_FUNC)) void qm_after_pad(void) {
-    if (!enabled() || *(volatile u32*)QM_MENU_SIG != QM_MENU_SIG_WORD) {
+    if (!enabled() || RDRAM_U32(QM_MENU_SIG) != QM_MENU_SIG_WORD) {
         menu_screen = -1;
         return;
     }
@@ -180,6 +183,13 @@ RECOMP_HOOK_RETURN(AKI_STRINGIFY(QM_PAD_FUNC)) void qm_after_pad(void) {
     }
     menu_since_press++;
     const qm_menu_step* step = qm_menu_find(menu_steps, (int)(sizeof(menu_steps) / sizeof(menu_steps[0])), screen);
+#ifdef QM_ENTRANCE_SCREEN
+    // "entrances" option: 0 = skip, 1 = show
+    static const qm_menu_step skip_entrances = { QM_ENTRANCE_SCREEN, QM_CURSOR_KEEP, QM_ENTRANCE_BUTTONS };
+    if (screen == QM_ENTRANCE_SCREEN && recomp_get_config_u32("entrances") == 0) {
+        step = &skip_entrances;
+    }
+#endif
     if (step == 0 || busy) {
         return;
     }
@@ -203,3 +213,4 @@ RECOMP_HOOK_RETURN(AKI_STRINGIFY(QM_PAD_FUNC)) void qm_after_pad(void) {
     }
 }
 #endif
+

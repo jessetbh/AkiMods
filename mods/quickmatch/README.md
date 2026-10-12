@@ -1,9 +1,16 @@
 # Quick Match (`aki_quickmatch`)
 
-A **developer/testing** mod: with **Enabled** on, the game skips its intro and title wait and starts its own
-attract-mode demo match (CPU vs CPU, no HUD, no controller input) within seconds, in the venue you pick. Off
-by default, so it does nothing for players until switched on. Bundled with No Mercy (`stage.ps1`), so it is in
-every No Mercy install's Mods menu.
+A **developer/testing** mod: with **Enabled** on, the game skips its intro and title wait and starts a CPU-vs-CPU
+match within seconds, in the venue you pick. Off by default, so it does nothing for players until switched on.
+Bundled with No Mercy and WrestleMania 2000 (`stage.ps1`), so it is in every install's Mods menu.
+
+How it gets there depends on the game:
+
+- **Attract demo** (No Mercy): the game's own attract-mode demo match (no HUD, no controller input), started
+  right away, with its venue and length replaced.
+- **Menu-driven** (WrestleMania 2000, whose attract sequence has no demo match): the mod walks the game's own menus,
+  pressing one button per known screen, to an Exhibition match in **Watch** mode (CPU vs CPU). The match keeps the
+  game's rules and entrances, with its HUD.
 
 Options (Mods menu, or `mod_config\aki_quickmatch.json`):
 
@@ -11,8 +18,9 @@ Options (Mods menu, or `mod_config\aki_quickmatch.json`):
 |---|---|
 | Enabled | off (default) / on |
 | Venue | Game's pick, or one of the game's venues (list per game below) |
-| Match | Game's rotation, or one of the game's demo match sets |
-| Demo length | No time limit (default), 1 minute (the game's demo length), 2 / 3 / 5 / 10 / 30 minutes |
+| Match | Game's rotation, or one of the game's demo match sets (menu-driven games: match types) |
+| Demo length | No time limit (default), 1 minute (the game's demo length), 2 / 3 / 5 / 10 / 30 minutes (attract-demo games only) |
+| Entrances | Skip (default) / Show (menu-driven games: WrestleMania 2000) |
 
 A pinfall or submission still ends the match; the next demo then starts at once, in the same venue.
 
@@ -94,6 +102,61 @@ The exact rules per set (handicap, special referee, ...) aren't decoded; the nam
 - Forced venues load and are recognised by the renderer's venue log (Raw, SmackDown, Survivor Series,
   Armageddon, Backstage hallway).
 - Demo length: no time limit keeps the demo running past the stock 1-minute end.
+
+## How it works (WrestleMania 2000)
+
+WM2000's attract sequence is an in-engine intro movie (randomized cuts through the arenas) and the title screen, then
+the movie again: no CPU match anywhere. So the mod drives the menus, the way a player would, to
+Exhibition > *match type* > *venue* > **Watch** > Non Title Match > (wrestlers) > rules > VS screen.
+
+| Step | Hook | What the mod does |
+|---|---|---|
+| Intro (ovl_b) | `RECOMP_HOOK func_8011F078` (intro main, every frame) | What Start does: once the intro accepts Start (`0x8012A2A4` != 0, no script running at `0x8011BC84`), set mode `0x8003DD00` = 1 |
+| Menus (ovl_a + ovl_c) | `RECOMP_HOOK_RETURN func_800E24D4` (copies the controllers into the menus' button words `0x8011C37C/7E/80`, every frame, before the menus run) | On each known screen (`0x8003DD04`), once neither the screen nor its script (`0x8011BC84`) has changed for 20 frames: set the screen's cursor and press A (Start on the title) for one frame; again every 30 frames until the screen changes |
+
+The menus only run while ovl_c is loaded: the mod checks the first word of ovl_c's state machine (`0x801255E4` =
+`lui $v1, 0x8004`) before touching anything. Screen records are 0x138 bytes at `0x8016ECA0 + screen * 0x138`, with the
+screen's cursor (u8) at +5.
+
+| Screen | What it is | The mod |
+|---|---|---|
+| 0 | Title ("Rumble Pak supported" prompt = script 48) | Start |
+| 1 | Main menu (cursor 0 = Exhibition) | A, cursor left alone (writing it while the menu slides in freezes its animation) |
+| 5 | Exhibition: Single / Tag / 3 Way / Cage | the Match option's type, A |
+| 3 | Venue | the Venue option's venue, A |
+| 4 | Players | Watch (item 2 singles and cage, 5 tag, 3 three-way), A |
+| 10 | Belt | A (Non Title Match) |
+| 19, 20 | Wrestlers (the same two screens repeat for tag and three-way) | A (the highlighted wrestler) |
+| 17 | Rules | A (Decision; the game's saved rules, 30 minutes by default) |
+| 18 | VS | A |
+| 34 | Entrances (still ovl_a + ovl_c; ovl_d loads at the bell) | Start, which skips both entrances, unless **Entrances** = Show |
+
+**Entrances** option (WM2000): Skip (default; the bell rings ~20 s after launch) or Show (both entrances on the
+stage and ramp first; the bell at ~115 s). Start during the match proper would open the pause menu, but by then ovl_c
+is gone and the mod does nothing.
+
+The match runs as screen 34; the mod then has nothing to do until the menus come back after it. Neither hooked
+function has a hand-edit or a post-recompile repair in Wm2kRecomp (checked by diffing a fresh N64Recomp output
+against the fixed `RecompiledFuncs`: 28 functions differ, none of them hooked). WM2000 V1.2 (USA) addresses.
+
+No match length option: the rules screen keeps the game's own time limit (its popup list has no stable byte the mod
+could set), and a pinfall or submission ends the match as usual.
+
+### WrestleMania 2000 venues
+
+The venue screen's cursor is the venue id (`0x8016F04D`, stored by the game at `0x8009E99B`, read by ovl_a's match
+setup). Each venue's arena includes its entrance stage (wrestlers walk down the ramp in the same scene), so there are
+no separate stage ids. No backstage areas.
+
+| Id | Option | Evidence |
+|---|---|---|
+| 0 | Raw is War | venue screen logo; match screenshots |
+| 1 | Sunday Night Heat | venue screen logo; match screenshots |
+| 2 | Royal Rumble | venue screen logo; match screenshots |
+| 3 | King of the Ring | venue screen logo; match screenshots |
+| 4 | Survivor Series | venue screen logo; match screenshots |
+| 5 | WrestleMania | venue screen logo; match screenshots |
+| 6 | SummerSlam | venue screen logo; match screenshots |
 
 ## Option 2: a real exhibition match
 

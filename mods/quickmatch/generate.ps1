@@ -45,6 +45,21 @@ default = {{LENGTH_DEFAULT}}
 '@.Replace('{{LENGTH_OPTIONS}}', (TomlList $lengthNames)).Replace('{{LENGTH_DEFAULT}}', (TomlString $lengthNames[0]))
 }
 
+$entranceOption = ''
+if ($Overrides.EntranceOption) {
+    $entranceOption = @'
+[[manifest.config_options]]
+id = "entrances"
+name = "Entrances"
+description = "Skip the wrestlers' entrances (the match starts right away), or show them (for the entrance stage)."
+type = "Enum"
+options = [ "Skip", "Show" ]
+default = "Skip"
+
+
+'@
+}
+
 # Manifest texts. The defaults describe the attract-demo games (No Mercy); menu-driven games override them.
 $text = @{
     SHORT_DESCRIPTION   = 'Developer tool: boot straight into the demo match in a chosen venue.'
@@ -59,6 +74,7 @@ $result = @{
     VENUE_OPTIONS = TomlList $venueNames
     MATCH_OPTIONS = TomlList $matchNames
     LENGTH_OPTION = $lengthOption
+    ENTRANCE_OPTION = $entranceOption
 }
 foreach ($k in $text.Keys) { $result[$k] = $text[$k] }
 $result

@@ -37,7 +37,7 @@ type = "Enum"
 options = {{MATCH_OPTIONS}}
 default = "Game's rotation"
 
-{{LENGTH_OPTION}}[inputs]
+{{LENGTH_OPTION}}{{ENTRANCE_OPTION}}[inputs]
 elf_path = "mod.elf"
 mod_filename = "{{MOD_ID}}"
 func_reference_syms_file = "{{SYMS}}"
