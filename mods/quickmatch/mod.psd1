@@ -8,7 +8,7 @@
 @{
     Id      = 'aki_quickmatch'
     Sources = @('src\quickmatch.c')
-    Games   = @('nomercy', 'wm2k', 'vpw2', 'revenge', 'wt')
+    Games   = @('nomercy', 'wm2k', 'vpw2', 'revenge', 'wt', 'vpw64')
     # Bundled with No Mercy (owner, 2026-10-11), WrestleMania 2000, VPW2, Revenge and World Tour (2026-10-12): off by default, so it does nothing until enabled.
     Values  = @{}
     PerGame = @{
@@ -271,6 +271,55 @@
                 @{ Name = 'NWO'; Id = 1 }
                 @{ Name = 'DOA'; Id = 2 }
                 @{ Name = 'IU'; Id = 3 }
+            )
+            Matches = @('Single Match')
+        }
+
+        # Virtual Pro Wrestling 64 (Japan): World Tour's 1997 engine and menus (README "How it works (World Tour)"), its
+        # own addresses. The rules screen's venue (会場) picks one of seven federation arenas.
+        vpw64 = @{
+            Defines = @(
+                '-DQM_MODE=0x80040BA0u',
+                '-DQM_PAD_FUNC=func_800C1F50',       # ovl_a: controllers -> menu button words
+                '-DQM_PAD_HELD=0x800EF6BCu',
+                '-DQM_PAD_PRESSED=0x800EF6BEu',
+                '-DQM_PAD_REPEAT=0x800EF6C0u',
+                '-DQM_PAD1_HELD=0x800592F4u',        # controller 1's record
+                '-DQM_PAD1_PRESSED=0x800592F6u',
+                '-DQM_MENU_SIG=0x800A432Cu',         # first word of ovl_a's menu state machine func_800A432C:
+                '-DQM_MENU_SIG_WORD=0x240EFFFFu',    #   addiu $t6, $zero, -1 (ovl_b has 0x3C07800F there)
+                '-DQM_MENU_SCREEN=0x80040BA4u',
+                '-DQM_MENU_SCRIPT=0x80040BA4u',
+                '-DQM_MENU_SCREENS=0x800DF840u',     # screen records, 0x138 bytes each: +5 cursor
+                '-DQM_MENU_STRIDE=0x138',
+                '-DQM_MATCH_SCREEN=9',
+                '-DQM_PER_MATCH=0',
+                '-DQM_SEQ_SCREEN=10',
+                '-DQM_SEQ_BUTTONS=0x0400,0x0100,0x0400,0x8000',
+                '-DQM_VENUE_SCREEN=17',
+                '-DQM_VENUE_ADDR=0x803191DCu',       # u8 venue (also +1, +2), fixed address
+                '-DQM_VENUE_OFFSETS=0,1,2',
+                # Screens as World Tour: 0 title, 1 mode select (1 = Exhibition), 9 match type, 10 corners,
+                # 23/24 wrestlers, 17 rules, 22 handicap. Two Controller Pak / Rumble Pak prompts before the title
+                # take A (screen 0, so Start works there too).
+                '-DQM_MENU_STEPS={0,-1,0x1000},{1,1,0x8000},{9,-3,0x8000},{23,-1,0x8000},{24,-1,0x8000},{17,-1,0x8000},{22,-1,0x8000}'
+            )
+            Text = @{
+                SHORT_DESCRIPTION   = 'Developer tool: boot straight into a CPU-vs-CPU exhibition match in a chosen arena.'
+                DESCRIPTION         = "A testing tool for {{GAME_TITLE}}: with Enabled on, the game walks its own menus to an Exhibition match, CPU vs CPU, in the federation arena you pick. The match keeps the game's rules.`n`nOff by default. Turn it off again for normal play: while it's on, the menus press their own buttons."
+                ENABLED_DESCRIPTION = 'Skip the menus, and start a CPU-vs-CPU match with the settings below.'
+                VENUE_DESCRIPTION   = "The arena (the rules screen's venue setting: one per federation)."
+                MATCH_DESCRIPTION   = 'Exhibition match type.'
+            }
+            # Venue = the rules' venue index: 0 = random (the game's pick), then the federations in the screen's order.
+            Venues  = @(
+                @{ Name = 'NSW'; Id = 1 }
+                @{ Name = 'EWF'; Id = 2 }
+                @{ Name = 'WOU'; Id = 3 }
+                @{ Name = 'DAW'; Id = 4 }
+                @{ Name = 'ILW'; Id = 5 }
+                @{ Name = 'WCW'; Id = 6 }
+                @{ Name = 'NWO'; Id = 7 }
             )
             Matches = @('Single Match')
         }
