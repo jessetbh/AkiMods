@@ -62,7 +62,7 @@
                 @{ Name = 'No Mercy'; Id = 1 }
                 @{ Name = 'SmackDown'; Id = 2 }
                 @{ Name = 'Arena 3'; Id = 3 }
-                @{ Name = 'Dome (entrance)'; Id = 4 }
+                @{ Name = 'Arena 4'; Id = 4 }
                 @{ Name = 'Survivor Series'; Id = 5 }
                 @{ Name = 'Arena 6'; Id = 6 }
                 @{ Name = 'WrestleMania'; Id = 7 }
