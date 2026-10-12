@@ -301,8 +301,9 @@
                 '-DQM_VENUE_OFFSETS=0,1,2',
                 # Screens as World Tour: 0 title, 1 mode select (1 = Exhibition), 9 match type, 10 corners,
                 # 23/24 wrestlers, 17 rules, 22 handicap. Two Controller Pak / Rumble Pak prompts before the title
-                # take A (screen 0, so Start works there too).
-                '-DQM_MENU_STEPS={0,-1,0x1000},{1,1,0x8000},{9,-3,0x8000},{23,-1,0x8000},{24,-1,0x8000},{17,-1,0x8000},{22,-1,0x8000}'
+                # take A (screen 0, so Start works there too). After the match: 25 results (A), 26 post-match menu
+                # (+5 cursor: 9 End, 10 Rematch, ...; Rematch goes back through 22 into the same match setup).
+                '-DQM_MENU_STEPS={0,-1,0x1000},{1,1,0x8000},{9,-3,0x8000},{23,-1,0x8000},{24,-1,0x8000},{17,-1,0x8000},{22,-1,0x8000},{25,-1,0x8000},{26,10,0x8000}'
             )
             Text = @{
                 SHORT_DESCRIPTION   = 'Developer tool: boot straight into a CPU-vs-CPU exhibition match in a chosen arena.'

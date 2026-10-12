@@ -282,7 +282,9 @@ screen before A), at VPW64's addresses (Japanese ROM NVPJ):
 | Screen records | `0x800DF840 + screen * 0x138`, cursor at +5 |
 | Venue | rules (会場) u8 at `0x803191DC` (+1, +2): 0 = random, 1-7 below |
 
-Two prompts before the title (no Controller Pak note, Rumble Pak) take Start/A on screen 0. Only `func_8000209C` and
+Two prompts before the title (no Controller Pak note, Rumble Pak) take Start/A on screen 0. Unlike World Tour, VPW64
+waits on its results after a finish: the mod presses A on screen 25 (results), then picks Rematch on screen 26 (cursor
+10; 9 is End) and the same match starts again through screen 22. Only `func_8000209C` and
 `func_80003358` differ between a fresh N64Recomp output and `RecompiledFuncs`; neither is hooked.
 
 | Id | Option | Evidence |
