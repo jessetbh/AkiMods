@@ -250,10 +250,10 @@
                 # Corners (screen 10): red to CPU (down), select blue (right), blue to CPU (down), A.
                 '-DQM_SEQ_SCREEN=10',
                 '-DQM_SEQ_BUTTONS=0x0400,0x0100,0x0400,0x8000',
-                # Rules (screen 17): arena = the mat, at *(u32*)0x800E0018 + 0xC (also +0xD, +0xE).
+                # Rules (screen 17): arena = the mat, u8 at 0x8038311C (also +1, +2), the same in every session.
                 '-DQM_VENUE_SCREEN=17',
-                '-DQM_VENUE_PTR=0x800E0018u',
-                '-DQM_VENUE_OFFSETS=0xC,0xD,0xE',
+                '-DQM_VENUE_ADDR=0x8038311Cu',
+                '-DQM_VENUE_OFFSETS=0,1,2',
                 # Screens: 0 title (Start), 1 mode select (1 = Exhibition), 9 match type, 10 corners, 23/24 wrestlers,
                 # 17 rules (A), 22 handicap (A).
                 '-DQM_MENU_STEPS={0,-1,0x1000},{1,1,0x8000},{9,-3,0x8000},{23,-1,0x8000},{24,-1,0x8000},{17,-1,0x8000},{22,-1,0x8000}'

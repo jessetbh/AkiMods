@@ -57,8 +57,8 @@
 //   QM_MATCH_BUTTONS     pressed every QM_MATCH_REPEAT frames there (WM2000: A ends the post-match replay; in
 //                        Watch mode it does nothing during play)
 //   QM_SEQ_SCREEN / QM_SEQ_BUTTONS   a screen that takes a sequence of presses instead of one step (optional)
-//   QM_VENUE_SCREEN / QM_VENUE_PTR / QM_VENUE_OFFSETS   on that screen, before pressing, store the venue at
-//                        *(u32*)QM_VENUE_PTR + each offset (World Tour: the rules' arena/mat setting) (optional)
+//   QM_VENUE_SCREEN / QM_VENUE_ADDR / QM_VENUE_OFFSETS   on that screen, before pressing, store the venue at
+//                        QM_VENUE_ADDR + each offset (World Tour: the rules' arena/mat setting) (optional)
 //   QM_ENTRANCE_SCREEN / QM_ENTRANCE_BUTTONS   screen where the entrances play and the button that skips them,
 //                        pressed there unless the "entrances" option says Show (optional). The menu driver only
 //                        presses while QM_MODE is 0, so a screen the match itself keeps (Revenge: 23, mode -2 in
@@ -240,11 +240,8 @@ RECOMP_HOOK_RETURN(AKI_STRINGIFY(QM_PAD_FUNC)) void qm_after_pad(void) {
 #ifdef QM_VENUE_SCREEN
         if (screen == QM_VENUE_SCREEN && venue >= 0) {
             static const u8 venue_offsets[] = { QM_VENUE_OFFSETS };
-            u32 base = RDRAM_U32(QM_VENUE_PTR);
-            if (base >= 0x80000000u && base < 0x80800000u) {
-                for (int i = 0; i < (int)sizeof(venue_offsets); i++) {
-                    RDRAM_U8(base + venue_offsets[i]) = (u8)venue;
-                }
+            for (int i = 0; i < (int)sizeof(venue_offsets); i++) {
+                RDRAM_U8(QM_VENUE_ADDR + venue_offsets[i]) = (u8)venue;
             }
         }
 #endif
