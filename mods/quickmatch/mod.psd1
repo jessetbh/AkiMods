@@ -8,7 +8,7 @@
 @{
     Id      = 'aki_quickmatch'
     Sources = @('src\quickmatch.c')
-    Games   = @('nomercy', 'wm2k', 'vpw2')
+    Games   = @('nomercy', 'wm2k', 'vpw2', 'revenge')
     # Bundled with No Mercy (owner, 2026-10-11), WrestleMania 2000 and VPW2 (2026-10-12): off by default, so it does nothing until enabled.
     Values  = @{}
     PerGame = @{
@@ -179,6 +179,58 @@
             # 0x80171084). No Demo length: the demo's 1-minute limit wasn't located; the mod forces the venue on
             # every demo, so the next one starts in the same place.
             Matches = @('Demo set A', 'Demo set B', 'Demo set C')
+        }
+
+        # WCW/nWo Revenge (USA). Like WrestleMania 2000 its attract sequence has no CPU match (intro movie, then the
+        # title), so the mod drives the menus to Exhibition > <match> > <venue> > CPU vs CPU itself. Intro, title and
+        # menus are all one overlay (ovl_a) and one screen variable: README.md, "How it works (Revenge)".
+        revenge = @{
+            Defines = @(
+                '-DQM_MODE=0x80038A8Cu',             # s32: 1 = leave (intro skip); -2 while the match runs
+                '-DQM_PAD_FUNC=func_800C5718',       # ovl_a: controllers -> menu button words, per frame
+                '-DQM_PAD_HELD=0x800EA0C0u',
+                '-DQM_PAD_PRESSED=0x800EA0C2u',
+                '-DQM_PAD_REPEAT=0x800EA0C4u',
+                '-DQM_PAD1_HELD=0x8006E17Cu',        # controller 1's record (the VS screen 12 reads it)
+                '-DQM_PAD1_PRESSED=0x8006E17Eu',
+                '-DQM_MENU_SIG=0x800AC144u',         # first word of ovl_a's menu state machine func_800AC144:
+                '-DQM_MENU_SIG_WORD=0x27BDFFA0u',    #   addiu $sp, $sp, -0x60 (ovl_b, the match, is at the same vram)
+                '-DQM_MENU_SCREEN=0x80038A90u',      # s16: menu screen id (0 = intro and title)
+                '-DQM_MENU_SCRIPT=0x800E7C90u',      # s32: transition/prompt script (44 = the title's Rumble Pak prompt)
+                '-DQM_MENU_SCREENS=0x800E8230u',     # screen records, 0x138 bytes each: +5 cursor
+                '-DQM_MENU_STRIDE=0x138',
+                '-DQM_MATCH_SCREEN=5',               # Exhibition screen: cursor = match type
+                '-DQM_PER_MATCH=2,2',                # players screen: CPU vs CPU (single, tag)
+                # Screens: 0 intro + title (Start), 1 main menu (1 = Exhibition), 5 Exhibition (Single / Tag), 2 venue,
+                # 3 players (2 = CPU vs CPU), 13/14 wrestlers, 12 VS (Start), 11 rules (A on Decision), 23 entrances.
+                '-DQM_ENTRANCE_SCREEN=23',           # entrances (mode 0; the match keeps screen 23 with mode -2)
+                '-DQM_ENTRANCE_BUTTONS=0x1000',      # Start skips the rest of the entrances
+                '-DQM_MENU_STEPS={0,-1,0x1000},{1,1,0x8000},{5,-3,0x8000},{2,-2,0x8000},{3,-4,0x8000},{13,-1,0x8000},{14,-1,0x8000},{12,-1,0x1000},{11,-1,0x8000}'
+            )
+            EntranceOption = $true
+            Text = @{
+                SHORT_DESCRIPTION   = 'Developer tool: boot straight into a CPU-vs-CPU exhibition match in a chosen venue.'
+                DESCRIPTION         = "A testing tool for {{GAME_TITLE}}: with Enabled on, the game skips its intro and walks its own menus to an Exhibition match, CPU vs CPU, in the venue you pick, within about 20 seconds of starting. The match keeps the game's rules.`n`nOff by default. Turn it off again for normal play: while it's on, the menus press their own buttons."
+                ENABLED_DESCRIPTION = 'Skip the intro and menus, and start a CPU-vs-CPU match with the settings below.'
+                VENUE_DESCRIPTION   = 'Where the match takes place.'
+                MATCH_DESCRIPTION   = 'Exhibition match type.'
+            }
+            # Venue = the venue screen's cursor (screen 2).
+            Venues  = @(
+                @{ Name = 'Venue 0'; Id = 0 }
+                @{ Name = 'Venue 1'; Id = 1 }
+                @{ Name = 'Venue 2'; Id = 2 }
+                @{ Name = 'Venue 3'; Id = 3 }
+                @{ Name = 'Venue 4'; Id = 4 }
+                @{ Name = 'Venue 5'; Id = 5 }
+                @{ Name = 'Venue 6'; Id = 6 }
+                @{ Name = 'Venue 7'; Id = 7 }
+                @{ Name = 'Venue 8'; Id = 8 }
+                @{ Name = 'Venue 9'; Id = 9 }
+                @{ Name = 'Venue 10'; Id = 10 }
+                @{ Name = 'Venue 11'; Id = 11 }
+            )
+            Matches = @('Single Match', 'Tag Match')
         }
     }
 }
