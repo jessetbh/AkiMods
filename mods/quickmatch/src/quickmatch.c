@@ -14,7 +14,8 @@
 #define RDRAM_U32(addr) (*(volatile u32*)(addr))
 
 // Per game (mod.psd1 PerGame.Defines):
-//   QM_INTRO_FUNC        intro (logos + intro movie) main, per frame
+//   QM_INTRO_FUNC        intro (logos + intro movie) main, per frame (optional: menu-driven games whose intro
+//                        is a menu screen press Start there instead)
 //   QM_INTRO_SCENE       s32 pending transition step; the intro only takes Start when 0
 //   QM_INTRO_SKIPPABLE   s32 nonzero once the intro may be skipped
 //   QM_MODE              s32 the intro sets 1 on Start, then fades out to the title
@@ -41,6 +42,7 @@
 // Menu-driven games (no attract demo match; see qm_menu_step in quickmatch_logic.h):
 //   QM_PAD_FUNC          reads the controllers into the menus' button words, once per frame
 //   QM_PAD_HELD / QM_PAD_PRESSED / QM_PAD_REPEAT   u16 button words the menus read (N64 button bits)
+//   QM_PAD1_HELD / QM_PAD1_PRESSED   u16 controller 1's own record, pressed too (optional)
 //   QM_MENU_SIG / QM_MENU_SIG_WORD   u32 at QM_MENU_SIG equals QM_MENU_SIG_WORD while the menus are loaded
 //   QM_MENU_SCREEN       s16 current menu screen
 //   QM_MENU_SCRIPT       s32 screen transition/prompt script (some prompts wait for a press while it runs)
@@ -55,7 +57,9 @@
 //   QM_MATCH_BUTTONS     pressed every QM_MATCH_REPEAT frames there (WM2000: A ends the post-match replay; in
 //                        Watch mode it does nothing during play)
 //   QM_ENTRANCE_SCREEN / QM_ENTRANCE_BUTTONS   screen where the entrances play and the button that skips them,
-//                        pressed there unless the "entrances" option says Show (optional)
+//                        pressed there unless the "entrances" option says Show (optional). The menu driver only
+//                        presses while QM_MODE is 0, so a screen the match itself keeps (Revenge: 23, mode -2 in
+//                        the match) is safe.
 
 static const u8 venue_ids[] = { QM_VENUE_IDS };
 #ifdef QM_LENGTH_IDS
@@ -77,6 +81,7 @@ static int enabled(void) {
     return recomp_get_config_u32("enabled") != 0;
 }
 
+#ifdef QM_INTRO_FUNC
 // Intro: do what pressing Start does, as soon as the intro accepts it.
 RECOMP_HOOK(AKI_STRINGIFY(QM_INTRO_FUNC)) void qm_on_intro(void) {
     if (!enabled()) {
@@ -86,6 +91,7 @@ RECOMP_HOOK(AKI_STRINGIFY(QM_INTRO_FUNC)) void qm_on_intro(void) {
         RDRAM_S32(QM_MODE) = 1;
     }
 }
+#endif
 
 #ifdef QM_TITLE_FUNC
 RECOMP_HOOK(AKI_STRINGIFY(QM_TITLE_FUNC)) void qm_on_title(void) {
@@ -215,6 +221,11 @@ RECOMP_HOOK_RETURN(AKI_STRINGIFY(QM_PAD_FUNC)) void qm_after_pad(void) {
         *(volatile u16*)QM_PAD_HELD |= step->buttons;
         *(volatile u16*)QM_PAD_PRESSED |= step->buttons;
         *(volatile u16*)QM_PAD_REPEAT |= step->buttons;
+#ifdef QM_PAD1_PRESSED
+        // Some screens read controller 1's own record instead (Revenge's VS screen: who pressed Start).
+        *(volatile u16*)QM_PAD1_HELD |= step->buttons;
+        *(volatile u16*)QM_PAD1_PRESSED |= step->buttons;
+#endif
         menu_since_press = 0;
     }
 }
