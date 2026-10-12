@@ -2,13 +2,13 @@
 
 A **developer/testing** mod: with **Enabled** on, the game skips its intro and title wait and starts a CPU-vs-CPU
 match within seconds, in the venue you pick. Off by default, so it does nothing for players until switched on.
-Bundled with No Mercy, WrestleMania 2000, Virtual Pro Wrestling 2, WCW/nWo Revenge and WCW vs. nWo World Tour (`stage.ps1`), so it is in every install's Mods menu.
+Bundled with No Mercy, WrestleMania 2000, Virtual Pro Wrestling 2, WCW/nWo Revenge, WCW vs. nWo World Tour and Virtual Pro Wrestling 64 (`stage.ps1`), so it is in every install's Mods menu.
 
 How it gets there depends on the game:
 
 - **Attract demo** (No Mercy, VPW2): the game's own attract-mode demo match (no HUD, no controller input), started
   right away, with its venue and length replaced.
-- **Menu-driven** (WrestleMania 2000, Revenge and World Tour, whose attract sequences have no demo match): the mod walks the game's own menus,
+- **Menu-driven** (WrestleMania 2000, Revenge, World Tour and VPW64, whose attract sequences have no demo match): the mod walks the game's own menus,
   pressing one button per known screen, to an Exhibition match in **Watch** mode (CPU vs CPU). The match keeps the
   game's rules and entrances, with its HUD.
 
@@ -268,6 +268,34 @@ No repaired functions (fresh N64Recomp output = `RecompiledFuncs`); WT's own pat
 | 1 | NWO | black nWo mat, blue floor panels |
 | 2 | DOA | teal Dead or Alive mat, floodlight banks |
 | 3 | IU | blue Independent Union mat, wooden gym floor |
+
+## How it works (Virtual Pro Wrestling 64)
+
+World Tour's engine and menus (same screen ids and steps: corners as a press sequence, venue written on the rules
+screen before A), at VPW64's addresses (Japanese ROM NVPJ):
+
+| Piece | VPW64 |
+|---|---|
+| Pad hook | `RECOMP_HOOK_RETURN func_800C1F50` (button words `0x800EF6BC/BE/C0`; controller 1's record `0x800592F4/6`) |
+| Menus loaded | first word of `func_800A432C` = `0x240EFFFF` (ovl_b has `0x3C07800F` there) |
+| Screen / mode | `0x80040BA4` (s16) / `0x80040BA0` |
+| Screen records | `0x800DF840 + screen * 0x138`, cursor at +5 |
+| Venue | rules (会場) u8 at `0x803191DC` (+1, +2): 0 = random, 1-7 below |
+
+Two prompts before the title (no Controller Pak note, Rumble Pak) take Start/A on screen 0. Unlike World Tour, VPW64
+waits on its results after a finish: the mod presses A on screen 25 (results), then picks Rematch on screen 26 (cursor
+10; 9 is End) and the same match starts again through screen 22. Only `func_8000209C` and
+`func_80003358` differ between a fresh N64Recomp output and `RecompiledFuncs`; neither is hooked.
+
+| Id | Option | Evidence |
+|---|---|---|
+| 1 | NSW | rules venue cycle + match screenshots |
+| 2 | EWF | rules venue cycle + match screenshots |
+| 3 | WOU | rules venue cycle + match screenshots |
+| 4 | DAW | rules venue cycle + match screenshots |
+| 5 | ILW | rules venue cycle + match screenshots |
+| 6 | WCW | rules venue cycle + match screenshots |
+| 7 | NWO | rules venue cycle + match screenshots |
 
 ## Option 2: a real exhibition match
 
