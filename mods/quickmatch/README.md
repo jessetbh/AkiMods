@@ -67,10 +67,10 @@ floor afterwards. Backstage areas (20-24) need none of this: the game's own demo
 | 0 | Raw | RT log "venue: Raw" |
 | 1 | No Mercy | RT log; the stock attract demo's own pick |
 | 2 | SmackDown | RT log "venue: SmackDown" (blue ropes) |
-| 3 | Arena 3 | name not confirmed |
-| 4 | Arena 4 | name not confirmed |
+| 3 | King of the Ring | RT venue survey: KOTR letters and crossed swords on the set; the game's arena roster |
+| 4 | SummerSlam | RT venue survey: SummerSlam banners; concert stage (speaker stacks, flood cluster) |
 | 5 | Survivor Series | RT log "venue: Survivor Series" |
-| 6 | Arena 6 | name not confirmed |
+| 6 | Royal Rumble | RT venue survey: Royal Rumble banners; NYC alley stage with the taxi |
 | 7 | WrestleMania | "WRESTLEMANIA" apron; stage 17 shows the WrestleMania logo |
 | 8 | Backlash | stage 18 shows the Backlash logo |
 | 9 | Armageddon | RT log "venue: Armageddon"; stage 19 shows the Armageddon logo |
