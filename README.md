@@ -107,6 +107,9 @@ mods/<name>/
   mod.template.toml     manifest, rendered per game
   src/                  the mod's C code
   tests/                optional host-side tests
+tools/romhack/
+  make_patch_mod.py     packages a ROM hack as a patch mod (run from a game repo; see its README)
+  tests/                python -m unittest discover -s tools/romhack/tests
 ```
 
 ## License
