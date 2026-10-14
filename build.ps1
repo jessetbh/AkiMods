@@ -9,7 +9,8 @@ param([string]$Mod = 'all', [string]$Game = 'all', [string[]]$Define = @())
 $ErrorActionPreference = 'Continue'
 
 $root = $PSScriptRoot
-$depot = Split-Path $root -Parent
+# The game repos (for their symbol files): next to this repo, or wherever AKI_GAMES_DIR points.
+$depot = if ($env:AKI_GAMES_DIR) { $env:AKI_GAMES_DIR } else { Split-Path $root -Parent }
 $games = Import-PowerShellDataFile "$root\common\games.psd1"
 
 $modNames = @(Get-ChildItem "$root\mods" -Directory | Where-Object { Test-Path "$($_.FullName)\mod.psd1" } | ForEach-Object Name)
@@ -17,14 +18,8 @@ if ($Mod -ne 'all' -and $Mod -notin $modNames) { throw "Unknown mod '$Mod' (know
 if ($Game -ne 'all' -and -not $games.ContainsKey($Game)) { throw "Unknown game '$Game' (known: $($games.Keys -join ', '), all)" }
 $selectedMods = if ($Mod -eq 'all') { $modNames } else { @($Mod) }
 
-# MIPS cross-compiler: zig cc, as WT's patches use. The VS BuildTools clang, the llvm.org
-# installer and the clang+llvm archive in toolchains\ all lack a MIPS backend.
-# ld.lld's MIPS support is unconditional, so VS's lld is fine.
-$zig = 'C:\Users\selki\toolchains\zig-windows-x86_64-0.14.0\zig.exe'
-$lld = 'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\Llvm\x64\bin\ld.lld.exe'
-$modTool = "$depot\N64Recomp\build\RecompModTool.exe"
-# RecompModTool is a MinGW build: it needs MinGW's runtime DLLs on PATH.
-$env:PATH = "C:\Users\selki\toolchains\mingw64\bin;$env:PATH"
+# Tools: zig cc (MIPS), ld.lld and RecompModTool, found by common\tools.ps1.
+. "$root\common\tools.ps1"
 
 # No odd single-precision FPRs: in FR=0 an odd single is the high half of a double pair, and
 # the mod recompiler mis-handles it (garbage floats). zig cc ignores -mno-odd-spreg, so the

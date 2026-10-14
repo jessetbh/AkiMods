@@ -24,8 +24,9 @@ Options (Mods menu, or `mod_config\aki_quickmatch.json`):
 
 A pinfall or submission still ends the match; the next demo then starts at once, in the same venue.
 
-The quickest way to use it is AkiTools: `aki-run.ps1 -Game nomercy -Worktree <wt> -Venue Raw -Ring` copies the
-built mod into the checkout, enables it for that run only, and puts it back afterwards (AkiTools README).
+To use it, turn on **Enabled** in the game's Mods menu (Settings → Mods → Quick Match), pick the options, and
+restart the game. Turn it off again for normal play: while it's on, the menus press their own buttons. (The
+maintainers drive it from a test-run script that sets these options for one run only.)
 
 ```powershell
 ..\..\build.ps1 quickmatch nomercy   # from the repo root: .\build.ps1 quickmatch nomercy
