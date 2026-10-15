@@ -56,25 +56,27 @@
             )
             # Venue ids (func_800EE3C4): 0-9 ring arenas, 10-19 the same arenas' entrance stages (id + 10),
             # 20-24 backstage. Identified 2026-10-11 by forcing each id (RT venue log + screenshots; stage
-            # 17/18/19 show the WrestleMania / Backlash / Armageddon logos). Arenas 3, 4, 6: names unconfirmed.
+            # 17/18/19 show the WrestleMania / Backlash / Armageddon logos). 3, 4, 6 named 2026-10-14 from the RT
+            # venue survey (KOTR letters; SummerSlam banners and concert stage; Royal Rumble banners and NYC alley
+            # stage), which matches the game's arena roster.
             Venues  = @(
                 @{ Name = 'Raw'; Id = 0 }
                 @{ Name = 'No Mercy'; Id = 1 }
                 @{ Name = 'SmackDown'; Id = 2 }
-                @{ Name = 'Arena 3'; Id = 3 }
-                @{ Name = 'Arena 4'; Id = 4 }
+                @{ Name = 'King of the Ring'; Id = 3 }
+                @{ Name = 'SummerSlam'; Id = 4 }
                 @{ Name = 'Survivor Series'; Id = 5 }
-                @{ Name = 'Arena 6'; Id = 6 }
+                @{ Name = 'Royal Rumble'; Id = 6 }
                 @{ Name = 'WrestleMania'; Id = 7 }
                 @{ Name = 'Backlash'; Id = 8 }
                 @{ Name = 'Armageddon'; Id = 9 }
                 @{ Name = 'Raw stage'; Id = 10 }
                 @{ Name = 'No Mercy stage'; Id = 11 }
                 @{ Name = 'SmackDown stage'; Id = 12 }
-                @{ Name = 'Arena 3 stage'; Id = 13 }
-                @{ Name = 'Arena 4 stage'; Id = 14 }
+                @{ Name = 'King of the Ring stage'; Id = 13 }
+                @{ Name = 'SummerSlam stage'; Id = 14 }
                 @{ Name = 'Survivor Series stage'; Id = 15 }
-                @{ Name = 'Arena 6 stage'; Id = 16 }
+                @{ Name = 'Royal Rumble stage'; Id = 16 }
                 @{ Name = 'WrestleMania stage'; Id = 17 }
                 @{ Name = 'Backlash stage'; Id = 18 }
                 @{ Name = 'Armageddon stage'; Id = 19 }
