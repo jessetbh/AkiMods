@@ -37,50 +37,129 @@ def bps_number(n):
     return bytes(out)
 
 
-def bps_encode(source, target, metadata=b''):
-    """Linear BPS patch: SourceRead for runs that match the source in place, TargetRead for
-    everything else. Small matching gaps are folded into TargetRead (an action costs a few
-    bytes). Simple and exact; not the smallest possible patch for moved data."""
-    SOURCE_READ, TARGET_READ = 0, 1
-    MIN_MATCH = 8
+BLOCK = 32        # source index granularity: moved runs of 2*BLOCK-1 bytes or more are always found
+MIN_COPY = 12     # shortest copy worth an action at a tried offset (an action costs a few bytes)
+ISSUE = 'https://github.com/jessetbh/aki-roadmap/issues/74'
+
+
+class TooMuchTargetRead(ValueError):
+    """The patch would carry more literal (TargetRead) bytes than allowed."""
+    def __init__(self, limit):
+        super().__init__('the patch would carry more than %d literal bytes (TargetRead)' % limit)
+        self.limit = limit
+
+
+def _match_len(a, i, b, j):
+    """Length of the common run of a[i:] and b[j:]."""
+    limit = min(len(a) - i, len(b) - j)
+    n, chunk = 0, 64
+    while n < limit:
+        k = min(chunk, limit - n)
+        if a[i + n:i + n + k] == b[j + n:j + n + k]:
+            n += k
+            chunk = min(chunk * 2, 1 << 16)
+            continue
+        lo, hi = 0, k  # a prefix of lo bytes matches, one of hi bytes doesn't
+        while hi - lo > 1:
+            mid = (lo + hi) // 2
+            if a[i + n:i + n + mid] == b[j + n:j + n + mid]:
+                lo = mid
+            else:
+                hi = mid
+        return n + lo
+    return n
+
+
+def _block_index(source):
+    """{crc32 of an aligned BLOCK-byte block: its first offset}. Hash collisions only cost a
+    missed match: every candidate is checked against the bytes."""
+    index = {}
+    for off in range(0, len(source) - BLOCK + 1, BLOCK):
+        index.setdefault(zlib.crc32(source[off:off + BLOCK]), off)
+    return index
+
+
+def bps_encode(source, target, metadata=b'', max_target_read=None, stats=None):
+    """BPS patch that finds moved data. SourceRead copies a run that matches the source in
+    place; SourceCopy copies a run from anywhere in the source; TargetRead carries the bytes
+    the source doesn't have. Moved runs are found by trying the last copy's offset first (a
+    hack that slides data shifts long stretches by the same amount), then an index of the
+    source's aligned BLOCK-byte blocks. Greedy, not optimal, but a hack that moves data costs
+    a few bytes per moved run instead of a copy of everything after the move.
+
+    max_target_read: raise TooMuchTargetRead when the patch would carry more TargetRead bytes
+    than this (those bytes are copied into the patch, possibly from the stock ROM).
+    stats: optional dict, filled with the byte count of each action kind."""
+    SOURCE_READ, TARGET_READ, SOURCE_COPY = 0, 1, 2
     out = bytearray(b'BPS1')
     out += bps_number(len(source)) + bps_number(len(target)) + bps_number(len(metadata)) + metadata
+    counts = {'source_read': 0, 'source_copy': 0, 'target_read': 0}
 
     def action(kind, length):
         out.extend(bps_number(((length - 1) << 2) | kind))
 
-    n = len(target)
-    common = min(len(source), n)
-    pos = 0
+    n, src_len = len(target), len(source)
+    index = None
+    src_rel = 0       # BPS sourceRelativeOffset
+    last_delta = 0    # source offset - target offset of the last copy
+    lit_start = pos = 0
+
+    def flush_literal(end):
+        if end > lit_start:
+            action(TARGET_READ, end - lit_start)
+            out.extend(target[lit_start:end])
+            counts['target_read'] += end - lit_start
+
     while pos < n:
-        # Length of the in-place match starting here.
-        match = 0
-        while pos + match < common and source[pos + match] == target[pos + match]:
-            match += 1
-        if match >= MIN_MATCH or (match > 0 and pos + match == n):
-            action(SOURCE_READ, match)
-            pos += match
+        found = None
+        b = target[pos]
+        for d in ((last_delta, 0) if last_delta else (0,)):
+            s = pos + d
+            if 0 <= s < src_len and source[s] == b:
+                length = _match_len(source, s, target, pos)
+                if length >= MIN_COPY or pos + length == n:
+                    found = (s, length)
+                    break
+        if found is None and pos + BLOCK <= n:
+            if index is None:
+                index = _block_index(source)
+            s = index.get(zlib.crc32(target[pos:pos + BLOCK]))
+            if s is not None:
+                length = _match_len(source, s, target, pos)
+                if length >= BLOCK:
+                    found = (s, length)
+        if found is None:
+            pos += 1
+            if max_target_read is not None and counts['target_read'] + pos - lit_start > max_target_read:
+                raise TooMuchTargetRead(max_target_read)
             continue
 
-        # Literal run: until the next in-place match of at least MIN_MATCH bytes.
-        start = pos
-        pos += max(match, 1)
-        while pos < n:
-            if pos < common and source[pos] == target[pos]:
-                run = 0
-                while pos + run < common and run < MIN_MATCH and source[pos + run] == target[pos + run]:
-                    run += 1
-                if run >= MIN_MATCH or pos + run == n:
-                    break
-                pos += run
-            else:
-                pos += 1
-        action(TARGET_READ, pos - start)
-        out += target[start:pos]
+        s, length = found
+        # The match may start before the byte that found it: take those bytes off the literal.
+        while pos > lit_start and s > 0 and source[s - 1] == target[pos - 1]:
+            pos -= 1
+            s -= 1
+            length += 1
+        flush_literal(pos)
+        if s == pos:
+            action(SOURCE_READ, length)
+            counts['source_read'] += length
+        else:
+            action(SOURCE_COPY, length)
+            off = s - src_rel
+            out.extend(bps_number((abs(off) << 1) | (off < 0)))
+            src_rel = s + length
+            counts['source_copy'] += length
+        last_delta = s - pos
+        pos += length
+        lit_start = pos
+    flush_literal(n)
 
     out += zlib.crc32(source).to_bytes(4, 'little')
     out += zlib.crc32(target).to_bytes(4, 'little')
     out += zlib.crc32(bytes(out)).to_bytes(4, 'little')
+    if stats is not None:
+        stats.update(counts)
     return bytes(out)
 
 
@@ -219,6 +298,8 @@ def main():
                     help='functions the post-recompile pipeline changed (tools/romhack/list_repaired_functions.py)')
     ap.add_argument('--out', help='output .nrm (omit to only print the report)')
     ap.add_argument('--force', action='store_true', help='write the mod even when the report says it needs a full recompile')
+    ap.add_argument('--max-target-read', type=float, default=2.0, metavar='MB',
+                    help='refuse when the patch would carry more than this many MB of literal bytes (default 2)')
     args = ap.parse_args()
 
     base = open(args.base, 'rb').read()
@@ -263,8 +344,17 @@ def main():
     if (escapes or loose) and not args.force:
         sys.exit('not writing %s: the hack needs a full recompile (use --force to write it anyway)' % args.out)
 
-    patch = bps_encode(base, hack)
+    stats = {}
+    try:
+        patch = bps_encode(base, hack, max_target_read=int(args.max_target_read * 1024 * 1024), stats=stats)
+    except TooMuchTargetRead as e:
+        sys.exit('not writing %s: %s. Bytes the stock ROM does not have go into the patch as they are,'
+                 ' so this mod could carry ROM data (or the hack is mostly new data). Check that --base is the'
+                 ' ROM the hack was made from; if the hack really adds that much of its own data, raise'
+                 ' --max-target-read. See %s' % (args.out, e, ISSUE))
     assert bps_apply(base, patch) == hack, 'BPS round trip failed'
+    print('patch: %d bytes read in place, %d copied from elsewhere in the stock ROM, %d new (literal)'
+          % (stats['source_read'], stats['source_copy'], stats['target_read']))
     manifest = {
         'game_id': args.game_id,
         'id': args.id,

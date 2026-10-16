@@ -36,6 +36,19 @@ in `RecompiledFuncs/recomp_overlays.inl`:
   restructured code across function boundaries. Patch mods can't run that, so the tool won't
   write the mod (`--force` overrides); it needs a full recompile of the hacked ROM.
 
+## Moved data and the size limit
+
+Tools such as VPW Studio move data when a replaced file grows or shrinks: every later file and
+the file table slide. The patch handles that with BPS SourceCopy: a moved run is copied from
+where it sits in the player's stock ROM, so it costs a few bytes, not a copy of the run. Only
+bytes the stock ROM doesn't have at all go into the patch as they are (TargetRead); the tool
+prints how many (`patch: ... new (literal)`).
+
+If that would be more than 2 MB, the tool refuses to write the mod, since the mod could then be
+carrying ROM data (often because `--base` isn't the ROM the hack was made from). If the hack
+really adds that much data of its own, raise the limit with `--max-target-read <MB>`.
+See [aki-roadmap#74](https://github.com/jessetbh/aki-roadmap/issues/74).
+
 Only one ROM-patch mod can be enabled at a time. On the `wcw-romhack` runtime a patch mod's
 saves go to `saves\<mod id>\`, apart from the stock game's.
 
