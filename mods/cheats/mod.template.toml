@@ -4,7 +4,7 @@
 
 [manifest]
 id = "{{MOD_ID}}"
-version = "0.4.0"
+version = "0.5.0"
 display_name = "Cheat Codes"
 short_description = "Toggle cheats or enter GameShark codes in this mod's options."
 description = """
