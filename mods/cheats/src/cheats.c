@@ -63,8 +63,12 @@ static u32 hash_text(const char* s) {
 //   aki_conversion_codes  the active conversion's codes file as a NUL-terminated string in the recomp
 //                         heap (free it with recomp_free), or NULL when no conversion or no codes
 //   aki_conversion_log    one line to the game's log ("[conversion] ...")
+//   aki_conversion_apply  runs the codes the game keeps natively, once (codes files written for the port's own
+//                         revision, any number of them: Showdown 64's set is ~260,000 lines); called every frame.
+//                         For those, aki_conversion_codes returns NULL, so this list only holds the other kind.
 RECOMP_IMPORT("*", char* aki_conversion_codes(void));
 RECOMP_IMPORT("*", void aki_conversion_log(const char* msg));
+RECOMP_IMPORT("*", void aki_conversion_apply(void));
 RECOMP_IMPORT("*", void recomp_free(void* ptr)); // runtime heap (librecomp heap.cpp)
 
 static char* append_text(char* out, const char* s) {
@@ -177,5 +181,8 @@ AKI_ON_FRAME void aki_cheats_on_frame(void) {
         frames_until_reload = RELOAD_INTERVAL;
     }
     frames_until_reload--;
+#ifdef AKI_HOST_CONVERSION
+    aki_conversion_apply();
+#endif
     apply_codes();
 }
