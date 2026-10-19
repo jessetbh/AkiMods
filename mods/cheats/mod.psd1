@@ -52,7 +52,9 @@
         # WWF No Mercy (USA, Rev 1). Presets use Rev 1 addresses; the Codes box can still
         # translate pasted Rev 0 codes.
         nomercy = @{
-            Defines = @('-DCHEAT_REV0_TRANSLATION')
+            # AKI_HOST_CONVERSION: the game exports aki_conversion_codes/aki_conversion_log (conversion codes files).
+            # Only for games whose main.cpp has the export: importing a missing one stops the mod loading.
+            Defines = @('-DCHEAT_REV0_TRANSLATION', '-DAKI_HOST_CONVERSION')
             Presets = @(
                 @{ Id = 'unlock_everything'; Name = 'Unlock everything'; Description = 'All characters, costumes and moves.'; Codes = '50000B02 0000 810BD910 FFFF' }
                 @{ Id = 'max_championship_money'; Name = 'Max Championship money'; Description = 'Championship mode money stays maxed out.'; Codes = '81097EDA FFFF' }

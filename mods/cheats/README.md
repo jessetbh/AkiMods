@@ -8,7 +8,9 @@ gets:
 
 Both are re-read about twice a second and applied every frame. Supported code types:
 `80`/`A0` (8-bit write), `81`/`A1` (16-bit write), `D0`–`D3` (conditionals), `50` (serial
-repeater). Master/enabler codes and button activators are ignored. Writes outside the 8 MB
+repeater). Master/enabler codes (`F0`, `F1`, `F6`, `FF`, `EE`, `DE`, `2A`, `3C`) and button
+activators (`88`/`89`) are ignored. A conditional governs the next code together with anything that
+code governs (a `50` and its write, or another conditional), so stacked conditionals must all hold. Writes outside the 8 MB
 of game RAM are refused. Turning a cheat off doesn't undo it: the game keeps whatever was
 written, and may save it.
 
@@ -70,3 +72,40 @@ Version set to Rev 0, codes in the main data area (`0x80040000`–`0x800D9960`) 
 by `-0x1530` (verified on the unlock table and Championship money). Codes outside it, such
 as Smackdown Mall money (`0x8014FAD6`), are skipped, along with any repeater or conditional
 that governs them.
+
+## Codes files (full conversions)
+
+A conversion package (AKI Launcher, `conversion.json`) can carry a codes file: `components.codes.file`. When the
+game runs with `AKI_CONVERSION=<id>`, it reads `<app folder>/conversions/<id>/<file>` and hands the text to this mod
+(host export `aki_conversion_codes`), which applies it every frame, on top of the toggles and the Codes box. Only
+games built with `AKI_HOST_CONVERSION` (`mod.psd1` defines; No Mercy so far) import that export, because a mod
+that imports a function the game lacks doesn't load. The result goes to the game's log as one
+`[conversion] codes: N active, ...` line (`aki_conversion_log`).
+
+Format: UTF-8 text (a BOM is fine), LF or CRLF, one code per line.
+
+```
+# rom: nomercy-rev0              the revision tag (optional; the first "# rom:" line counts)
+# anything after # // or ;       comments
+[Unlock everything]              a cheat's name (or any line that isn't a code)
+50000B02 0000                    a code: 8 hex digits, a separator (space, tab, ':' or '-'), 4 hex digits
+810BEE40:FFFF  # note            ... optionally followed by a note or comment
+8109940AFFFF                     ... or 12 digits run together
+```
+
+- **Tag**: `<game>` or `<game>-rev<N>` with the AkiMods game key (`nomercy`, `wm2k`, ...). Another game, an
+  unknown revision (`nomercy-unknown`, `nomercy-rev2`), or anything unparsable after the key: the whole file is
+  refused (nothing applied, logged). No tag: the port's revision is assumed (No Mercy Rev 1, the rest Rev 0).
+- **No Mercy Rev 0 lists** (`# rom: nomercy-rev0`) are translated to Rev 1 address by address through
+  `rev_translate()` in `codes_engine.h`. The default map has the one verified range (main data,
+  `0x80040000`-`0x800D9960`, -`0x1530`); a fuller map drops in as a generated header
+  (`-DREV_MAP_HEADER=\"file.h\"` defining `rev0_to_rev1[]` and `REV0_MAP_COUNT`). A code with no mapping is
+  dropped together with the conditional/repeater that governs it and the code it governs, and counted in the log.
+- A line starting with 8 hex digits that isn't a valid code (`8109940A FFF`) is counted as malformed in the log;
+  other text lines are names.
+- Up to 4096 codes in all; the file may be up to 1 MB.
+
+Project64 cheat files (`.cht`, both the 1.6/2.x `Cheat0="Name",...` layout and the 3.x `$Name` layout) convert with
+`tools/cht2codes.py`: the section header's CRC pair becomes the `# rom:` tag (kept as a `# source:` comment too),
+cheat names become `[Name]` headers, notes become comments, and `????` option codes are left commented out with
+their choices listed (or `--first-option`). `--list`, `--select <regex>`, `--game`, `--rev` as needed.

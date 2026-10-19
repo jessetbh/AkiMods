@@ -7,3 +7,4 @@ docs/*-plan.md
 
 # This machine's tool paths (see common/tools.ps1)
 local-tools.ps1
+__pycache__/
