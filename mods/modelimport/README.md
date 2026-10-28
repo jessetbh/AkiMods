@@ -67,4 +67,5 @@ models you don't have the rights to.
   defines to `mod.psd1`. They mirror the `runtime` block of the game's AkiTools profile.
 - **Host exports**, which each game provides (No Mercy and VPW2: `feat/130-model-host`): `aki_log`, `aki_models_read`
   (reads only from `mods\models`, at most one folder deep) and `aki_models_list`.
-- **Build:** `..\..\build.ps1 modelimport nomercy`.
+- **Build:** `..\..\build.ps1 modelimport nomercy` (or `vpw2`). VPW2 packs take its part table:
+  `aki-model.py convert ... --parts model-templates\profiles\vpw2.json` (AkiTools), which also makes the pack's game `vpw2`.
