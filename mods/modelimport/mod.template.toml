@@ -65,6 +65,13 @@ description = "Print each slot's wrestler id to the log when it changes, for wri
 type = "Bool"
 default = false
 
+[[manifest.config_options]]
+id = "log_poses"
+name = "Log poses (developer)"
+description = "Log replaced slots' part matrices for about 20 seconds of a match, for tools/skinsim.py (off for play)."
+type = "Bool"
+default = false
+
 [inputs]
 elf_path = "mod.elf"
 mod_filename = "{{MOD_ID}}"
