@@ -32,11 +32,15 @@ RECOMP_IMPORT("*", s32 aki_models_read(const char* path, void* dest, u32 max));
 
 // AKP1 header (big-endian, at offset 0 of model.bin; all offsets from the start of the file).
 #define AKP1_MAGIC 0x414B5031u // 'AKP1'
-#define AKP1_VERSION 1
+#define AKP1_VERSION 2      // version 2: the skin table (header bytes 56..63)
+#define MI_RUNTIME 2        // the highest required_runtime this core reads (2: smooth skinning)
 #define AKP1_SIZE 64
 #define AKP1_WELDED 0xFFFFFFFFu // entry part: the one model list of a welded pack (matrices through segment 0xD)
 #define AKP1_FLAG_WELDED 1u
 #define AKP1_FLAG_CULL 4u   // the converter made the winding consistent (aki-model --winding normals): cull back faces
+#define AKP1_FLAG_SKIN 8u   // smooth skinning: blended vertices load from segment 0xE (aki-model --skin)
+#define AKP1_SKIN_ENTRY 48  // Vtx template (16) + 4 x (u8 part, u8 weight, s16 x, y, z)
+#define AKP1_SKIN_MAX 4096  // skinned vertices per pack
 
 // --- log lines ---------------------------------------------------------------------------------------------------
 static char line[256];
@@ -94,6 +98,7 @@ typedef struct {
     char id[MI_ID_LEN];
     int state;           // 1 loaded, -1 failed (not retried until the next match)
     u32 base, size, flags;
+    u32 skin, skin_count;  // the skin table (virtual) and its vertices, or 0
     int count;
     u32 part[MI_PACK_ENTRIES], dl[MI_PACK_ENTRIES];
 } MiPack;
@@ -102,9 +107,12 @@ static MiPack packs[MI_PACKS];
 static int pack_count;
 static u32 pack_top = MI_MEM_BASE; // the next free byte of the window packs load into
 
+static void reset_slot_buffers(void);
+
 static void reset_packs(void) {
     pack_count = 0;
     pack_top = MI_MEM_BASE;
+    reset_slot_buffers();
 }
 
 static int pack_fail(MiPack* p, const char* why) {
@@ -128,7 +136,7 @@ static int load_pack(MiPack* p) {
     u32 end = base + (u32)size;
     if (RAM32(base) != AKP1_MAGIC) return pack_fail(p, "no AKP1 header (convert it again with a current aki-model)");
     if ((u32)RAM16(base + 4) > AKP1_VERSION || (u16)RAM16(base + 6) < AKP1_SIZE) return pack_fail(p, "made for a newer runtime");
-    if (RAM32(base + 52) > AKP1_VERSION) return pack_fail(p, "needs a newer aki_modelimport");
+    if (RAM32(base + 52) > MI_RUNTIME) return pack_fail(p, "needs a newer aki_modelimport");
     for (int i = 0; i < 8; i++)
         if (RAM8(base + 8 + i) != (u8)mi_profile_id[i]) return pack_fail(p, "built for another game");
     if (RAM32(base + 20) != (u32)size) return pack_fail(p, "file size doesn't match its header");
@@ -149,6 +157,18 @@ static int load_pack(MiPack* p) {
         if ((off & 3) || off < AKP1_SIZE || off > (u32)size - 4 || (off >= roff && off < rend))
             return pack_fail(p, "relocation outside the file");
     }
+    u32 soff = 0, scount = 0;
+    if ((u16)RAM16(base + 4) >= 2 && (flags & AKP1_FLAG_SKIN)) {
+        soff = RAM32(base + 56);
+        scount = RAM32(base + 60);
+        if (scount == 0 || scount > AKP1_SKIN_MAX || (soff & 3) || soff < AKP1_SIZE || soff > (u32)size ||
+            scount * AKP1_SKIN_ENTRY > (u32)size - soff)
+            return pack_fail(p, "bad skin table");
+        for (u32 v = 0; v < scount; v++)
+            for (int k = 0; k < 4; k++)
+                if (RAM8(base + soff + v * AKP1_SKIN_ENTRY + 16 + k * 8) >= (u32)mi_parts())
+                    return pack_fail(p, "skin table names a part this game hasn't");
+    }
     for (u32 r = 0; r < rcount; r++) RAM32(base + RAM32(base + roff + r * 4)) += delta;
     p->count = 0;
     for (u32 i = 0; i < ecount; i++) {
@@ -163,10 +183,13 @@ static int load_pack(MiPack* p) {
     p->base = base;
     p->size = (u32)size;
     p->flags = flags;
+    p->skin = scount ? base + soff : 0;
+    p->skin_count = scount;
     p->state = 1;
     pack_top = end;
     mi_log_str("model pack "); mi_log_str(p->id); mi_log_str(": "); mi_log_dec(size); mi_log_str(" bytes at ");
     mi_log_hex(base, 8); mi_log_str(", "); mi_log_dec(p->count); mi_log_str((flags & AKP1_FLAG_WELDED) ? " list (welded)" : " part lists");
+    if (scount) { mi_log_str(", "); mi_log_dec((s32)scount); mi_log_str(" skinned vertices"); }
     mi_log_end();
     return 0;
 }
@@ -334,6 +357,9 @@ typedef struct {
     int pack;
     u32 host;
     u32 dl[2];
+    u32 skin_buf[2];     // the blended vertices for each frame parity (segment 0xE), or 0
+    u32 skin_cap;        // vertices they hold (allocated once per match, reused when the slot changes)
+    u32 skin_frame[2];   // the frame each was last computed for
     MiSavedPart saved[MI_MAX_PARTS];
 } MiSlot;
 
@@ -342,6 +368,121 @@ static int in_match;
 static u32 reload_seen;
 static u32 frame_no;          // counted by mi_core_frame
 static s32 reload_frame = -1; // a Reload's frame while the slots sit out the frames still in flight
+
+static void reset_slot_buffers(void) {
+    for (int i = 0; i < MI_MAX_SLOTS; i++) {
+        slots[i].skin_buf[0] = slots[i].skin_buf[1] = 0;
+        slots[i].skin_cap = 0;
+    }
+}
+
+// --- smooth skinning ------------------------------------------------------------------------------------------------
+// A blended vertex: clip = sum of w_i * [p_i 1] * M_i over its influences (M_i: part i's node matrix for this parity,
+// p_i: its rest position as placed for part i), then local = clip * M_dom^-1, loaded under the dominant part's matrix
+// (the list forces M_dom before the run). The parts share the projection, so M_i * M_dom^-1 is affine (checked on
+// No Mercy: aki-roadmap#130). Row vectors, N64 Mtx layout: 16 s16 integer parts, then 16 u16 fractions.
+typedef struct { float m[4][4]; } MiMat;
+
+static void read_mtx(u32 addr, MiMat* out) {
+    for (int e = 0; e < 16; e++) {
+        s32 v = ((s32)RAM16(addr + e * 2) << 16) | (u16)RAM16(addr + 32 + e * 2);
+        out->m[e >> 2][e & 3] = (float)v * (1.0f / 65536.0f);
+    }
+}
+
+// 4x4 inverse (cofactors); 0 when singular.
+static int invert(const MiMat* a, MiMat* out) {
+    const float* m = &a->m[0][0];
+    float inv[16];
+    inv[0] = m[5]*m[10]*m[15] - m[5]*m[11]*m[14] - m[9]*m[6]*m[15] + m[9]*m[7]*m[14] + m[13]*m[6]*m[11] - m[13]*m[7]*m[10];
+    inv[4] = -m[4]*m[10]*m[15] + m[4]*m[11]*m[14] + m[8]*m[6]*m[15] - m[8]*m[7]*m[14] - m[12]*m[6]*m[11] + m[12]*m[7]*m[10];
+    inv[8] = m[4]*m[9]*m[15] - m[4]*m[11]*m[13] - m[8]*m[5]*m[15] + m[8]*m[7]*m[13] + m[12]*m[5]*m[11] - m[12]*m[7]*m[9];
+    inv[12] = -m[4]*m[9]*m[14] + m[4]*m[10]*m[13] + m[8]*m[5]*m[14] - m[8]*m[6]*m[13] - m[12]*m[5]*m[10] + m[12]*m[6]*m[9];
+    inv[1] = -m[1]*m[10]*m[15] + m[1]*m[11]*m[14] + m[9]*m[2]*m[15] - m[9]*m[3]*m[14] - m[13]*m[2]*m[11] + m[13]*m[3]*m[10];
+    inv[5] = m[0]*m[10]*m[15] - m[0]*m[11]*m[14] - m[8]*m[2]*m[15] + m[8]*m[3]*m[14] + m[12]*m[2]*m[11] - m[12]*m[3]*m[10];
+    inv[9] = -m[0]*m[9]*m[15] + m[0]*m[11]*m[13] + m[8]*m[1]*m[15] - m[8]*m[3]*m[13] - m[12]*m[1]*m[11] + m[12]*m[3]*m[9];
+    inv[13] = m[0]*m[9]*m[14] - m[0]*m[10]*m[13] - m[8]*m[1]*m[14] + m[8]*m[2]*m[13] + m[12]*m[1]*m[10] - m[12]*m[2]*m[9];
+    inv[2] = m[1]*m[6]*m[15] - m[1]*m[7]*m[14] - m[5]*m[2]*m[15] + m[5]*m[3]*m[14] + m[13]*m[2]*m[7] - m[13]*m[3]*m[6];
+    inv[6] = -m[0]*m[6]*m[15] + m[0]*m[7]*m[14] + m[4]*m[2]*m[15] - m[4]*m[3]*m[14] - m[12]*m[2]*m[7] + m[12]*m[3]*m[6];
+    inv[10] = m[0]*m[5]*m[15] - m[0]*m[7]*m[13] - m[4]*m[1]*m[15] + m[4]*m[3]*m[13] + m[12]*m[1]*m[7] - m[12]*m[3]*m[5];
+    inv[14] = -m[0]*m[5]*m[14] + m[0]*m[6]*m[13] + m[4]*m[1]*m[14] - m[4]*m[2]*m[13] - m[12]*m[1]*m[6] + m[12]*m[2]*m[5];
+    inv[3] = -m[1]*m[6]*m[11] + m[1]*m[7]*m[10] + m[5]*m[2]*m[11] - m[5]*m[3]*m[10] - m[9]*m[2]*m[7] + m[9]*m[3]*m[6];
+    inv[7] = m[0]*m[6]*m[11] - m[0]*m[7]*m[10] - m[4]*m[2]*m[11] + m[4]*m[3]*m[10] + m[8]*m[2]*m[7] - m[8]*m[3]*m[6];
+    inv[11] = -m[0]*m[5]*m[11] + m[0]*m[7]*m[9] + m[4]*m[1]*m[11] - m[4]*m[3]*m[9] - m[8]*m[1]*m[7] + m[8]*m[3]*m[5];
+    inv[15] = m[0]*m[5]*m[10] - m[0]*m[6]*m[9] - m[4]*m[1]*m[10] + m[4]*m[2]*m[9] + m[8]*m[1]*m[6] - m[8]*m[2]*m[5];
+    float det = m[0] * inv[0] + m[1] * inv[4] + m[2] * inv[8] + m[3] * inv[12];
+    if (det > -1e-12f && det < 1e-12f) return 0;
+    det = 1.0f / det;
+    for (int i = 0; i < 16; i++) (&out->m[0][0])[i] = inv[i] * det;
+    return 1;
+}
+
+static s16 clamp16(float f) {
+    if (f > 32767.0f) return 32767;
+    if (f < -32768.0f) return -32768;
+    return (s16)(f < 0.0f ? f - 0.5f : f + 0.5f);
+}
+
+static MiMat skin_m[MI_MAX_PARTS], skin_inv[MI_MAX_PARTS];
+static u8 skin_have[MI_MAX_PARTS];   // 1: skin_m read, 2: skin_inv too, 3: singular
+
+// Recomputes the slot's blended vertices for this frame parity into its parity buffer.
+static void skin_slot(int slot, MiSlot* s, const MiPack* p, int parity) {
+    for (int i = 0; i < MI_MAX_PARTS; i++) skin_have[i] = 0;
+    u32 out = s->skin_buf[parity];
+    for (u32 v = 0; v < p->skin_count; v++, out += 16) {
+        u32 e = p->skin + v * AKP1_SKIN_ENTRY;
+        float c[4] = { 0, 0, 0, 0 };
+        int dom = RAM8(e + 16);
+        for (int k = 0; k < 4; k++) {
+            u32 inf = e + 16 + k * 8;
+            u32 w8 = RAM8(inf + 1);
+            if (!w8) continue;
+            int part = RAM8(inf);
+            if (!skin_have[part]) {
+                u32 node = mi_part_node(slot, part);
+                if (!node) continue;
+                read_mtx(mi_part_matrix(node, parity), &skin_m[part]);
+                skin_have[part] = 1;
+            }
+            float x = RAM16(inf + 2), y = RAM16(inf + 4), z = RAM16(inf + 6), w = (float)w8 * (1.0f / 255.0f);
+            const MiMat* m = &skin_m[part];
+            for (int col = 0; col < 4; col++)
+                c[col] += w * (x * m->m[0][col] + y * m->m[1][col] + z * m->m[2][col] + m->m[3][col]);
+        }
+        if (skin_have[dom] == 1) skin_have[dom] = invert(&skin_m[dom], &skin_inv[dom]) ? 2 : 3;
+        if (skin_have[dom] != 2) continue;   // keep last frame's position
+        const MiMat* inv = &skin_inv[dom];
+        float l[4];
+        for (int col = 0; col < 4; col++)
+            l[col] = c[0] * inv->m[0][col] + c[1] * inv->m[1][col] + c[2] * inv->m[2][col] + c[3] * inv->m[3][col];
+        float iw = (l[3] > 1e-6f || l[3] < -1e-6f) ? 1.0f / l[3] : 1.0f;
+        RAM16(out + 0) = clamp16(l[0] * iw);
+        RAM16(out + 2) = clamp16(l[1] * iw);
+        RAM16(out + 4) = clamp16(l[2] * iw);
+    }
+    s->skin_frame[parity] = frame_no;
+}
+
+// The slot's two blended-vertex copies, from the window after the packs (once per match; reused when it changes).
+static int alloc_skin(MiSlot* s, const MiPack* p) {
+    if (!p->skin_count) return 1;
+    if (s->skin_cap < p->skin_count) {
+        u32 bytes = p->skin_count * 16, base = (pack_top + 15) & ~15u;
+        if (base + 2 * bytes > MI_MEM_BASE + MI_MEM_SIZE) return 0;
+        s->skin_buf[0] = base;
+        s->skin_buf[1] = base + bytes;
+        s->skin_cap = p->skin_count;
+        pack_top = base + 2 * bytes;
+    }
+    // Both copies start as the templates (st, colours); positions are filled per frame.
+    for (int b = 0; b < 2; b++)
+        for (u32 v = 0; v < p->skin_count; v++)
+            for (int w = 0; w < 4; w++)
+                RAM32(s->skin_buf[b] + v * 16 + w * 4) = RAM32(p->skin + v * AKP1_SKIN_ENTRY + w * 4);
+    s->skin_frame[0] = s->skin_frame[1] = 0xFFFFFFFFu;
+    return 1;
+}
 
 static u32 slot_signature(int slot) {
     u32 sig = 0x811C9DC5u;
@@ -355,7 +496,7 @@ static void put(u32** out, u32 w0, u32 w1) {
     *out += 2;
 }
 
-static void build_list(int slot, const MiPack* p, u32 dl, int parity) {
+static void build_list(int slot, const MiSlot* s, const MiPack* p, u32 dl, int parity) {
     u32* out = mi_list_open((u32*)dl);
     // The game draws its wrestlers without depth, back faces culled. A pack with consistent winding gets the same; one
     // without it draws both sides (a rip's mixed winding would otherwise lose half its faces).
@@ -363,8 +504,10 @@ static void build_list(int slot, const MiPack* p, u32 dl, int parity) {
     for (int e = 0; e < p->count; e++) {
         if (p->part[e] == AKP1_WELDED) {
             put(&out, 0xDB060034u, mi_matrix_segment(slot, parity) - 0x80000000u); // gSPSegment(0xD, part matrices)
+            if (s->skin_buf[parity]) put(&out, 0xDB060038u, s->skin_buf[parity] - 0x80000000u); // segment 0xE
             put(&out, 0xDE000000u, p->dl[e] - 0x80000000u);
             put(&out, 0xDB060034u, 0);
+            if (s->skin_buf[parity]) put(&out, 0xDB060038u, 0);
             continue;
         }
         u32 node = mi_part_node(slot, (int)p->part[e]);
@@ -407,11 +550,17 @@ static void decide_slot(int slot, MiSlot* s) {
         if (!s->host && mi_part_draws(&s->saved[i])) s->host = node;
     }
     if (!s->host) return;
+    if (!alloc_skin(s, p)) {
+        mi_log_str("slot "); mi_log_dec(slot + 1); mi_log_str(": no memory left for pack "); mi_log_str(p->id);
+        mi_log_str("'s skinned vertices; left stock"); mi_log_end();
+        return;
+    }
+    if (!p->skin_count) s->skin_buf[0] = s->skin_buf[1] = 0;   // (a skinned pack before may have set them)
     s->pack = pi;
     s->dl[0] = MI_SCRATCH + (u32)(slot * 2) * MI_LIST_BYTES;
     s->dl[1] = s->dl[0] + MI_LIST_BYTES;
-    build_list(slot, p, s->dl[0], 0);
-    build_list(slot, p, s->dl[1], 1);
+    build_list(slot, s, p, s->dl[0], 0);
+    build_list(slot, s, p, s->dl[1], 1);
     s->state = 1;
     mi_log_str("slot "); mi_log_dec(slot + 1); mi_log_str(" (wrestler "); mi_log_hex((u32)mi_slot_wrestler(slot), 4);
     mi_log_str("): "); mi_log_str(p->id); mi_log_end();
@@ -468,6 +617,9 @@ void mi_core_emit(int parity) {
         }
         if (s->signature != slot_signature(i)) decide_slot(i, s);
         if (s->state != 1) continue;
+        // Smooth skinning: this parity's blended vertices, once per frame (the emitter runs per list).
+        const MiPack* p = &packs[s->pack];
+        if (p->skin_count && s->skin_frame[parity] != frame_no) skin_slot(i, s, p, parity);
         // The game can rewrite a node's fields between emitter calls: set them every time.
         for (int k = 0; k < mi_parts(); k++) {
             u32 node = s->saved[k].node;
