@@ -36,6 +36,7 @@ RECOMP_IMPORT("*", s32 aki_models_read(const char* path, void* dest, u32 max));
 #define AKP1_SIZE 64
 #define AKP1_WELDED 0xFFFFFFFFu // entry part: the one model list of a welded pack (matrices through segment 0xD)
 #define AKP1_FLAG_WELDED 1u
+#define AKP1_FLAG_CULL 4u   // the converter made the winding consistent (aki-model --winding normals): cull back faces
 
 // --- log lines ---------------------------------------------------------------------------------------------------
 static char line[256];
@@ -356,6 +357,9 @@ static void put(u32** out, u32 w0, u32 w1) {
 
 static void build_list(int slot, const MiPack* p, u32 dl, int parity) {
     u32* out = mi_list_open((u32*)dl);
+    // The game draws its wrestlers without depth, back faces culled. A pack with consistent winding gets the same; one
+    // without it draws both sides (a rip's mixed winding would otherwise lose half its faces).
+    if (p->flags & AKP1_FLAG_CULL) put(&out, 0xD9FFFFFFu, 0x00000400u); // G_CULL_BACK on
     for (int e = 0; e < p->count; e++) {
         if (p->part[e] == AKP1_WELDED) {
             put(&out, 0xDB060034u, mi_matrix_segment(slot, parity) - 0x80000000u); // gSPSegment(0xD, part matrices)
