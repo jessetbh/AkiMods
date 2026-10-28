@@ -634,8 +634,29 @@ void mi_core_emit(int parity) {
 // can write models.txt "wrestler" lines.
 static s32 logged_wrestler[MI_MAX_SLOTS];
 
+// The Log poses option: a replaced slot's part matrices (both parities, every 20 frames, for 1200 frames), for the
+// offline skinning replay (tools/skinsim.py): "pose <frame> <slot> <part> M0|M1 <16 words>".
+static void log_poses(void) {
+    if (frame_no < 300 || frame_no > 1500 || frame_no % 20 != 0) return;
+    for (int slot = 0; slot < mi_slots(); slot++) {
+        if (slots[slot].state != 1) continue;
+        for (int i = 0; i < mi_parts(); i++) {
+            u32 node = mi_part_node(slot, i);
+            if (!node) continue;
+            for (int k = 0; k < 2; k++) {
+                mi_log_str("pose "); mi_log_dec((s32)frame_no); mi_log_str(" "); mi_log_dec(slot + 1); mi_log_str(" ");
+                mi_log_dec(i); mi_log_str(k ? " M1" : " M0");
+                u32 base = mi_part_matrix(node, k);
+                for (int w = 0; w < 16; w++) { mi_log_str(" "); mi_log_hex(RAM32(base + w * 4), 8); }
+                mi_log_end();
+            }
+        }
+    }
+}
+
 void mi_core_frame(void) {
     frame_no++;
+    if (recomp_get_config_u32("log_poses")) log_poses();
     if (!recomp_get_config_u32("log")) return;
     for (int i = 0; i < mi_slots(); i++) {
         s32 w = mi_slot_active(i) ? mi_slot_wrestler(i) : 0;
