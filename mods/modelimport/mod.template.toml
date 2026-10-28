@@ -1,0 +1,73 @@
+# Manifest template, rendered per game by ..\..\build.ps1 into build\modelimport\<game>\mod.toml.
+
+[manifest]
+id = "{{MOD_ID}}"
+version = "0.1.0"
+display_name = "Model import"
+short_description = "Imported 3D models replace wrestlers, moved by the game's own skeletons."
+description = """
+Loads model packs (folders made by AkiTools aki-model.py) from the mods\\models folder and draws them in place of \
+wrestlers, with the game's own animations. mods\\models\\models.txt says which pack replaces which slot or wrestler; \
+the Slot N pack options below override it for quick tests. Packs are read again at the start of every match."""
+authors = [ "jessetbh" ]
+game_id = "{{GAME_ID}}"
+minimum_recomp_version = "0.1.0"
+dependencies = []
+optional_dependencies = []
+native_libraries = []
+
+[[manifest.config_options]]
+id = "enabled"
+name = "Enabled"
+description = "Draw model packs in place of wrestlers."
+type = "Bool"
+default = true
+
+[[manifest.config_options]]
+id = "slot1_pack"
+name = "Slot 1 pack"
+description = "A pack id (the folder name in mods\\models without .akimodel) for slot 1; empty = models.txt decides."
+type = "String"
+default = ""
+
+[[manifest.config_options]]
+id = "slot2_pack"
+name = "Slot 2 pack"
+description = "A pack id for slot 2; empty = models.txt decides."
+type = "String"
+default = ""
+
+[[manifest.config_options]]
+id = "slot3_pack"
+name = "Slot 3 pack"
+description = "A pack id for slot 3; empty = models.txt decides."
+type = "String"
+default = ""
+
+[[manifest.config_options]]
+id = "slot4_pack"
+name = "Slot 4 pack"
+description = "A pack id for slot 4; empty = models.txt decides."
+type = "String"
+default = ""
+
+[[manifest.config_options]]
+id = "reload"
+name = "Reload"
+description = "Flip this to read models.txt and the packs again now (they are also read at the start of every match)."
+type = "Bool"
+default = false
+
+[[manifest.config_options]]
+id = "log"
+name = "Log wrestler ids"
+description = "Print each slot's wrestler id to the log when it changes, for writing models.txt wrestler lines."
+type = "Bool"
+default = false
+
+[inputs]
+elf_path = "mod.elf"
+mod_filename = "{{MOD_ID}}"
+func_reference_syms_file = "{{SYMS}}"
+data_reference_syms_files = []
+additional_files = []
