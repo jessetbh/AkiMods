@@ -84,8 +84,10 @@ static void put(u32** out, u32 w0, u32 w1) {
 // a gSPSegment pointing 0xC back at the clear (mi_arm_depth_clear). The quad's matrix, vertices and both lists live past
 // the core's scratch (32 KB).
 #define MI_CLEAR (MI_SCRATCH + 0x8000u)
-#define MI_CLEAR_DL (MI_CLEAR + 0x80u)
-#define MI_CLEAR_NOOP (MI_CLEAR + 0x100u)
+#define MI_CLEAR_BODY (MI_CLEAR + 0x80u)    // the quad: depth 1.0 everywhere
+#define MI_CLEAR_DL (MI_CLEAR + 0x100u)     // segment 0xC's first target: the body, then 0xC -> the empty list
+#define MI_CLEAR_NOOP (MI_CLEAR + 0x120u)
+#define MI_CLEAR_AFTER (MI_CLEAR + 0x130u)  // after the wrestler parts: the body again, then the stock state
 // The depth image (480 x 240 x 16 bits): the pack window's top 0x38400 bytes. Set once from the emitter hook and never
 // reset (aki-roadmap#141): RT64 starts a new framebuffer pair on every depth image change, and its ray tracer gathers only
 // the first pair's perspective scene, so setting and resetting it around each list left the imports (and everything
@@ -108,7 +110,7 @@ static void write_clear(void) {
         RAM32(at + 8) = 0;
         RAM32(at + 12) = 0;
     }
-    u32* out = (u32*)MI_CLEAR_DL;
+    u32* out = (u32*)MI_CLEAR_BODY;
     put(&out, 0xE7000000u, 0);              // G_RDPPIPESYNC
     put(&out, 0xD7000000u, 0);              // texture off for the clear
     put(&out, 0xE300080Fu, 0x00082C00u);    // othermode H as the lists set it (1-cycle)
@@ -122,9 +124,23 @@ static void write_clear(void) {
     put(&out, 0x06000204u, 0x00000406u);    // the two triangles
     put(&out, 0xE7000000u, 0);
     put(&out, 0xE2001D00u, 0);              // Z source: the pixel's again
+    put(&out, 0xDF000000u, 0);
+    out = (u32*)MI_CLEAR_DL;
+    put(&out, 0xDE000000u, MI_CLEAR_BODY - 0x80000000u);
     put(&out, 0xDB060030u, MI_CLEAR_NOOP - 0x80000000u); // segment 0xC: the empty list, for the rest of this frame
     put(&out, 0xDF000000u, 0);
     out = (u32*)MI_CLEAR_NOOP;
+    put(&out, 0xDF000000u, 0);
+    // After the parts (mi_aki_nodes_emit_done): depth back to 1.0, so the imports' depth never outlives the wrestler
+    // chunk that drew it (the game's own draws before the next frame's parts, and after the imports stop, test against
+    // it: the far ropes), then the state the lists leave (mi_list_close) and texturing on, as the stock parts have it.
+    out = (u32*)MI_CLEAR_AFTER;
+    put(&out, 0xDE000000u, MI_CLEAR_BODY - 0x80000000u);
+    put(&out, 0xE7000000u, 0);
+    put(&out, 0xE3001001u, 0);
+    put(&out, 0xE200001Cu, 0x0F0A7008u);
+    put(&out, 0xD9FFFFFEu, 0x00020400u);
+    put(&out, 0xD7000002u, 0xFFFFFFFFu);
     put(&out, 0xDF000000u, 0);
 }
 
@@ -193,9 +209,27 @@ void mi_restore_part(const MiSavedPart* s, u32 dl0, u32 dl1) {
 }
 
 // The emitter draws every slot's visible parts; its parity argument says which matrix half it uses this frame.
+// The game's head pointer this call armed the clear for (the caller reloads it after the emitter returns).
+static u32 armed_gfx;
+
 RECOMP_HOOK(AN_EMITTER) void mi_aki_nodes_emit(u32 gfx, s32 parity, s32 list) {
     mi_core_emit(parity & 1);
-    if (mi_core_replacing()) mi_arm_depth_clear(gfx);
+    armed_gfx = 0;
+    if (mi_core_replacing()) {
+        mi_arm_depth_clear(gfx);
+        armed_gfx = gfx;
+    }
+}
+
+RECOMP_HOOK_RETURN(AN_EMITTER) void mi_aki_nodes_emit_done(void) {
+    if (!armed_gfx) return;
+    u32 head = RAM32(armed_gfx);
+    if (mi_is_ram(head)) {
+        RAM32(head) = 0xDE000000u;          // the after-clear, behind the parts this call drew
+        RAM32(head + 4) = MI_CLEAR_AFTER - 0x80000000u;
+        RAM32(armed_gfx) = head + 8;
+    }
+    armed_gfx = 0;
 }
 
 AKI_ON_FRAME void mi_aki_nodes_frame(void) { mi_core_frame(); }
