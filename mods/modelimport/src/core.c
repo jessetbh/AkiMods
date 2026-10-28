@@ -133,20 +133,27 @@ static int load_pack(MiPack* p) {
     if (RAM32(base + 20) != (u32)size) return pack_fail(p, "file size doesn't match its header");
     u32 built = RAM32(base + 16), flags = RAM32(base + 24);
     u32 eoff = RAM32(base + 28), ecount = RAM32(base + 32), roff = RAM32(base + 36), rcount = RAM32(base + 40);
-    if (ecount == 0 || ecount > MI_PACK_ENTRIES || eoff & 3 || eoff < AKP1_SIZE || eoff + ecount * 8 > (u32)size)
+    // Every check as "x > size - y" (size >= AKP1_SIZE here), so no sum can wrap around.
+    if (ecount == 0 || ecount > MI_PACK_ENTRIES || (eoff & 3) || eoff < AKP1_SIZE || eoff > (u32)size ||
+        ecount * 8 > (u32)size - eoff)
         return pack_fail(p, "bad entry table");
-    if (roff & 3 || (rcount && roff < AKP1_SIZE) || rcount > (u32)size / 4 || roff + rcount * 4 > (u32)size)
+    if ((roff & 3) || rcount > (u32)size / 4 ||
+        (rcount && (roff < AKP1_SIZE || roff > (u32)size || rcount * 4 > (u32)size - roff)))
         return pack_fail(p, "bad relocation table");
-    u32 delta = base - built;
+    // All offsets are checked before any is applied, and none may point into the table itself (a relocation there
+    // could change a later, already checked entry).
+    u32 delta = base - built, rend = roff + rcount * 4;
     for (u32 r = 0; r < rcount; r++) {
         u32 off = RAM32(base + roff + r * 4);
-        if (off & 3 || off < AKP1_SIZE || off + 4 > (u32)size) return pack_fail(p, "relocation outside the file");
+        if ((off & 3) || off < AKP1_SIZE || off > (u32)size - 4 || (off >= roff && off < rend))
+            return pack_fail(p, "relocation outside the file");
     }
     for (u32 r = 0; r < rcount; r++) RAM32(base + RAM32(base + roff + r * 4)) += delta;
     p->count = 0;
     for (u32 i = 0; i < ecount; i++) {
         u32 part = RAM32(base + eoff + i * 8), dl = RAM32(base + eoff + i * 8 + 4);
-        if ((part >= (u32)mi_parts() && part != AKP1_WELDED) || dl < AKP1_SIZE || dl + 8 > (u32)size || (dl & 7)) continue;
+        if ((part >= (u32)mi_parts() && part != AKP1_WELDED) || dl < AKP1_SIZE || dl > (u32)size - 8 || (dl & 7)) continue;
+        if (part == AKP1_WELDED && !(flags & AKP1_FLAG_WELDED)) continue; // the layout check keys on the flag
         p->part[p->count] = part;
         p->dl[p->count] = base + dl;
         p->count++;
@@ -167,7 +174,10 @@ static int load_pack(MiPack* p) {
 static int find_pack(const char* id) {
     for (int i = 0; i < pack_count; i++)
         if (str_eq(packs[i].id, id)) return packs[i].state == 1 ? i : -1;
-    if (pack_count >= MI_PACKS) return -1;
+    if (pack_count >= MI_PACKS) {
+        mi_log_str("model pack "); mi_log_str(id); mi_log_str(": not loaded, 8 packs per match at most"); mi_log_end();
+        return -1;
+    }
     MiPack* p = &packs[pack_count++];
     str_copy(p->id, id, MI_ID_LEN);
     return load_pack(p) == 0 ? pack_count - 1 : -1;
@@ -283,13 +293,15 @@ static void read_rules(void) {
     char* text = (char*)MI_TEXT;
     text[size] = 0;
     int line_no = 1;
-    char* start = text;
-    for (s32 i = 0; i <= size; i++) {
+    s32 first = (size >= 3 && (u8)text[0] == 0xEF && (u8)text[1] == 0xBB && (u8)text[2] == 0xBF) ? 3 : 0; // UTF-8 BOM
+    char* start = text + first;
+    for (s32 i = first; i <= size; i++) {
         if (text[i] == '\n' || text[i] == '\r' || text[i] == 0) {
             char end = text[i];
+            char next = (i < size) ? text[i + 1] : 0;
             text[i] = 0;
             parse_line(start, line_no);
-            if (end == '\n') line_no++;
+            if (end == '\n' || (end == '\r' && next != '\n')) line_no++; // \n, \r\n and \r-only files
             start = &text[i + 1];
         }
     }
@@ -327,6 +339,8 @@ typedef struct {
 static MiSlot slots[MI_MAX_SLOTS];
 static int in_match;
 static u32 reload_seen;
+static u32 frame_no;          // counted by mi_core_frame
+static s32 reload_frame = -1; // a Reload's frame while the slots sit out the frames still in flight
 
 static u32 slot_signature(int slot) {
     u32 sig = 0x811C9DC5u;
@@ -422,7 +436,19 @@ void mi_core_emit(int parity) {
         return;
     }
     u32 reload = recomp_get_config_u32("reload");
-    if (!in_match || reload != reload_seen) {
+    if (in_match && reload != reload_seen) {
+        // The frames already submitted may still draw the old lists over the old pack memory: stock for two frames.
+        restore_all();
+        reload_seen = reload;
+        reload_frame = (s32)frame_no;
+    }
+    if (reload_frame >= 0) {
+        if (frame_no - (u32)reload_frame < 2) return;
+        reload_frame = -1;
+        reset_packs();
+        read_rules();
+    }
+    if (!in_match) {
         restore_all();
         reset_packs();
         read_rules();
@@ -453,6 +479,7 @@ void mi_core_emit(int parity) {
 static s32 logged_wrestler[MI_MAX_SLOTS];
 
 void mi_core_frame(void) {
+    frame_no++;
     if (!recomp_get_config_u32("log")) return;
     for (int i = 0; i < mi_slots(); i++) {
         s32 w = mi_slot_active(i) ? mi_slot_wrestler(i) : 0;

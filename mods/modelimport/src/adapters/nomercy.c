@@ -26,7 +26,7 @@ u32 mi_part_node(int slot, int part) {
     return mi_is_ram(node) ? node : 0;
 }
 
-s32 mi_slot_wrestler(int slot) { return RAM16(MI_WRESTLER_IDS + slot * 2); }
+s32 mi_slot_wrestler(int slot) { return (s32)(u16)RAM16(MI_WRESTLER_IDS + slot * 2); } // as the Log prints it
 
 // Not found yet: costume rules in models.txt never match on No Mercy until it is (the Log option prints the ids).
 s32 mi_slot_costume(int slot) { return -1; }
