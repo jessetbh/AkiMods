@@ -13,6 +13,7 @@
             Defines = @(
                 '-DMI_ACTORS=0x80091CC0u',       # part actors: + slot*0x1810 + part*0xDC
                 '-DMI_WRESTLER_IDS=0x80076264u', # s16 per slot: the wrestler id (func_800140B4)
+                '-DMI_COSTUMES_U8=0x8007626Cu',  # u8 per slot: the costume (func_800140B4's third argument)
                 '-DMI_MEM_BASE=0x80400000u',     # packs load here: Expansion RAM No Mercy doesn't use...
                 '-DMI_MEM_SIZE=0x003C0000u',     # ...up to 0x807C0000
                 '-DMI_SCRATCH=0x807C0000u'       # the core's lists and models.txt (32 KB; below 8 MB so RT64 reads it)

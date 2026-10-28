@@ -6,7 +6,8 @@
 //     #define AN_EMITTER "func_800028B4"     // the part emitter, (gfx**, parity, list): hooked to swap the parts
 //     #include "aki_nodes.c"
 //
-// plus, in mod.psd1, MI_ACTORS / MI_WRESTLER_IDS / MI_MEM_* / MI_SCRATCH and, where the game keeps it, MI_COSTUMES.
+// plus, in mod.psd1, MI_ACTORS / MI_WRESTLER_IDS / MI_MEM_* / MI_SCRATCH and, where the game keeps it, MI_COSTUMES
+// (s16 per slot) or MI_COSTUMES_U8 (a byte per slot).
 //
 // The layout (aki-roadmap#130 step 1-3 write-ups for No Mercy, Soldier Ant's VPW2 RE): 4 wrestler slots of AN_PARTS
 // part actors, 0xDC bytes each (MI_ACTORS + slot * AN_PARTS * 0xDC). Each part's render node (actor+0x14) has a
@@ -40,9 +41,12 @@ u32 mi_part_node(int slot, int part) {
 
 s32 mi_slot_wrestler(int slot) { return (s32)(u16)RAM16(MI_WRESTLER_IDS + slot * 2); } // as the Log prints it
 
-#ifdef MI_COSTUMES
-// The costume the game built the slot with, stored next to the wrestler id.
+#if defined(MI_COSTUMES)
+// The costume the game built the slot with, stored next to the wrestler id (s16 per slot).
 s32 mi_slot_costume(int slot) { return (s32)RAM16(MI_COSTUMES + slot * 2); }
+#elif defined(MI_COSTUMES_U8)
+// The same, one byte per slot.
+s32 mi_slot_costume(int slot) { return (s32)RAM8(MI_COSTUMES_U8 + slot); }
 #else
 // Not known for this game: models.txt costume rules never match (the Log option prints the wrestler ids).
 s32 mi_slot_costume(int slot) { return -1; }

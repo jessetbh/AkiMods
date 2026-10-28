@@ -32,9 +32,10 @@ off banjo                             # turns a pack off, whatever the other lin
 Turn on **Log wrestler ids** in the Mods menu and start a match. The log (stderr, or `<Game>Recompiled.log`) prints
 one line per slot, such as `slot 1: wrestler 0302`. Write that id as `0x0302` in `models.txt`.
 
-On No Mercy the costume isn't decoded yet, so a `costume` line never matches there. Leave the costume out. On VPW2
-the costume is the value the game builds the slot with (`func_80014730`); its numbering isn't checked against the
-costume menu yet.
+The costume is the value the game builds the slot with: on No Mercy `func_800140B4`'s costume argument (a byte per
+slot at 0x8007626C, the one it looks the wrestler's appearance up with), on VPW2 `func_80014730`'s. The log prints it
+(`slot 1: wrestler 0302 costume 0`). Its numbering isn't checked against the costume menus yet: write what the log
+shows.
 
 ## What goes wrong, and what the log says
 
