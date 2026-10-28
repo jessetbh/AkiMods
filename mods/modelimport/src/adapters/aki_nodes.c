@@ -74,22 +74,58 @@ static void put(u32** out, u32 w0, u32 w1) {
     *out += 2;
 }
 
+// The depth clear (aki-roadmap#130): No Mercy has no depth buffer at all (no gDPSetDepthImage, nothing writes depth), so
+// each imported model clears one first with a screen-covering quad that only writes far depth (Z_UPD, no compare; the
+// blender keeps the framebuffer's colour), then draws with Z_CMP | Z_UPD: its parts occlude each other instead of
+// showing through (Banjo's backpack, Snake's gear). Models still don't depth-test against each other or the arena,
+// as the stock wrestlers don't. The quad's matrix and vertices live past the core's scratch (32 KB).
+#define MI_CLEAR (MI_SCRATCH + 0x8000u)
+#define MI_DEPTH (MI_MEM_BASE + MI_MEM_SIZE) // the depth image (480 x 240 x 16 bits): the pack window's top 0x38400 bytes
+static void write_clear_quad(void) {
+    // Identity MVP but w = 100 (N64 fixed point: 16 integer halves, then 16 fractions): vertices at (+-101, +-101, 99)
+    // land just outside the screen edges at depth 0.99, the far end of the range.
+    static const u32 ints[8] = { 0x00010000u, 0, 0x00000001u, 0, 0, 0x00010000u, 0, 0x00000064u };
+    for (int i = 0; i < 8; i++) RAM32(MI_CLEAR + i * 4) = ints[i];
+    for (int i = 0; i < 8; i++) RAM32(MI_CLEAR + 32 + i * 4) = 0;
+    static const s16 xy[4][2] = { { -101, -101 }, { 101, -101 }, { 101, 101 }, { -101, 101 } };
+    for (int v = 0; v < 4; v++) {
+        u32 at = MI_CLEAR + 64 + v * 16;
+        RAM16(at + 0) = xy[v][0];
+        RAM16(at + 2) = xy[v][1];
+        RAM16(at + 4) = 99;
+        RAM16(at + 6) = 0;
+        RAM32(at + 8) = 0;
+        RAM32(at + 12) = 0;
+    }
+}
+
 u32* mi_list_open(u32* out) {
+    write_clear_quad();
     put(&out, 0xE7000000u, 0);              // G_RDPPIPESYNC
+    put(&out, 0xFE000000u, MI_DEPTH - 0x80000000u); // gDPSetDepthImage: the game never sets one
+    put(&out, 0xD7000000u, 0);              // texture off for the clear
+    put(&out, 0xE300080Fu, 0x00082C00u);    // othermode H as below (1-cycle)
+    put(&out, 0xE200001Cu, 0x5F5A4060u);    // Z_UPD, IM_RD, FORCE_BL; blender (MEM * 0 + MEM * 1): colour kept
+    put(&out, 0xD9C0F9FAu, 0x00000001u);    // geometry: G_ZBUFFER only (no culling, lighting or shade)
+    put(&out, 0xDC38000Eu, MI_CLEAR - 0x80000000u); // gSPForceMatrix
+    put(&out, 0x01004008u, MI_CLEAR + 64 - 0x80000000u); // 4 vertices
+    put(&out, 0x06000204u, 0x00000406u);    // the two triangles
+    put(&out, 0xE7000000u, 0);
     put(&out, 0xD7000002u, 0xFFFFFFFFu);    // gSPTexture on, full scale, tile 0 (as the stock parts)
     // othermode H bits 8-23 (dither as the game has it): 1-cycle, G_TP_PERSP, G_TD_CLAMP, G_TL_TILE, G_TT_NONE,
     // G_TF_BILERP, G_TC_FILT, G_CK_NONE. A pack's material sets its own TLUT mode and combiner.
     put(&out, 0xE300080Fu, 0x00082C00u);
-    put(&out, 0xE200001Cu, 0x0F0A7008u);    // the stock parts' render mode
+    put(&out, 0xE200001Cu, 0x0F0A7038u);    // the stock parts' render mode plus Z_CMP | Z_UPD
     put(&out, 0xFCFFFFFFu, 0xFFFE7D3Eu);    // combiner SHADE (colour), 1 (alpha): untextured materials
-    put(&out, 0xD9FDF9FFu, 0);              // lighting off (pack vertices carry colours), no culling
+    put(&out, 0xD9FDF9FFu, 0x00000005u);    // lighting off (pack vertices carry colours), no culling; G_ZBUFFER, shade on
     return out;
 }
 
 u32* mi_list_close(u32* out) {
     put(&out, 0xE7000000u, 0);
     put(&out, 0xE3001001u, 0);              // TLUT off again (CI4 materials turn it on)
-    put(&out, 0xD9FFFFFFu, 0x00020400u);    // lighting and back-face culling back on, as the stock parts leave them
+    put(&out, 0xE200001Cu, 0x0F0A7008u);    // the stock render mode (no depth)
+    put(&out, 0xD9FFFFFEu, 0x00020400u);    // G_ZBUFFER off; lighting and back-face culling back on, as the stock parts leave them
     return out;
 }
 
