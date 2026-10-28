@@ -42,6 +42,7 @@ void mi_restore_part(const MiSavedPart* s, u32 dl0, u32 dl1); // puts it back if
 
 // --- Provided by the core, called from the adapter's hooks ----------------------------------------------------
 void mi_core_emit(int parity);            // before the game draws its wrestlers' parts (may run several times a frame)
+int mi_core_replacing(void);              // after mi_core_emit: some slot draws an imported model
 void mi_core_frame(void);                 // once per frame
 
 void mi_log_str(const char* s);

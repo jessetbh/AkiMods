@@ -574,6 +574,12 @@ static void restore_all(void) {
     }
 }
 
+int mi_core_replacing(void) {
+    for (int i = 0; i < mi_slots(); i++)
+        if (slots[i].state == 1 && mi_slot_active(i)) return 1;
+    return 0;
+}
+
 void mi_core_emit(int parity) {
     int n = mi_slots();
     if (!recomp_get_config_u32("enabled")) {

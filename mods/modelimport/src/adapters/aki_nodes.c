@@ -75,13 +75,19 @@ static void put(u32** out, u32 w0, u32 w1) {
 }
 
 // The depth clear (aki-roadmap#130): No Mercy has no depth buffer at all (no gDPSetDepthImage, nothing writes depth), so
-// each imported model clears one first with a screen-covering quad that only writes far depth (Z_UPD, no compare; the
-// blender keeps the framebuffer's colour), then draws with Z_CMP | Z_UPD: its parts occlude each other instead of
-// showing through (Banjo's backpack, Snake's gear). Models still don't depth-test against each other or the arena,
-// as the stock wrestlers don't. The quad's matrix and vertices live past the core's scratch (32 KB).
+// the imported models clear one, once per frame, with a screen-covering quad that only writes far depth (Z_UPD, no
+// compare; the blender keeps the framebuffer's colour), and draw with Z_CMP | Z_UPD: their parts occlude each other
+// and one model's parts the other's (Banjo's backpack, Snake's gear, Banjo behind Snake). They still don't depth-test
+// against the arena or the stock wrestlers, which write no depth.
+// Once per frame whatever the slots' draw order: each list calls the clear through segment 0xC (unused by these games),
+// the clear ends by pointing 0xC at an empty list, and before the game draws the parts each frame the emitter hook adds
+// a gSPSegment pointing 0xC back at the clear (mi_arm_depth_clear). The quad's matrix, vertices and both lists live past
+// the core's scratch (32 KB).
 #define MI_CLEAR (MI_SCRATCH + 0x8000u)
+#define MI_CLEAR_DL (MI_CLEAR + 0x80u)
+#define MI_CLEAR_NOOP (MI_CLEAR + 0x100u)
 #define MI_DEPTH (MI_MEM_BASE + MI_MEM_SIZE) // the depth image (480 x 240 x 16 bits): the pack window's top 0x38400 bytes
-static void write_clear_quad(void) {
+static void write_clear(void) {
     // Identity MVP but w = 10000 (N64 fixed point: 16 integer halves, then 16 fractions): vertices at (+-20000, +-20000,
     // 9999) cover twice the screen (frame interpolation may move the camera) at depth 0.9999, the far end of the range.
     static const u32 ints[8] = { 0x00010000u, 0, 0x00000001u, 0, 0, 0x00010000u, 0, 0x00002710u };
@@ -97,21 +103,36 @@ static void write_clear_quad(void) {
         RAM32(at + 8) = 0;
         RAM32(at + 12) = 0;
     }
-}
-
-u32* mi_list_open(u32* out) {
-    write_clear_quad();
+    u32* out = (u32*)MI_CLEAR_DL;
     put(&out, 0xE7000000u, 0);              // G_RDPPIPESYNC
-    put(&out, 0xFE000000u, MI_DEPTH - 0x80000000u); // gDPSetDepthImage: the game never sets one
     put(&out, 0xD7000000u, 0);              // texture off for the clear
-    put(&out, 0xE300080Fu, 0x00082C00u);    // othermode H as below (1-cycle)
+    put(&out, 0xE300080Fu, 0x00082C00u);    // othermode H as the lists set it (1-cycle)
     put(&out, 0xE200001Cu, 0x5F5A4060u);    // Z_UPD, IM_RD, FORCE_BL; blender (MEM * 0 + MEM * 1): colour kept
     put(&out, 0xFCFFFFFFu, 0xFFFE7D3Eu);    // combiner alpha 1, so an alpha compare the game left on keeps the quad
     put(&out, 0xD9C0F9FAu, 0x00000001u);    // geometry: G_ZBUFFER only (no culling, lighting or shade)
     put(&out, 0xDC38000Eu, MI_CLEAR - 0x80000000u); // gSPForceMatrix
     put(&out, 0x01004008u, MI_CLEAR + 64 - 0x80000000u); // 4 vertices
     put(&out, 0x06000204u, 0x00000406u);    // the two triangles
-    put(&out, 0xE7000000u, 0);
+    put(&out, 0xDB060030u, MI_CLEAR_NOOP - 0x80000000u); // segment 0xC: the empty list, for the rest of this frame
+    put(&out, 0xDF000000u, 0);
+    out = (u32*)MI_CLEAR_NOOP;
+    put(&out, 0xDF000000u, 0);
+}
+
+void mi_arm_depth_clear(u32 gfx) {
+    u32 head = RAM32(gfx);
+    if (!mi_is_ram(head)) return;
+    write_clear();
+    RAM32(head) = 0xDB060030u;              // gSPSegment(0xC, the clear) in the game's list, before the parts
+    RAM32(head + 4) = MI_CLEAR_DL - 0x80000000u;
+    RAM32(gfx) = head + 8;
+}
+
+u32* mi_list_open(u32* out) {
+    put(&out, 0xE7000000u, 0);              // G_RDPPIPESYNC
+    put(&out, 0xFE000000u, MI_DEPTH - 0x80000000u); // gDPSetDepthImage: the game never sets one
+    put(&out, 0xDE000000u, 0x0C000000u);    // the frame's depth clear, the first time (segment 0xC, see above)
+    put(&out, 0xE7000000u, 0);              // (a sync between the clear's triangles and the state below)
     put(&out, 0xD7000002u, 0xFFFFFFFFu);    // gSPTexture on, full scale, tile 0 (as the stock parts)
     // othermode H bits 8-23 (dither as the game has it): 1-cycle, G_TP_PERSP, G_TD_CLAMP, G_TL_TILE, G_TT_NONE,
     // G_TF_BILERP, G_TC_FILT, G_CK_NONE. A pack's material sets its own TLUT mode and combiner.
@@ -161,6 +182,9 @@ void mi_restore_part(const MiSavedPart* s, u32 dl0, u32 dl1) {
 }
 
 // The emitter draws every slot's visible parts; its parity argument says which matrix half it uses this frame.
-RECOMP_HOOK(AN_EMITTER) void mi_aki_nodes_emit(u32 gfx, s32 parity, s32 list) { mi_core_emit(parity & 1); }
+RECOMP_HOOK(AN_EMITTER) void mi_aki_nodes_emit(u32 gfx, s32 parity, s32 list) {
+    mi_core_emit(parity & 1);
+    if (mi_core_replacing()) mi_arm_depth_clear(gfx);
+}
 
 AKI_ON_FRAME void mi_aki_nodes_frame(void) { mi_core_frame(); }
