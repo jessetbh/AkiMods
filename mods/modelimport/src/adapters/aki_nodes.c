@@ -139,7 +139,9 @@ u32* mi_list_open(u32* out) {
     put(&out, 0xE300080Fu, 0x00082C00u);
     put(&out, 0xE200001Cu, 0x0F0A7038u);    // the stock parts' render mode plus Z_CMP | Z_UPD
     put(&out, 0xFCFFFFFFu, 0xFFFE7D3Eu);    // combiner SHADE (colour), 1 (alpha): untextured materials
-    put(&out, 0xD9FDF9FFu, 0x00200005u);    // lighting off (pack vertices carry colours), no culling; G_ZBUFFER, shade, smooth shading on
+    // Geometry as the game's preamble leaves it, whichever list drew the clear: lighting, fog, texgen, LOD and culling
+    // off (pack vertices carry colours); G_ZBUFFER, shade and smooth shading on.
+    put(&out, 0xD9C0F9FFu, 0x00200005u);
     return out;
 }
 
