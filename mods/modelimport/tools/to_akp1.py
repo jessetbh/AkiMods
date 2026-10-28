@@ -33,7 +33,7 @@ def header_and_tables(manifest, data_len):
         eoff += 1
     roff = eoff + 8 * len(entries)
     flags = (FLAG_WELDED if welded else 0) | (FLAG_TLUT if any(t.get("format") == "CI4" for t in manifest.get("texture_tiles", [])) else 0)
-    if manifest.get("winding") == "normals":
+    if manifest.get("winding") == "normals" and not manifest.get("double_sided"):
         flags |= FLAG_CULL   # aki-model turned every triangle to face its normals: back faces can be culled
     size = roff + 4 * len(relocs)
     profile = manifest.get("profile") or manifest.get("game") or "nomercy"
