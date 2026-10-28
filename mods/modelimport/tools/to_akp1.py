@@ -15,7 +15,7 @@ import sys
 
 MAGIC, VERSION, SIZE = 0x414B5031, 1, 64
 WELDED = 0xFFFFFFFF
-FLAG_WELDED, FLAG_TLUT = 1, 2
+FLAG_WELDED, FLAG_TLUT, FLAG_CULL = 1, 2, 4
 
 
 def header_and_tables(manifest, data_len):
@@ -33,6 +33,8 @@ def header_and_tables(manifest, data_len):
         eoff += 1
     roff = eoff + 8 * len(entries)
     flags = (FLAG_WELDED if welded else 0) | (FLAG_TLUT if any(t.get("format") == "CI4" for t in manifest.get("texture_tiles", [])) else 0)
+    if manifest.get("winding") == "normals" and not manifest.get("double_sided"):
+        flags |= FLAG_CULL   # aki-model turned every triangle to face its normals: back faces can be culled
     size = roff + 4 * len(relocs)
     profile = manifest.get("profile") or manifest.get("game") or "nomercy"
     head = struct.pack(">IHH8sIIIIIIIIII8x", MAGIC, VERSION, SIZE, profile.encode()[:8], base - SIZE, size, flags,
