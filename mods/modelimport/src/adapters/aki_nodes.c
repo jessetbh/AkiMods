@@ -86,7 +86,12 @@ static void put(u32** out, u32 w0, u32 w1) {
 #define MI_CLEAR (MI_SCRATCH + 0x8000u)
 #define MI_CLEAR_DL (MI_CLEAR + 0x80u)
 #define MI_CLEAR_NOOP (MI_CLEAR + 0x100u)
-#define MI_DEPTH (MI_MEM_BASE + MI_MEM_SIZE) // the depth image (480 x 240 x 16 bits): the pack window's top 0x38400 bytes
+// The depth image (480 x 240 x 16 bits): the pack window's top 0x38400 bytes. Set once from the emitter hook and never
+// reset (aki-roadmap#141): RT64 starts a new framebuffer pair on every depth image change, and its ray tracer gathers only
+// the first pair's perspective scene, so setting and resetting it around each list left the imports (and everything
+// after them) out of the traced scene. The clear writes the largest depth (primitive depth 0x7FFF), so the game's own
+// draws that test depth (the ring ropes' render modes) pass everywhere but behind an import.
+#define MI_DEPTH (MI_MEM_BASE + MI_MEM_SIZE)
 static void write_clear(void) {
     // Identity MVP but w = 10000 (N64 fixed point: 16 integer halves, then 16 fractions): vertices at (+-20000, +-20000,
     // 9999) cover twice the screen (frame interpolation may move the camera) at depth 0.9999, the far end of the range.
@@ -108,11 +113,15 @@ static void write_clear(void) {
     put(&out, 0xD7000000u, 0);              // texture off for the clear
     put(&out, 0xE300080Fu, 0x00082C00u);    // othermode H as the lists set it (1-cycle)
     put(&out, 0xE200001Cu, 0x5F5A4060u);    // Z_UPD, IM_RD, FORCE_BL; blender (MEM * 0 + MEM * 1): colour kept
+    put(&out, 0xE2001D00u, 0x00000004u);    // Z source: primitive depth (G_ZS_PRIM), the largest:
+    put(&out, 0xEE000000u, 0x7FFF0000u);    // gDPSetPrimDepth(0x7FFF, 0), so later game draws that test depth pass
     put(&out, 0xFCFFFFFFu, 0xFFFE7D3Eu);    // combiner alpha 1, so an alpha compare the game left on keeps the quad
     put(&out, 0xD9C0F9FAu, 0x00000001u);    // geometry: G_ZBUFFER only (no culling, lighting or shade)
     put(&out, 0xDC38000Eu, MI_CLEAR - 0x80000000u); // gSPForceMatrix
     put(&out, 0x01004008u, MI_CLEAR + 64 - 0x80000000u); // 4 vertices
     put(&out, 0x06000204u, 0x00000406u);    // the two triangles
+    put(&out, 0xE7000000u, 0);
+    put(&out, 0xE2001D00u, 0);              // Z source: the pixel's again
     put(&out, 0xDB060030u, MI_CLEAR_NOOP - 0x80000000u); // segment 0xC: the empty list, for the rest of this frame
     put(&out, 0xDF000000u, 0);
     out = (u32*)MI_CLEAR_NOOP;
@@ -123,14 +132,15 @@ void mi_arm_depth_clear(u32 gfx) {
     u32 head = RAM32(gfx);
     if (!mi_is_ram(head)) return;
     write_clear();
-    RAM32(head) = 0xDB060030u;              // gSPSegment(0xC, the clear) in the game's list, before the parts
-    RAM32(head + 4) = MI_CLEAR_DL - 0x80000000u;
-    RAM32(gfx) = head + 8;
+    RAM32(head) = 0xFE000000u;              // gDPSetDepthImage, the same every frame (see MI_DEPTH)
+    RAM32(head + 4) = MI_DEPTH - 0x80000000u;
+    RAM32(head + 8) = 0xDB060030u;          // gSPSegment(0xC, the clear) in the game's list, before the parts
+    RAM32(head + 12) = MI_CLEAR_DL - 0x80000000u;
+    RAM32(gfx) = head + 16;
 }
 
 u32* mi_list_open(u32* out) {
     put(&out, 0xE7000000u, 0);              // G_RDPPIPESYNC
-    put(&out, 0xFE000000u, MI_DEPTH - 0x80000000u); // gDPSetDepthImage: the game never sets one
     put(&out, 0xDE000000u, 0x0C000000u);    // the frame's depth clear, the first time (segment 0xC, see above)
     put(&out, 0xE7000000u, 0);              // (a sync between the clear's triangles and the state below)
     put(&out, 0xD7000002u, 0xFFFFFFFFu);    // gSPTexture on, full scale, tile 0 (as the stock parts)
@@ -150,7 +160,6 @@ u32* mi_list_close(u32* out) {
     put(&out, 0xE3001001u, 0);              // TLUT off again (CI4 materials turn it on)
     put(&out, 0xE200001Cu, 0x0F0A7008u);    // the stock render mode (no depth)
     put(&out, 0xD9FFFFFEu, 0x00020400u);    // G_ZBUFFER off; lighting and back-face culling back on, as the stock parts leave them
-    put(&out, 0xFE000000u, 0);              // no depth image again, as the game has it: later draws (the near ring rope) must not test our depth
     return out;
 }
 
