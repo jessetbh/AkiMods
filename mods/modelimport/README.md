@@ -32,9 +32,10 @@ off banjo                             # turns a pack off, whatever the other lin
 Turn on **Log wrestler ids** in the Mods menu and start a match. The log (stderr, or `<Game>Recompiled.log`) prints
 one line per slot, such as `slot 1: wrestler 0302`. Write that id as `0x0302` in `models.txt`.
 
-On No Mercy the costume isn't decoded yet, so a `costume` line never matches there. Leave the costume out. On VPW2
-the costume is the value the game builds the slot with (`func_80014730`); its numbering isn't checked against the
-costume menu yet.
+The costume is the value the game builds the slot with: on No Mercy `func_800140B4`'s costume argument (a byte per
+slot at 0x8007626C, the one it looks the wrestler's appearance up with), on VPW2 `func_80014730`'s. The log prints it
+(`slot 1: wrestler 0302 costume 0`). Its numbering isn't checked against the costume menus yet: write what the log
+shows.
 
 ## What goes wrong, and what the log says
 
@@ -62,9 +63,14 @@ models you don't have the rights to.
   the Mods-menu options, and builds two display lists per replaced slot (one per frame parity).
 - `src/adapter.h`: what a game adapter provides: its slots, part nodes, matrices, wrestler ids, render state and the
   hook that draws the parts.
-- `src/adapters/nomercy.c`, `src/adapters/vpw2.c`: the game adapters. `src/adapter.c` picks the adapter for the game being built.
-- **Adding a game:** write `adapters/<game>.c` against `adapter.h`, add it to `adapter.c`, and add the game's
-  defines to `mod.psd1`. They mirror the `runtime` block of the game's AkiTools profile.
+- `src/adapters/aki_nodes.c`: the adapter for AKI's node-based wrestler renderer, shared by the games that run it.
+  `src/adapters/nomercy.c` and `src/adapters/vpw2.c` each set four things and include it: the profile id, the parts
+  per slot, the part emitter to hook, and (in `mod.psd1`) the addresses. `src/adapter.c` picks the game's file.
+- **Adding a game that runs the same renderer** (WM2000 next): a 4-line `adapters/<game>.c` (`AN_PROFILE`,
+  `AN_PARTS`, `AN_EMITTER`, `#include "aki_nodes.c"`), a line in `adapter.c`, and the game's defines in `mod.psd1`
+  (`MI_ACTORS`, `MI_WRESTLER_IDS`, `MI_MEM_BASE` / `MI_MEM_SIZE`, `MI_SCRATCH`, and `MI_COSTUMES` if the game keeps
+  the costume). They mirror the `runtime` block of the game's AkiTools profile. A game with a different renderer
+  writes its own adapter against `adapter.h`.
 - **Host exports**, which each game provides (No Mercy and VPW2: `feat/130-model-host`): `aki_log`, `aki_models_read`
   (reads only from `mods\models`, at most one folder deep) and `aki_models_list`.
 - **Build:** `..\..\build.ps1 modelimport nomercy` (or `vpw2`). VPW2 packs take its part table:
