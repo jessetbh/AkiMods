@@ -504,10 +504,12 @@ static void build_list(int slot, const MiSlot* s, const MiPack* p, u32 dl, int p
     for (int e = 0; e < p->count; e++) {
         if (p->part[e] == AKP1_WELDED) {
             put(&out, 0xDB060034u, mi_matrix_segment(slot, parity) - 0x80000000u); // gSPSegment(0xD, part matrices)
-            if (s->skin_buf[parity]) put(&out, 0xDB060038u, s->skin_buf[parity] - 0x80000000u); // segment 0xE
+            // Segment 0xE only for a skinned pack (the slot keeps its buffers when it changes to another pack).
+            const int skinned = p->skin_count && s->skin_buf[parity];
+            if (skinned) put(&out, 0xDB060038u, s->skin_buf[parity] - 0x80000000u); // segment 0xE
             put(&out, 0xDE000000u, p->dl[e] - 0x80000000u);
             put(&out, 0xDB060034u, 0);
-            if (s->skin_buf[parity]) put(&out, 0xDB060038u, 0);
+            if (skinned) put(&out, 0xDB060038u, 0);
             continue;
         }
         u32 node = mi_part_node(slot, (int)p->part[e]);
@@ -555,7 +557,6 @@ static void decide_slot(int slot, MiSlot* s) {
         mi_log_str("'s skinned vertices; left stock"); mi_log_end();
         return;
     }
-    if (!p->skin_count) s->skin_buf[0] = s->skin_buf[1] = 0;   // (a skinned pack before may have set them)
     s->pack = pi;
     s->dl[0] = MI_SCRATCH + (u32)(slot * 2) * MI_LIST_BYTES;
     s->dl[1] = s->dl[0] + MI_LIST_BYTES;
