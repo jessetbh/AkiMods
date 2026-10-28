@@ -82,17 +82,17 @@ static void put(u32** out, u32 w0, u32 w1) {
 #define MI_CLEAR (MI_SCRATCH + 0x8000u)
 #define MI_DEPTH (MI_MEM_BASE + MI_MEM_SIZE) // the depth image (480 x 240 x 16 bits): the pack window's top 0x38400 bytes
 static void write_clear_quad(void) {
-    // Identity MVP but w = 100 (N64 fixed point: 16 integer halves, then 16 fractions): vertices at (+-101, +-101, 99)
-    // land just outside the screen edges at depth 0.99, the far end of the range.
-    static const u32 ints[8] = { 0x00010000u, 0, 0x00000001u, 0, 0, 0x00010000u, 0, 0x00000064u };
+    // Identity MVP but w = 10000 (N64 fixed point: 16 integer halves, then 16 fractions): vertices at (+-20000, +-20000,
+    // 9999) cover twice the screen (frame interpolation may move the camera) at depth 0.9999, the far end of the range.
+    static const u32 ints[8] = { 0x00010000u, 0, 0x00000001u, 0, 0, 0x00010000u, 0, 0x00002710u };
     for (int i = 0; i < 8; i++) RAM32(MI_CLEAR + i * 4) = ints[i];
     for (int i = 0; i < 8; i++) RAM32(MI_CLEAR + 32 + i * 4) = 0;
-    static const s16 xy[4][2] = { { -101, -101 }, { 101, -101 }, { 101, 101 }, { -101, 101 } };
+    static const s16 xy[4][2] = { { -20000, -20000 }, { 20000, -20000 }, { 20000, 20000 }, { -20000, 20000 } };
     for (int v = 0; v < 4; v++) {
         u32 at = MI_CLEAR + 64 + v * 16;
         RAM16(at + 0) = xy[v][0];
         RAM16(at + 2) = xy[v][1];
-        RAM16(at + 4) = 99;
+        RAM16(at + 4) = 9999;
         RAM16(at + 6) = 0;
         RAM32(at + 8) = 0;
         RAM32(at + 12) = 0;
@@ -106,6 +106,7 @@ u32* mi_list_open(u32* out) {
     put(&out, 0xD7000000u, 0);              // texture off for the clear
     put(&out, 0xE300080Fu, 0x00082C00u);    // othermode H as below (1-cycle)
     put(&out, 0xE200001Cu, 0x5F5A4060u);    // Z_UPD, IM_RD, FORCE_BL; blender (MEM * 0 + MEM * 1): colour kept
+    put(&out, 0xFCFFFFFFu, 0xFFFE7D3Eu);    // combiner alpha 1, so an alpha compare the game left on keeps the quad
     put(&out, 0xD9C0F9FAu, 0x00000001u);    // geometry: G_ZBUFFER only (no culling, lighting or shade)
     put(&out, 0xDC38000Eu, MI_CLEAR - 0x80000000u); // gSPForceMatrix
     put(&out, 0x01004008u, MI_CLEAR + 64 - 0x80000000u); // 4 vertices
@@ -117,7 +118,7 @@ u32* mi_list_open(u32* out) {
     put(&out, 0xE300080Fu, 0x00082C00u);
     put(&out, 0xE200001Cu, 0x0F0A7038u);    // the stock parts' render mode plus Z_CMP | Z_UPD
     put(&out, 0xFCFFFFFFu, 0xFFFE7D3Eu);    // combiner SHADE (colour), 1 (alpha): untextured materials
-    put(&out, 0xD9FDF9FFu, 0x00000005u);    // lighting off (pack vertices carry colours), no culling; G_ZBUFFER, shade on
+    put(&out, 0xD9FDF9FFu, 0x00200005u);    // lighting off (pack vertices carry colours), no culling; G_ZBUFFER, shade, smooth shading on
     return out;
 }
 
@@ -126,6 +127,7 @@ u32* mi_list_close(u32* out) {
     put(&out, 0xE3001001u, 0);              // TLUT off again (CI4 materials turn it on)
     put(&out, 0xE200001Cu, 0x0F0A7008u);    // the stock render mode (no depth)
     put(&out, 0xD9FFFFFEu, 0x00020400u);    // G_ZBUFFER off; lighting and back-face culling back on, as the stock parts leave them
+    put(&out, 0xFE000000u, 0);              // no depth image again, as the game has it: later draws (the near ring rope) must not test our depth
     return out;
 }
 
