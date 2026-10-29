@@ -25,14 +25,22 @@ static void test_same_node(void) {
 static void test_rebuilt_wrestler(void) {
     // The VPW2 crash: the actor got a new node; the old one now belongs to another model and shows nothing.
     CHECK_EQ(mi_restore_ok(OTHER, NODE, 0, DL0, DL1), 0);
-    CHECK_EQ(mi_restore_ok(OTHER, NODE, DL0, DL0, DL1), 0);
+    CHECK_EQ(mi_restore_ok(OTHER, NODE, GAME_DL, DL0, DL1), 0); // re-used, drawing its new model
     CHECK_EQ(mi_restore_ok(0, NODE, 0, DL0, DL1), 0);          // the actor has no node any more (scene gone)
     CHECK_EQ(mi_restore_ok(0, 0, 0, DL0, DL1), 0);             // nothing was saved
+}
+
+static void test_still_shows_our_list(void) {
+    // The node still shows the slot's own list, so the game hasn't re-used it: put it back even when the actor's
+    // pointer reads 0 for a moment or moved (otherwise our scratch list would stay hung and be saved as the original).
+    CHECK_EQ(mi_restore_ok(0, NODE, DL0, DL0, DL1), 1);
+    CHECK_EQ(mi_restore_ok(OTHER, NODE, DL1, DL0, DL1), 1);
 }
 
 int main(void) {
     test_same_node();
     test_rebuilt_wrestler();
+    test_still_shows_our_list();
     printf("[modelimport restore tests] %d checks, %d failed\n", checks, failures);
     return failures ? 1 : 0;
 }

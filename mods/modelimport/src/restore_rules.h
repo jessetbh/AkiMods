@@ -6,8 +6,9 @@
 // (Tifa vs Snake, after many wrestler changes in character select): a re-used node whose list was 0 (a bone-only part,
 // or a part the core hid in the other slot) got the old wrestler's pointers back and drew a freed list.
 //
-// So a part is put back only when the wrestler's actor still points at the same node, and the node still shows what
-// the core left there (nothing, or one of the slot's own lists).
+// So a part is put back when the node still shows one of the slot's own lists (the game overwrites that list when it
+// re-uses a node, so the node is still ours, even if the actor's pointer reads 0 for a moment), or when it shows nothing
+// and the wrestler's actor still points at it. A node showing nothing that the actor no longer points at may be anyone's.
 //
 // Pure, header-only (host tests: tests/restore_test.c).
 #ifndef MI_RESTORE_RULES_H
@@ -17,8 +18,9 @@
 // node_dl: that node's list now; dl0 / dl1: the slot's own lists (both parities).
 static inline int mi_restore_ok(unsigned int current_node, unsigned int saved_node, unsigned int node_dl,
                                 unsigned int dl0, unsigned int dl1) {
-    if (saved_node == 0 || current_node != saved_node) return 0;
-    return node_dl == 0 || node_dl == dl0 || node_dl == dl1;
+    if (saved_node == 0) return 0;
+    if (node_dl != 0 && (node_dl == dl0 || node_dl == dl1)) return 1;
+    return node_dl == 0 && current_node == saved_node;
 }
 
 #endif
