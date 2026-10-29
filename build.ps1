@@ -98,7 +98,7 @@ foreach ($m in $selectedMods) {
                 if ($check.enabled_by_default -ne [bool]$cfg.EnabledByDefault) { throw "${m}/${g}: enabled_by_default didn't land in mod.json" }
                 $entry.Delete()
                 $new = $zip.CreateEntry('mod.json')
-                $new.LastWriteTime = $stamp   # not the build time: the same sources give the same .nrm bytes
+                $new.LastWriteTime = $stamp   # RecompModTool's time, like its other entries (it stamps them all with the build time)
                 $writer = New-Object IO.StreamWriter($new.Open(), (New-Object Text.UTF8Encoding $false))
                 $writer.Write($json); $writer.Dispose()
             }

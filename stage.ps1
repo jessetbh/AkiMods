@@ -43,7 +43,10 @@ foreach ($modDir in $built) {
         # It's staging output, so uncommitted edits there are lost: say so instead of wiping them silently.
         $models = "$dest\models"
         if (Test-Path $models) {
-            $dirty = @(git -C $repoDir status --porcelain -- 'assets/mods/models' 2>$null)
+            $dirty = @()
+            if (Get-Command git -ErrorAction SilentlyContinue) {
+                try { $dirty = @(& git -C $repoDir status --porcelain -- 'assets/mods/models' 2>$null) } catch { }
+            }
             if ($dirty.Count) { Write-Warning "$($gameDir.Name): replacing assets\mods\models with uncommitted changes ($($dirty.Count) paths)" }
             Remove-Item $models -Recurse -Force
         }
