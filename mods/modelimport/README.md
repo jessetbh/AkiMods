@@ -38,7 +38,8 @@ deleted. Delete `.bundled` to get the starter packs back. Their HD textures come
 pack (the **Model packs** dialog on this mod's page, `models.txt`, or the Slot N options).
 
 For mod developers: the packs live in `packs\<game>\`, built with AkiTools
-`aki-model.py convert --space model --weld --skin --textures tiles --profile <game>`. Merge their `<id>-hd.rtz` files
+`aki-model.py batch <list>.json --game all --out <dir>` (a list of the models with their name, author, licence,
+source and slot). Merge their `<id>-hd.rtz` files
 with `tools\merge_rtz.py packs\<game>\aki_starter_packs_hd.rtz ...`. `.\stage.ps1 modelimport -RepoSuffix -fullconv`
 copies them into the games' `assets\mods\` with the .nrm (mod.psd1 `Packs`).
 
