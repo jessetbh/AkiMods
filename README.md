@@ -92,12 +92,16 @@ or changed.
 A mod with `Packs = '<folder>'` in its `mod.psd1` also ships data (aki-roadmap#145, modelimport's starter packs):
 `<folder>\<game>\*.akimodel` go to `assets\mods\models\`, `*.rtz` to `assets\mods\`. The games install a model pack only
 when the player has no folder of that name. `-RepoSuffix -fullconv` stages into the `<Repo>-fullconv` checkouts.
+Before copying anything it runs `aki-model.py validate` from `..\AkiTools` on every bundled `*.akimodel` (with its
+game folder's profile) and stops if one has errors, so a broken pack can't ship. Without `..\AkiTools` or a working Python on PATH it
+warns and stages unchecked.
 
 ## Layout
 
 ```
 build.ps1               builds every (mod, game) pair
 stage.ps1               copies built .nrm files into the game repos' assets\mods\
+tests/                  python -m unittest discover -s tests (stage.ps1's pack check)
 common/
   games.psd1            per-game facts: repo, mod game id, symbol file, frame hook
   tools.ps1             finds zig, ld.lld and RecompModTool
