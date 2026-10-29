@@ -9,7 +9,8 @@
 # Mods with Bundle = $false in mod.psd1 (developer tools) are skipped.
 # A mod with Packs = '<folder>' in mod.psd1 also ships what <folder>\<game>\ holds (aki-roadmap#145): its
 # <id>.akimodel model packs -> assets\mods\models\, its .rtz texture packs -> assets\mods\, and <folder>\CREDITS.md ->
-# assets\mods\models\. The staged models folder is replaced as a whole, so a pack taken out of the mod goes too.
+# assets\mods\models\. The staged models folder is replaced as a whole, so a pack taken out of the mod goes too; a
+# renamed or dropped .rtz is not removed from assets\mods (delete it there by hand).
 param([string]$Mod = 'all', [string]$RepoSuffix = '')
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
@@ -38,13 +39,19 @@ foreach ($modDir in $built) {
         if (-not $cfg.Packs) { continue }
         $packs = "$root\mods\$($modDir.Name)\$($cfg.Packs)"
         $gamePacks = "$packs\$($gameDir.Name)"
-        if (-not (Test-Path $gamePacks)) { continue }
+        # The staged models folder mirrors packs\<game>\: replaced as a whole (and gone when the game has no packs).
+        # It's staging output, so uncommitted edits there are lost: say so instead of wiping them silently.
         $models = "$dest\models"
-        if (Test-Path $models) { Remove-Item $models -Recurse -Force }
+        if (Test-Path $models) {
+            $dirty = @(git -C $repoDir status --porcelain -- 'assets/mods/models' 2>$null)
+            if ($dirty.Count) { Write-Warning "$($gameDir.Name): replacing assets\mods\models with uncommitted changes ($($dirty.Count) paths)" }
+            Remove-Item $models -Recurse -Force
+        }
+        if (-not (Test-Path $gamePacks)) { continue }
         New-Item -ItemType Directory $models | Out-Null
         foreach ($pack in Get-ChildItem $gamePacks -Directory -Filter *.akimodel) {
             Copy-Item $pack.FullName $models -Recurse
-            $len = (Get-ChildItem $pack.FullName -File | Measure-Object Length -Sum).Sum
+            $len = (Get-ChildItem $pack.FullName -File -Recurse | Measure-Object Length -Sum).Sum
             [pscustomobject]@{ Mod = $modDir.Name; Game = $gameDir.Name; File = "$models\$($pack.Name)"; Length = $len }
         }
         if (Test-Path "$packs\CREDITS.md") { Copy-Item "$packs\CREDITS.md" $models }

@@ -90,10 +90,16 @@ foreach ($m in $selectedMods) {
                 $entry = $zip.GetEntry('mod.json')
                 $reader = New-Object IO.StreamReader($entry.Open())
                 $json = $reader.ReadToEnd(); $reader.Dispose()
+                $stamp = $entry.LastWriteTime   # RecompModTool's; a fixed new one would also do, it just mustn't be now
                 if ($json -match '"enabled_by_default"') { throw "${m}/${g}: mod.json already has enabled_by_default" }
+                if ($json -notmatch '^\s*\{\s*"') { throw "${m}/${g}: mod.json doesn't start like RecompModTool's ({ `"key`" ...)" }
                 $json = $json -replace '^\s*\{', "{`n    `"enabled_by_default`" : $flag,"
+                $check = $json | ConvertFrom-Json
+                if ($check.enabled_by_default -ne [bool]$cfg.EnabledByDefault) { throw "${m}/${g}: enabled_by_default didn't land in mod.json" }
                 $entry.Delete()
-                $writer = New-Object IO.StreamWriter($zip.CreateEntry('mod.json').Open(), (New-Object Text.UTF8Encoding $false))
+                $new = $zip.CreateEntry('mod.json')
+                $new.LastWriteTime = $stamp   # not the build time: the same sources give the same .nrm bytes
+                $writer = New-Object IO.StreamWriter($new.Open(), (New-Object Text.UTF8Encoding $false))
                 $writer.Write($json); $writer.Dispose()
             }
             finally { $zip.Dispose() }

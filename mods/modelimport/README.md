@@ -31,8 +31,9 @@ off banjo                             # turns a pack off, whatever the other lin
 
 The games ship eight ready-made packs, all CC0 (credits and sources: `packs\CREDITS.md`, installed as
 `mods\models\CREDITS.md`): `q-warrior`, `q-monk`, `q-rogue`, `q-ranger`, `q-cleric`, `q-wizard`, `q-human` and
-`q-robot`. At startup each game copies them into `mods\models\`, each one only when no folder of that name is there
-yet, so a pack you edited or replaced is never overwritten. Their HD textures come as one texture pack,
+`q-robot`. At startup each game copies them into `mods\models\`, each one once: `mods\models\.bundled` lists the ones
+it installed (or found there already), so a pack you edited or replaced is never overwritten, and one you delete stays
+deleted. Delete `.bundled` to get the starter packs back. Their HD textures come as one texture pack,
 `mods\aki_starter_packs_hd.rtz`. Nothing writes `models.txt`: no wrestler changes until you turn the mod on and pick a
 pack (the **Model packs** dialog on this mod's page, `models.txt`, or the Slot N options).
 
