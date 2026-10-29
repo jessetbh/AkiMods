@@ -18,6 +18,7 @@
 // slot's part matrices around the one model list).
 #include "adapter.h"
 #include "recomp_api.h"
+#include "window_check.h"
 
 RECOMP_IMPORT("*", void aki_log(const char* str, u32 length));
 RECOMP_IMPORT("*", s32 aki_models_read(const char* path, void* dest, u32 max));
@@ -574,6 +575,24 @@ static void restore_all(void) {
     }
 }
 
+// aki-roadmap#155: the window (packs, the adapter's depth area after them, then the scratch: lists, models.txt and
+// the adapter's clear list at MI_SCRATCH + 0x8000) must still be all zero before the mod first writes it. A conversion that uses Expansion RAM (the relinked No Mercy hacks) fills it from boot; then model imports stay
+// off for the session, with one log line.
+static int window_state; // 0 not checked, 1 free, -1 in use
+
+static int window_free(void) {
+    if (window_state == 0) {
+        const u32 words = (MI_SCRATCH + 0x9000u - MI_MEM_BASE) / 4; // through the adapter's clear list (aki_nodes.c)
+        int used = mi_first_used_word((const volatile unsigned int*)MI_MEM_BASE, words);
+        window_state = used < 0 ? 1 : -1;
+        if (used >= 0) {
+            mi_log_str("Expansion RAM is in use at 0x"); mi_log_hex(MI_MEM_BASE + (u32)used * 4, 8);
+            mi_log_str(" (a conversion that uses it?): model imports are off for this session"); mi_log_end();
+        }
+    }
+    return window_state > 0;
+}
+
 int mi_core_replacing(void) {
     for (int i = 0; i < mi_slots(); i++)
         if (slots[i].state == 1 && mi_slot_active(i)) return 1;
@@ -595,6 +614,7 @@ void mi_core_emit(int parity) {
         in_match = 0;
         return;
     }
+    if (!window_free()) return;
     u32 reload = recomp_get_config_u32("reload");
     if (in_match && reload != reload_seen) {
         // The frames already submitted may still draw the old lists over the old pack memory: stock for two frames.
