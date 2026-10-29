@@ -12,7 +12,7 @@ You need:
 - **Blender 4.2 LTS** only for `.fbx`, `.dae` and `.blend` models.
 - **The game**, with this mod (**Model import**, `aki_modelimport`). It comes with the game.
 
-Tracking issue: aki-roadmap#130. Everything below matches AkiTools `b7fb44c` and AKI Launcher `e2be8bf`.
+Tracking issue: aki-roadmap#130. Everything below matches AkiTools `8bd5068` and AKI Launcher `feat/130-install-packs`.
 
 ## 1. The short version
 
@@ -173,8 +173,19 @@ Some packs can't be fully edited there, and the page says why:
 - **Only Replaces locked (On still works):** the pack has more than one line in `models.txt`, or it has a wrestler
   line and there is no roster.
 
-The page's **Install files...** and drop-a-file install mods and texture packs, not model packs. Install a model pack
-with `quick --install`, or by copying its folder into `mods\models\` (section 12).
+**Installing a pack there.** **Install files...**, **Install a pack folder...** or dropping it on the window installs
+a model pack:
+- **What it takes:** an `<id>.akimodel` folder, a folder holding such folders (an unzipped share), or a `.zip` of
+  either.
+- **Where it goes:** the pack into `mods\models\`, and its `<id>-hd.rtz` (inside the pack folder, or next to it)
+  into `mods\` as a texture pack.
+- **Refused:** a pack built for the other game, a folder whose name isn't a valid pack id (upper case is made lower
+  case: `Snake.akimodel` installs as `snake`), and replacing a pack the game has open (close the game first).
+- **Replacing:** a pack with the same id is replaced, and the old copy goes to the Recycle Bin.
+- **Nothing is assigned yet:** pick who it replaces with the pack's **Replaces** control.
+
+**Remove** on a pack moves the pack and its HD textures to the Recycle Bin. Its `models.txt` lines stay, listed as
+naming a pack that isn't installed, so you can delete them or install the pack again.
 
 ### In the game: the Mods menu
 
@@ -391,9 +402,12 @@ you share it.
 
 ## 12. Sharing your pack
 
-Zip the `<id>.akimodel` folder. Its `<id>-hd.rtz`, if it has one, is inside it. To install it, a player:
-1. Unzips the folder into `mods\models\`.
-2. Copies the `-hd.rtz` from the pack folder into `mods\`.
-3. Picks who it replaces: in the AKI Launcher's Model packs section, or with a `models.txt` line.
+Zip the `<id>.akimodel` folder. Its `<id>-hd.rtz`, if it has one, is inside it. A player installs it in either way:
+- **With the AKI Launcher:** drop the zip on the game's Mods page (or use **Install files...**), then pick who it
+  replaces under Model packs. The launcher puts the pack and its HD textures in the right folders.
+- **By hand:**
+  1. Unzip the folder into `mods\models\`.
+  2. Copy the `-hd.rtz` from the pack folder into `mods\`.
+  3. Add a `models.txt` line.
 
 Nothing is rebuilt. Keep `pack.json` honest: the licence, the author, and where the model came from.
