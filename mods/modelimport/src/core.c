@@ -524,9 +524,10 @@ static void build_list(int slot, const MiSlot* s, const MiPack* p, u32 dl, int p
 }
 
 static void restore_slot(MiSlot* s) {
+    int slot = (int)(s - slots);
     if (s->state == 1)
         for (int i = 0; i < mi_parts(); i++)
-            if (s->saved[i].node) mi_restore_part(&s->saved[i], s->dl[0], s->dl[1]);
+            if (s->saved[i].node) mi_restore_part(&s->saved[i], s->dl[0], s->dl[1], mi_part_node(slot, i));
     for (int i = 0; i < MI_MAX_PARTS; i++) s->saved[i].node = 0;
     s->state = 0;
 }

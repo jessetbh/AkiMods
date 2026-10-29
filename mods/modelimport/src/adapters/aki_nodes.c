@@ -15,6 +15,7 @@
 // node+0x38+parity*0x40), and a display list (+0x34) drawn over that cache. A slot's nodes are contiguous (part N's
 // node = part 0's + N x 0xB8), which is what welded packs rely on.
 #include "../adapter.h"
+#include "../restore_rules.h"
 
 #if !defined(AN_PROFILE) || !defined(AN_PARTS) || !defined(AN_EMITTER)
 #error "define AN_PROFILE, AN_PARTS and AN_EMITTER before including aki_nodes.c"
@@ -200,9 +201,9 @@ void mi_hang_list(u32 node, u32 dl) {
     RAM32(node + 0x34) = dl;
 }
 
-void mi_restore_part(const MiSavedPart* s, u32 dl0, u32 dl1) {
-    u32 dl = RAM32(s->node + 0x34);
-    if (dl != 0 && dl != dl0 && dl != dl1) return; // the game reused the node: leave it alone
+void mi_restore_part(const MiSavedPart* s, u32 dl0, u32 dl1, u32 current_node) {
+    // A rebuilt wrestler has new nodes: the old one may be anyone's now, even when its list is 0 (aki-roadmap#167).
+    if (!mi_restore_ok(current_node, s->node, RAM32(s->node + 0x34), dl0, dl1)) return;
     RAM32(s->node + 0x30) = s->w0;
     RAM16(s->node + 0x2C) = (s16)s->w1;
     RAM32(s->node + 0x34) = s->w2;

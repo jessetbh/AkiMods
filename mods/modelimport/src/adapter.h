@@ -38,7 +38,9 @@ void mi_save_part(u32 node, MiSavedPart* s);
 int mi_part_draws(const MiSavedPart* s);  // the part had geometry of its own (the list is hung on the first such)
 void mi_hide_part(u32 node);              // draws nothing
 void mi_hang_list(u32 node, u32 dl);      // draws dl instead of its own geometry
-void mi_restore_part(const MiSavedPart* s, u32 dl0, u32 dl1); // puts it back if it still shows what the core left
+// Puts it back if the part's actor still points at the saved node (current_node, from mi_part_node) and the node still
+// shows what the core left there (restore_rules.h, aki-roadmap#167).
+void mi_restore_part(const MiSavedPart* s, u32 dl0, u32 dl1, u32 current_node);
 
 // --- Provided by the core, called from the adapter's hooks ----------------------------------------------------
 void mi_core_emit(int parity);            // before the game draws its wrestlers' parts (may run several times a frame)
