@@ -19,11 +19,14 @@
 #include "adapter.h"
 #include "recomp_api.h"
 #include "window_check.h"
+#include "pack_alloc.h"
 
 RECOMP_IMPORT("*", void aki_log(const char* str, u32 length));
 RECOMP_IMPORT("*", s32 aki_models_read(const char* path, void* dest, u32 max));
 
-#define MI_PACKS 8
+#define MI_PACKS 32       // pack table entries: loaded packs and ones that failed this match (aki-roadmap#170)
+#define MI_RETIRED 16     // skin buffers given up while frames in flight may still draw them
+#define MI_RETRY 30       // frames a slot waits for room before it tries its pack again
 #define MI_PACK_ENTRIES 64
 #define MI_RULES 32
 #define MI_ID_LEN 32
@@ -97,23 +100,40 @@ static int valid_id(const char* id) {
 // --- packs -------------------------------------------------------------------------------------------------------
 typedef struct {
     char id[MI_ID_LEN];
-    int state;           // 1 loaded, -1 failed (not retried until the next match)
+    int state;           // 0 empty, 1 loaded, -1 failed (not retried until the next match)
     u32 base, size, flags;
+    u32 last_use;        // the last frame a slot showed it (it may be unloaded MI_IN_FLIGHT frames later)
     u32 skin, skin_count;  // the skin table (virtual) and its vertices, or 0
     int count;
     u32 part[MI_PACK_ENTRIES], dl[MI_PACK_ENTRIES];
 } MiPack;
 
 static MiPack packs[MI_PACKS];
-static int pack_count;
-static u32 pack_top = MI_MEM_BASE; // the next free byte of the window packs load into
+static MiRange retired[MI_RETIRED];
+static u32 retired_frame[MI_RETIRED];
+static u32 frame_no;          // counted by mi_core_frame
 
 static void reset_slot_buffers(void);
+static int used_ranges(MiRange* out);
+static int evict_pack(int keep);
 
 static void reset_packs(void) {
-    pack_count = 0;
-    pack_top = MI_MEM_BASE;
+    for (int i = 0; i < MI_PACKS; i++) packs[i].state = 0;
+    for (int i = 0; i < MI_RETIRED; i++) retired[i].size = 0;
     reset_slot_buffers();
+}
+
+// A block the frames in flight may still draw: kept out of the allocator until they're drawn. With the list full the
+// oldest entry goes (it is the one most likely drawn out already).
+static void retire(u32 base, u32 size) {
+    int pick = 0;
+    for (int i = 0; i < MI_RETIRED; i++) {
+        if (!retired[i].size || mi_drawn_out(frame_no, retired_frame[i])) { pick = i; break; }
+        if (frame_no - retired_frame[i] > frame_no - retired_frame[pick]) pick = i;
+    }
+    retired[pick].base = base;
+    retired[pick].size = size;
+    retired_frame[pick] = frame_no;
 }
 
 static int pack_fail(MiPack* p, const char* why) {
@@ -122,19 +142,30 @@ static int pack_fail(MiPack* p, const char* why) {
     return -1;
 }
 
-// Reads and checks <id>.akimodel/model.bin at the top of the window, moves its address words there.
+// Reads and checks <id>.akimodel/model.bin into the largest free gap of the window (unloading packs no slot shows
+// until it fits), moves its address words there. 0 loaded; -1 failed; -2 no room yet (the entry stays empty).
 static int load_pack(MiPack* p) {
     char path[MI_ID_LEN + 24];
     int n = 0;
     for (const char* s = p->id; *s; s++) path[n++] = *s;
     for (const char* s = ".akimodel/model.bin"; *s; s++) path[n++] = *s;
     path[n] = 0;
-    u32 base = (pack_top + 15) & ~15u, room = MI_MEM_BASE + MI_MEM_SIZE - base;
-    s32 size = aki_models_read(path, (void*)base, room);
+    MiRange used[MI_PACKS + MI_MAX_SLOTS + MI_RETIRED];
+    u32 base, room;
+    s32 size;
+    for (;;) {
+        int n = used_ranges(used);
+        base = mi_largest_gap(used, n, MI_MEM_BASE, MI_MEM_BASE + MI_MEM_SIZE, &room);
+        size = base ? aki_models_read(path, (void*)base, room) : -2;
+        if (size != -2) break;
+        if (!n) return pack_fail(p, "too big for the model memory");
+        if (evict_pack(-1) < 0) {
+            p->state = 0;
+            return -2;
+        }
+    }
     if (size == -1) return pack_fail(p, "no model.bin (is the folder in mods/models?)");
-    if (size == -2) return pack_fail(p, "too big for the memory left (other packs are loaded)");
     if (size < AKP1_SIZE) return pack_fail(p, "not readable");
-    u32 end = base + (u32)size;
     if (RAM32(base) != AKP1_MAGIC) return pack_fail(p, "no AKP1 header (convert it again with a current aki-model)");
     if ((u32)RAM16(base + 4) > AKP1_VERSION || (u16)RAM16(base + 6) < AKP1_SIZE) return pack_fail(p, "made for a newer runtime");
     if (RAM32(base + 52) > MI_RUNTIME) return pack_fail(p, "needs a newer aki_modelimport");
@@ -187,7 +218,7 @@ static int load_pack(MiPack* p) {
     p->skin = scount ? base + soff : 0;
     p->skin_count = scount;
     p->state = 1;
-    pack_top = end;
+    p->last_use = frame_no;
     mi_log_str("model pack "); mi_log_str(p->id); mi_log_str(": "); mi_log_dec(size); mi_log_str(" bytes at ");
     mi_log_hex(base, 8); mi_log_str(", "); mi_log_dec(p->count); mi_log_str((flags & AKP1_FLAG_WELDED) ? " list (welded)" : " part lists");
     if (scount) { mi_log_str(", "); mi_log_dec((s32)scount); mi_log_str(" skinned vertices"); }
@@ -195,17 +226,21 @@ static int load_pack(MiPack* p) {
     return 0;
 }
 
-// The pack with this id, loaded on first use; -1 if it can't be.
+// The pack with this id, loaded on first use; -1 if it can't be, -2 if there's no room for it yet.
 static int find_pack(const char* id) {
-    for (int i = 0; i < pack_count; i++)
-        if (str_eq(packs[i].id, id)) return packs[i].state == 1 ? i : -1;
-    if (pack_count >= MI_PACKS) {
-        mi_log_str("model pack "); mi_log_str(id); mi_log_str(": not loaded, 8 packs per match at most"); mi_log_end();
-        return -1;
+    int pick = -1;
+    for (int i = 0; i < MI_PACKS; i++) {
+        if (packs[i].state && str_eq(packs[i].id, id)) return packs[i].state == 1 ? i : -1;
+        if (!packs[i].state && pick < 0) pick = i;
     }
-    MiPack* p = &packs[pack_count++];
+    for (int i = 0; pick < 0 && i < MI_PACKS; i++)
+        if (packs[i].state < 0) pick = i; // forget a failed pack (it is tried again if a wrestler still uses it)
+    if (pick < 0) pick = evict_pack(-1);
+    if (pick < 0) return -2;
+    MiPack* p = &packs[pick];
     str_copy(p->id, id, MI_ID_LEN);
-    return load_pack(p) == 0 ? pack_count - 1 : -1;
+    int r = load_pack(p);
+    return r == 0 ? pick : r;
 }
 
 // --- models.txt and the Mods menu --------------------------------------------------------------------------------
@@ -341,6 +376,11 @@ static int pack_is_off(const char* id) {
 
 // The pack id that replaces this slot now, or 0.
 static const char* pack_for_slot(int slot) {
+#ifdef MI_TEST_ROTATE
+    // Load/unload stress test (aki-roadmap#170; build with -Define MI_TEST_ROTATE=<frames>): every MI_TEST_ROTATE
+    // frames each slot shows the next models.txt pack, whoever the wrestler is.
+    if (rule_count) return rules[(frame_no / MI_TEST_ROTATE + (u32)slot * 5) % (u32)rule_count].pack;
+#endif
     const char* id = 0;
     if (override_pack[slot][0]) id = override_pack[slot];
     for (int i = 0; !id && i < rule_count; i++)
@@ -353,13 +393,14 @@ static const char* pack_for_slot(int slot) {
 
 // --- slots -------------------------------------------------------------------------------------------------------
 typedef struct {
-    int state;           // 0 stock, 1 replaced, -1 can't be replaced until the slot changes
+    int state;           // 0 stock, 1 replaced, -1 can't be replaced until the slot changes, -2 waits for room
     u32 signature;       // the slot's nodes and wrestler when it was decided
     int pack;
     u32 host;
     u32 dl[2];
     u32 skin_buf[2];     // the blended vertices for each frame parity (segment 0xE), or 0
-    u32 skin_cap;        // vertices they hold (allocated once per match, reused when the slot changes)
+    u32 skin_cap;        // vertices they hold (allocated when the slot is replaced, retired when it's restored)
+    u32 retry;           // state -2: the frame it tries its pack again
     u32 skin_frame[2];   // the frame each was last computed for
     MiSavedPart saved[MI_MAX_PARTS];
 } MiSlot;
@@ -367,7 +408,6 @@ typedef struct {
 static MiSlot slots[MI_MAX_SLOTS];
 static int in_match;
 static u32 reload_seen;
-static u32 frame_no;          // counted by mi_core_frame
 static s32 reload_frame = -1; // a Reload's frame while the slots sit out the frames still in flight
 
 static void reset_slot_buffers(void) {
@@ -375,6 +415,37 @@ static void reset_slot_buffers(void) {
         slots[i].skin_buf[0] = slots[i].skin_buf[1] = 0;
         slots[i].skin_cap = 0;
     }
+}
+
+// The window's used blocks: loaded packs, the slots' skin buffers and retired blocks still in flight.
+static int used_ranges(MiRange* out) {
+    int n = 0;
+    for (int i = 0; i < MI_PACKS; i++)
+        if (packs[i].state == 1) out[n].base = packs[i].base, out[n++].size = packs[i].size;
+    for (int i = 0; i < MI_MAX_SLOTS; i++)
+        if (slots[i].skin_cap) out[n].base = slots[i].skin_buf[0], out[n++].size = slots[i].skin_cap * 32;
+    for (int i = 0; i < MI_RETIRED; i++)
+        if (retired[i].size && !mi_drawn_out(frame_no, retired_frame[i])) out[n++] = retired[i];
+    return n;
+}
+
+// Unloads the least recently shown pack no slot shows (not keep) whose lists are drawn out; its index, or -1.
+static int evict_pack(int keep) {
+    int loaded[MI_PACKS], shown[MI_PACKS];
+    u32 last[MI_PACKS];
+    for (int i = 0; i < MI_PACKS; i++) {
+        loaded[i] = packs[i].state == 1;
+        shown[i] = 0;
+        last[i] = packs[i].last_use;
+    }
+    for (int i = 0; i < MI_MAX_SLOTS; i++)
+        if (slots[i].state == 1) shown[slots[i].pack] = 1;
+    int e = mi_pick_evict(loaded, shown, last, MI_PACKS, keep, frame_no);
+    if (e >= 0) {
+        packs[e].state = 0;
+        mi_log_str("model pack "); mi_log_str(packs[e].id); mi_log_str(": unloaded for room"); mi_log_end();
+    }
+    return e;
 }
 
 // --- smooth skinning ------------------------------------------------------------------------------------------------
@@ -465,17 +536,16 @@ static void skin_slot(int slot, MiSlot* s, const MiPack* p, int parity) {
     s->skin_frame[parity] = frame_no;
 }
 
-// The slot's two blended-vertex copies, from the window after the packs (once per match; reused when it changes).
-static int alloc_skin(MiSlot* s, const MiPack* p) {
+// The slot's two blended-vertex copies, from a free gap of the window (unloading packs other than pi for room).
+static int alloc_skin(MiSlot* s, const MiPack* p, int pi) {
     if (!p->skin_count) return 1;
-    if (s->skin_cap < p->skin_count) {
-        u32 bytes = p->skin_count * 16, base = (pack_top + 15) & ~15u;
-        if (base + 2 * bytes > MI_MEM_BASE + MI_MEM_SIZE) return 0;
-        s->skin_buf[0] = base;
-        s->skin_buf[1] = base + bytes;
-        s->skin_cap = p->skin_count;
-        pack_top = base + 2 * bytes;
-    }
+    MiRange used[MI_PACKS + MI_MAX_SLOTS + MI_RETIRED];
+    u32 bytes = p->skin_count * 16, base;
+    while (!(base = mi_first_fit(used, used_ranges(used), MI_MEM_BASE, MI_MEM_BASE + MI_MEM_SIZE, 2 * bytes)))
+        if (evict_pack(pi) < 0) return 0;
+    s->skin_buf[0] = base;
+    s->skin_buf[1] = base + bytes;
+    s->skin_cap = p->skin_count;
     // Both copies start as the templates (st, colours); positions are filled per frame.
     for (int b = 0; b < 2; b++)
         for (u32 v = 0; v < p->skin_count; v++)
@@ -525,20 +595,38 @@ static void build_list(int slot, const MiSlot* s, const MiPack* p, u32 dl, int p
 
 static void restore_slot(MiSlot* s) {
     int slot = (int)(s - slots);
-    if (s->state == 1)
+    if (s->state == 1) {
         for (int i = 0; i < mi_parts(); i++)
             if (s->saved[i].node) mi_restore_part(&s->saved[i], s->dl[0], s->dl[1], mi_part_node(slot, i));
+        packs[s->pack].last_use = frame_no;
+    }
+    if (s->skin_cap) {
+        retire(s->skin_buf[0], s->skin_cap * 32);
+        s->skin_buf[0] = s->skin_buf[1] = 0;
+        s->skin_cap = 0;
+    }
     for (int i = 0; i < MI_MAX_PARTS; i++) s->saved[i].node = 0;
     s->state = 0;
 }
 
+// No room for the slot's pack yet (the packs it would unload are shown or still in flight): stock for now, try again.
+static void wait_slot(int slot, MiSlot* s, int was, const char* id) {
+    s->state = -2;
+    s->retry = frame_no + MI_RETRY;
+    if (was == -2) return;
+    mi_log_str("slot "); mi_log_dec(slot + 1); mi_log_str(": no room for pack "); mi_log_str(id);
+    mi_log_str(" yet; stock until a pack can be unloaded"); mi_log_end();
+}
+
 static void decide_slot(int slot, MiSlot* s) {
+    int was = s->state;
     restore_slot(s);
     s->signature = slot_signature(slot);
     s->state = -1;
     const char* id = pack_for_slot(slot);
     if (!id) return;
     int pi = find_pack(id);
+    if (pi == -2) { wait_slot(slot, s, was, id); return; }
     if (pi < 0) return;
     const MiPack* p = &packs[pi];
     if ((p->flags & AKP1_FLAG_WELDED) && !mi_matrices_contiguous(slot)) {
@@ -554,9 +642,9 @@ static void decide_slot(int slot, MiSlot* s) {
         if (!s->host && mi_part_draws(&s->saved[i])) s->host = node;
     }
     if (!s->host) return;
-    if (!alloc_skin(s, p)) {
-        mi_log_str("slot "); mi_log_dec(slot + 1); mi_log_str(": no memory left for pack "); mi_log_str(p->id);
-        mi_log_str("'s skinned vertices; left stock"); mi_log_end();
+    if (!alloc_skin(s, p, pi)) {
+        for (int i = 0; i < MI_MAX_PARTS; i++) s->saved[i].node = 0;
+        wait_slot(slot, s, was, p->id);
         return;
     }
     s->pack = pi;
@@ -643,10 +731,15 @@ void mi_core_emit(int parity) {
             s->signature = 0;
             continue;
         }
-        if (s->signature != slot_signature(i)) decide_slot(i, s);
+#ifdef MI_TEST_ROTATE
+        static u32 rotation[MI_MAX_SLOTS];
+        if (rotation[i] != frame_no / MI_TEST_ROTATE) rotation[i] = frame_no / MI_TEST_ROTATE, s->signature = 0;
+#endif
+        if (s->signature != slot_signature(i) || (s->state == -2 && (s32)(frame_no - s->retry) >= 0)) decide_slot(i, s);
         if (s->state != 1) continue;
         // Smooth skinning: this parity's blended vertices, once per frame (the emitter runs per list).
-        const MiPack* p = &packs[s->pack];
+        MiPack* p = &packs[s->pack];
+        p->last_use = frame_no;
         if (p->skin_count && s->skin_frame[parity] != frame_no) skin_slot(i, s, p, parity);
         // The game can rewrite a node's fields between emitter calls: set them every time.
         for (int k = 0; k < mi_parts(); k++) {
