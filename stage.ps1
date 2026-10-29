@@ -8,8 +8,8 @@
 #   .\stage.ps1 -RepoSuffix -fullconv   into the ..\<Repo>-fullconv checkouts instead
 # Mods with Bundle = $false in mod.psd1 (developer tools) are skipped.
 # A mod with Packs = '<folder>' in mod.psd1 also ships what <folder>\<game>\ holds (aki-roadmap#145): its
-# <id>.akimodel model packs -> assets\mods\models\, its .rtz texture packs -> assets\mods\, and <folder>\CREDITS.md ->
-# assets\mods\models\. The staged models folder is replaced as a whole, so a pack taken out of the mod goes too; a
+# <id>.akimodel model packs and bundled-history.json -> assets\mods\models\, its .rtz texture packs -> assets\mods\,
+# and <folder>\CREDITS.md -> assets\mods\models\. The staged models folder is replaced as a whole, so a pack taken out of the mod goes too; a
 # renamed or dropped .rtz is not removed from assets\mods (delete it there by hand).
 # Before anything is copied, every <id>.akimodel under those Packs folders goes through `aki-model.py validate`
 # (..\AkiTools, aki-roadmap#130), against packs\<game>\'s own game profile: a pack with errors stops the staging, so
@@ -132,6 +132,8 @@ foreach ($modDir in $built) {
             [pscustomobject]@{ Mod = $modDir.Name; Game = $gameDir.Name; File = "$models\$($pack.Name)"; Length = $len }
         }
         if (Test-Path "$packs\CREDITS.md") { Copy-Item "$packs\CREDITS.md" $models }
+        # The packs' earlier bundled versions (pack_history.py): the games replace an unedited older copy (aki-roadmap#149).
+        if (Test-Path "$gamePacks\bundled-history.json") { Copy-Item "$gamePacks\bundled-history.json" $models }
         foreach ($rtz in Get-ChildItem $gamePacks -File -Filter *.rtz) {
             Copy-Item $rtz.FullName $dest -Force
             [pscustomobject]@{ Mod = $modDir.Name; Game = $gameDir.Name; File = "$dest\$($rtz.Name)"; Length = $rtz.Length }

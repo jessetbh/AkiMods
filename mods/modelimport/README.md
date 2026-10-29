@@ -33,7 +33,9 @@ The games ship eight ready-made packs, all CC0 (credits and sources: `packs\CRED
 `mods\models\CREDITS.md`): `q-warrior`, `q-monk`, `q-rogue`, `q-ranger`, `q-cleric`, `q-wizard`, `q-human` and
 `q-robot`. At startup each game copies them into `mods\models\`, each one once: `mods\models\.bundled` lists the ones
 it installed (or found there already), so a pack you edited or replaced is never overwritten, and one you delete stays
-deleted. Delete `.bundled` to get the starter packs back. Their HD textures come as one texture pack,
+deleted. Delete `.bundled` to get the starter packs back. A later version of the game that ships updated starter packs replaces
+your copy only if you haven't changed it (its files still match an earlier bundled version); a pack you edited stays
+as it is. Their HD textures come as one texture pack,
 `mods\aki_starter_packs_hd.rtz`. Nothing writes `models.txt`: no wrestler changes until you turn the mod on and pick a
 pack (the **Model packs** dialog on this mod's page, `models.txt`, or the Slot N options).
 
@@ -41,7 +43,9 @@ For mod developers: the packs live in `packs\<game>\`, built with AkiTools
 `aki-model.py batch <list>.json --game all --out <dir>` (a list of the models with their name, author, licence,
 source and slot). Merge their `<id>-hd.rtz` files
 with `tools\merge_rtz.py packs\<game>\aki_starter_packs_hd.rtz ...`. `.\stage.ps1 modelimport -RepoSuffix -fullconv`
-copies them into the games' `assets\mods\` with the .nrm (mod.psd1 `Packs`).
+copies them into the games' `assets\mods\` with the .nrm (mod.psd1 `Packs`). When packs change, bump their `pack.json` version and record
+the previous bundle with `tools\pack_history.py update packs\<game> --old <previous packs\<game>>`
+(`bundled-history.json`: the hashes of earlier versions the games may replace).
 
 ## Find a wrestler's id
 
