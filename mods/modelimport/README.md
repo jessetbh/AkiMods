@@ -67,6 +67,10 @@ Every problem is one line in the log, starting with `[mod]`, and the wrestler st
 
 ## For modders: making packs
 
+**Start with [MODDING.md](MODDING.md)**: the whole path from a rigged model to a wrestler in the ring (the one-command
+`aki-model.py quick`, the launcher's Model packs section, `models.txt`, `validate` fixes, troubleshooting, and how a
+new game is added).
+
 The pack contract (the `model.bin` AKP1 header, `manifest.json`, `pack.json`, `models.txt`) is
 aki-roadmap#130, "runtime contract v1". AkiTools' README covers conversion: bone maps, `--space model`, `--weld`,
 textures and `validate`. A pack must say where its model came from and under what license (`pack.json`). Don't share
