@@ -376,6 +376,11 @@ static int pack_is_off(const char* id) {
 
 // The pack id that replaces this slot now, or 0.
 static const char* pack_for_slot(int slot) {
+#ifdef MI_TEST_ROTATE
+    // Load/unload stress test (aki-roadmap#170; build with -Define MI_TEST_ROTATE=<frames>): every MI_TEST_ROTATE
+    // frames each slot shows the next models.txt pack, whoever the wrestler is.
+    if (rule_count) return rules[(frame_no / MI_TEST_ROTATE + (u32)slot * 5) % (u32)rule_count].pack;
+#endif
     const char* id = 0;
     if (override_pack[slot][0]) id = override_pack[slot];
     for (int i = 0; !id && i < rule_count; i++)
@@ -726,6 +731,10 @@ void mi_core_emit(int parity) {
             s->signature = 0;
             continue;
         }
+#ifdef MI_TEST_ROTATE
+        static u32 rotation[MI_MAX_SLOTS];
+        if (rotation[i] != frame_no / MI_TEST_ROTATE) rotation[i] = frame_no / MI_TEST_ROTATE, s->signature = 0;
+#endif
         if (s->signature != slot_signature(i) || (s->state == -2 && (s32)(frame_no - s->retry) >= 0)) decide_slot(i, s);
         if (s->state != 1) continue;
         // Smooth skinning: this parity's blended vertices, once per frame (the emitter runs per list).
