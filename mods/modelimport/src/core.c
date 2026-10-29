@@ -575,14 +575,14 @@ static void restore_all(void) {
     }
 }
 
-// aki-roadmap#155: the window (packs, then lists and models.txt) must still be all zero before the core first writes
-// it. A conversion that uses Expansion RAM (the relinked No Mercy hacks) fills it from boot; then model imports stay
+// aki-roadmap#155: the window (packs, the adapter's depth area after them, then the scratch: lists, models.txt and
+// the adapter's clear list at MI_SCRATCH + 0x8000) must still be all zero before the mod first writes it. A conversion that uses Expansion RAM (the relinked No Mercy hacks) fills it from boot; then model imports stay
 // off for the session, with one log line.
 static int window_state; // 0 not checked, 1 free, -1 in use
 
 static int window_free(void) {
     if (window_state == 0) {
-        const u32 words = (MI_TEXT + MI_TEXT_MAX - MI_MEM_BASE) / 4;
+        const u32 words = (MI_SCRATCH + 0x9000u - MI_MEM_BASE) / 4; // through the adapter's clear list (aki_nodes.c)
         int used = mi_first_used_word((const volatile unsigned int*)MI_MEM_BASE, words);
         window_state = used < 0 ? 1 : -1;
         if (used >= 0) {
