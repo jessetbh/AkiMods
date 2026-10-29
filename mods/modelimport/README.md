@@ -27,6 +27,20 @@ off banjo                             # turns a pack off, whatever the other lin
 - The mod reads `models.txt` and the packs again at the start of every match. To read them right away, flip
   **Reload** in the Mods menu.
 
+## Starter packs
+
+The games ship eight ready-made packs, all CC0 (credits and sources: `packs\CREDITS.md`, installed as
+`mods\models\CREDITS.md`): `q-warrior`, `q-monk`, `q-rogue`, `q-ranger`, `q-cleric`, `q-wizard`, `q-human` and
+`q-robot`. At startup each game copies them into `mods\models\`, each one only when no folder of that name is there
+yet, so a pack you edited or replaced is never overwritten. Their HD textures come as one texture pack,
+`mods\aki_starter_packs_hd.rtz`. Nothing writes `models.txt`: no wrestler changes until you turn the mod on and pick a
+pack (the **Model packs** dialog on this mod's page, `models.txt`, or the Slot N options).
+
+For mod developers: the packs live in `packs\<game>\`, built with AkiTools
+`aki-model.py convert --space model --weld --skin --textures tiles --profile <game>`. Merge their `<id>-hd.rtz` files
+with `tools\merge_rtz.py packs\<game>\aki_starter_packs_hd.rtz ...`. `.\stage.ps1 modelimport -RepoSuffix -fullconv`
+copies them into the games' `assets\mods\` with the .nrm (mod.psd1 `Packs`).
+
 ## Find a wrestler's id
 
 Turn on **Log wrestler ids** in the Mods menu and start a match. The log (stderr, or `<Game>Recompiled.log`) prints

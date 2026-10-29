@@ -89,6 +89,10 @@ Add it to `common/games.psd1`. Its `FrameHook` is the one function in the game t
 `install_bundled_mods()` (`src/main/main.cpp`) copies `assets\mods\*.nrm` into the player's mods folder when missing
 or changed.
 
+A mod with `Packs = '<folder>'` in its `mod.psd1` also ships data (aki-roadmap#145, modelimport's starter packs):
+`<folder>\<game>\*.akimodel` go to `assets\mods\models\`, `*.rtz` to `assets\mods\`. The games install a model pack only
+when the player has no folder of that name. `-RepoSuffix -fullconv` stages into the `<Repo>-fullconv` checkouts.
+
 ## Layout
 
 ```

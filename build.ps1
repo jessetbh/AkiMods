@@ -80,6 +80,24 @@ foreach ($m in $selectedMods) {
 
         & $modTool "$out\mod.toml" $out
         if ($LASTEXITCODE) { throw "${m}/${g}: RecompModTool failed" }
+        if ($cfg.ContainsKey('EnabledByDefault')) {
+            # RecompModTool doesn't write the manifest's enabled_by_default (librecomp: true when absent), so it goes
+            # into the packed mod.json here. False: a new install of the mod stays off until the player turns it on.
+            Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
+            $flag = if ($cfg.EnabledByDefault) { 'true' } else { 'false' }
+            $zip = [IO.Compression.ZipFile]::Open("$out\$($cfg.Id).nrm", 'Update')
+            try {
+                $entry = $zip.GetEntry('mod.json')
+                $reader = New-Object IO.StreamReader($entry.Open())
+                $json = $reader.ReadToEnd(); $reader.Dispose()
+                if ($json -match '"enabled_by_default"') { throw "${m}/${g}: mod.json already has enabled_by_default" }
+                $json = $json -replace '^\s*\{', "{`n    `"enabled_by_default`" : $flag,"
+                $entry.Delete()
+                $writer = New-Object IO.StreamWriter($zip.CreateEntry('mod.json').Open(), (New-Object Text.UTF8Encoding $false))
+                $writer.Write($json); $writer.Dispose()
+            }
+            finally { $zip.Dispose() }
+        }
         Get-Item "$out\$($cfg.Id).nrm" | Select-Object @{n = 'Mod'; e = { $m } }, @{n = 'Game'; e = { $g } }, Length, FullName
     }
 }

@@ -1,11 +1,15 @@
 # aki_modelimport (aki-roadmap#130): imported models replace wrestlers. Shared core (src\core.c) + one adapter per
 # game (src\adapters\<game>.c, picked in src\adapter.c). Needs the game's model host exports (aki_log,
-# aki_models_read, aki_models_list): No Mercy / VPW2 feat/130-model-host. Not bundled until the games ship those exports.
+# aki_models_read, aki_models_list): No Mercy / VPW2 feat/130-model-host, in their feat/fullconv-b. Bundled on the
+# fullconv line (stage.ps1 -RepoSuffix -fullconv), off by default: the mod isn't enabled until the player turns it on,
+# and the starter packs (packs\, aki-roadmap#145) only replace a wrestler once picked in the Model packs dialog.
 @{
     Id      = 'aki_modelimport'
     Sources = @('src\core.c', 'src\adapter.c')
     Games   = @('nomercy', 'vpw2')
-    Bundle  = $false
+    Bundle  = $true
+    EnabledByDefault = $false           # a new install stays off until the player turns it on (build.ps1)
+    Packs   = 'packs'                   # packs\<game>\: starter packs + their HD textures, shipped by stage.ps1
     Values  = @{}
     PerGame = @{
         # WWF No Mercy (USA, Rev 1). These mirror the "runtime" block of AkiTools model-templates/profiles/nomercy.json.
