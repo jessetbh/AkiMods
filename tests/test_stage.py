@@ -13,7 +13,7 @@ SHIPPED = os.path.join(REPO, 'mods', 'modelimport', 'packs')
 
 # Records its arguments; a pack whose folder name starts with "broken" is an error, like validate's own output.
 STUB = r'''import os, sys
-with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'calls.txt'), 'a') as fh:
+with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'calls.txt'), 'a', encoding='utf-8') as fh:
     fh.write('\t'.join(sys.argv[1:]) + '\n')
 bad = [p for p in sys.argv[2:] if os.path.basename(p).startswith('broken')]
 for p in bad:
@@ -45,11 +45,12 @@ class StageValidateTest(unittest.TestCase):
         self.mod('models', "@{ Bundle = $true; Packs = 'packs' }")
         self.packs = os.path.join(self.root, 'mods', 'models', 'packs', 'nomercy')
 
-    def mod(self, name, psd1):
-        os.makedirs(os.path.join(self.root, 'mods', name))
-        with open(os.path.join(self.root, 'mods', name, 'mod.psd1'), 'w') as fh:
-            fh.write(psd1)
-        built = os.path.join(self.root, 'build', name, 'nomercy')
+    def mod(self, name, psd1=None, game='nomercy'):
+        if psd1 is not None:
+            os.makedirs(os.path.join(self.root, 'mods', name))
+            with open(os.path.join(self.root, 'mods', name, 'mod.psd1'), 'w') as fh:
+                fh.write(psd1)
+        built = os.path.join(self.root, 'build', name, game)
         os.makedirs(built)
         with open(os.path.join(built, name + '.nrm'), 'wb') as fh:
             fh.write(b'NRM')
@@ -74,13 +75,16 @@ class StageValidateTest(unittest.TestCase):
         p = os.path.join(self.depot, 'AkiTools', 'calls.txt')
         if not os.path.isfile(p):
             return []
-        with open(p) as fh:
+        with open(p, encoding='utf-8') as fh:
             return [l.rstrip('\n').split('\t') for l in fh]
 
-    def stage(self, *args):
+    def stage(self, *args, path_first=None, path=None):
         # PATH keeps this test's own Python first, so stage.ps1 finds one even where python isn't on PATH.
-        env = dict(os.environ, PATH=os.path.dirname(sys.executable) + os.pathsep + os.environ.get('PATH', ''))
-        r = subprocess.run(['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+        first = path_first or os.path.dirname(sys.executable)
+        env = dict(os.environ, PATH=path or first + os.pathsep + os.environ.get('PATH', ''))
+        ps = os.path.join(os.environ.get('SystemRoot', r'C:\Windows'), 'System32', 'WindowsPowerShell', 'v1.0',
+                          'powershell.exe')
+        r = subprocess.run([ps, '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
                             os.path.join(self.root, 'stage.ps1')] + list(args),
                            capture_output=True, text=True, env=env, timeout=300)
         return r.returncode, r.stdout + r.stderr
@@ -92,14 +96,64 @@ class StageValidateTest(unittest.TestCase):
     def test_good_packs_are_validated_then_staged(self):
         self.tools(STUB)
         a = self.fake_pack('nomercy', 'hero')
-        b = self.fake_pack('vpw2', 'villain')   # no Vpw2Recomp build here, but its packs are still checked
+        b = self.fake_pack('nomercy', 'champ')
+        # What staging won't copy isn't checked either: a game this mod isn't built for, a pack in a subfolder.
+        self.fake_pack('vpw2', 'broken-vpw2')
+        self.fake_pack(os.path.join('nomercy', 'old'), 'broken-old')
         rc, out = self.stage()
         self.assertEqual(0, rc, out)
-        calls = self.calls()
-        self.assertEqual([['validate', a, '--profile', 'nomercy'], ['validate', b, '--profile', 'vpw2']], calls)
+        self.assertEqual([['validate', b, a, '--profile', 'nomercy']], self.calls())
         self.assertIn('model packs: 2 validated by aki-model', out)
         self.assertEqual(['models', 'models.nrm'], self.staged())
-        self.assertEqual(['hero.akimodel'], os.listdir(os.path.join(self.game, 'assets', 'mods', 'models')))
+        self.assertEqual(['champ.akimodel', 'hero.akimodel'],
+                         sorted(os.listdir(os.path.join(self.game, 'assets', 'mods', 'models'))))
+
+    def test_a_game_without_a_profile_is_checked_with_a_warning(self):
+        self.tools(STUB)
+        os.makedirs(os.path.join(self.depot, 'Wm2kRecomp'))
+        self.mod('models', game='wm2k')
+        a = self.fake_pack('wm2k', 'hero')
+        rc, out = self.stage()
+        self.assertEqual(0, rc, out)
+        self.assertEqual([['validate', a]], self.calls(), 'no --profile: the one model.bin names')
+        self.assertIn('wm2k has no aki-model profile', out)
+
+    def test_any_character_in_a_pack_path(self):
+        self.tools(STUB)            # the stub prints each path, like validate: cp1252 output would crash on these
+        a = self.fake_pack('nomercy', '\u65e5\u672c-h\u00e9ro')
+        rc, out = self.stage()
+        self.assertEqual(0, rc, out)
+        self.assertEqual([['validate', a, '--profile', 'nomercy']], self.calls())
+
+    def test_a_tool_failure_is_not_blamed_on_the_packs(self):
+        self.tools('import sys\nsys.stderr.write("Traceback: boom\\n")\nsys.exit(3)\n')
+        self.fake_pack('nomercy', 'hero')
+        rc, out = self.stage()
+        self.assertNotEqual(0, rc, out)
+        self.assertIn('aki-model.py validate failed (exit 3) for the nomercy packs', out)
+        self.assertNotIn('refused model packs', out)
+        self.assertEqual([], self.staged())
+
+    def test_a_python_that_does_not_start_is_like_no_python(self):
+        self.tools(STUB)
+        self.fake_pack('nomercy', 'broken-but-unchecked')
+        fake = os.path.join(self.depot, 'fakebin')       # a Store alias without Python behind it, as python and py
+        os.makedirs(fake)
+        for n in ('python.cmd', 'py.cmd'):
+            with open(os.path.join(fake, n), 'w') as fh:
+                fh.write('@echo Python was not found 1>&2\r\n@exit /b 9009\r\n')
+        # First on PATH, it's passed over for the next Python that starts...
+        rc, out = self.stage(path_first=fake + os.pathsep + os.path.dirname(sys.executable))
+        self.assertNotEqual(0, rc, out)
+        self.assertEqual(1, len(self.calls()), out)
+        self.assertIn('refused model packs', out)
+        # ...and with no other one it's the same as no Python at all.
+        system32 = os.path.join(os.environ.get('SystemRoot', r'C:\Windows'), 'System32')
+        rc, out = self.stage(path=fake + os.pathsep + system32)
+        self.assertEqual(0, rc, out)
+        self.assertIn('no working Python', out)
+        self.assertEqual(1, len(self.calls()))
+        self.assertEqual(['models', 'models.nrm'], self.staged())
 
     def test_a_broken_pack_stops_the_staging(self):
         self.tools(STUB)
@@ -155,6 +209,7 @@ class StageValidateTest(unittest.TestCase):
 
     @unittest.skipUnless(os.path.isfile(os.path.join(REAL_TOOLS, 'aki-model.py')), 'needs ..\\AkiTools')
     def test_every_shipped_pack_validates(self):
+        # A data check on the repo's own starter packs (stage.ps1 runs the same command on them).
         for game in sorted(os.listdir(SHIPPED)):
             d = os.path.join(SHIPPED, game)
             if not os.path.isdir(d):
