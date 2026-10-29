@@ -33,10 +33,10 @@ converter makes one from your file name). Inside:
 
 | File | What it is |
 |---|---|
-| `model.bin` | The model as the N64 draws it: geometry, display lists and textures, behind a 64-byte **AKP1** header. The header says which game it's for, how big it is, and where its tables are. The mod loads it into the game's free memory (3.75 MB on both games, shared by every pack in a match). |
+| `model.bin` | The model as the N64 draws it: geometry, display lists and textures, behind a 64-byte **AKP1** header. The header says which game it's for, how big it is, and where its tables are. The mod loads it into the game's free memory (about 3.5 MB on both games, shared by every pack in a match; the mod also keeps its depth image and the smooth-skinning buffers there, so a pack near the limit can pass `validate` and still be refused in game). |
 | `manifest.json` | What the converter did: parts, sizes, the texture tiles, the warnings. Tools read it; you don't need to. |
 | `pack.json` | The facts for people: `name`, `author`, `license`, `source`, a suggested slot. **Edit this one freely**: converting again keeps your edits. |
-| `preview.png`, `preview-lit.png` | Front and side views in the rest pose. `preview-lit.png` shows the colours the game will multiply (the baked light included). |
+| `preview.png`, `preview-lit.png` | Front and side views in the rest pose. `preview-lit.png` shows the colours the game will multiply (the baked light included); packs built before it existed, like the starter packs, have only `preview.png`. |
 | `<id>-hd.rtz` | Optional full-resolution textures, as a texture pack (see "Textures"). |
 
 **Parts.** AKI's wrestlers are made of rigid body parts (No Mercy has 28 part slots, VPW2 has 25: pelvis, chest,
@@ -123,19 +123,22 @@ comment: the mod reads ids.
 3. Use that as `--wrestler 0x0302`, or write `0x0302` in `models.txt`. **Always write the `0x`**: the mod reads a bare
    `0302` as the decimal number 302.
 
-### An FBX, DAE or .blend model
+### An FBX, DAE, .blend or OBJ model
 
-`aki-model.py` reads glTF only (`.glb`, `.gltf`). For other formats, let Blender export a `.glb` first; nothing in it
-needs to be done by hand:
+`quick` takes these too: it has Blender export a `.glb` first, by itself (Blender 4.2 LTS; Blender 5 has no `.dae`
+import).
 
 ```powershell
-.\aki-model-import.ps1 -Model mymodel.fbx -Out mymodel.glb      # Blender found on PATH, AKI_BLENDER or -Blender
-python aki-model.py quick mymodel.glb --game nomercy --slot 1 --install ...
+python aki-model.py quick mymodel.fbx --game nomercy --slot 1 --install ... --exclude "*_Sword"
 ```
 
-- Use Blender **4.2 LTS**: Blender 5 has no `.dae` import.
-- `-Exclude '*_Sword'` leaves props out, by object name.
+- **Finding Blender:** `--blender <blender.exe>`, else the `AKI_BLENDER` environment variable, else Blender in the
+  depot's `_tools\blender`, else PATH.
+- `--exclude` leaves props out, by object name (repeat it for several).
 - A `.blend` file's missing image links are found by file name next to the model and relinked.
+- An `.obj` has no skeleton: `quick` fits the game's skeleton to it (`--auto-split`).
+- `convert` (section 9) reads glTF only. For it, make the `.glb` with
+  `.\aki-model-import.ps1 -Model mymodel.fbx -Out mymodel.glb`, which takes `-Blender` and `-Exclude` the same way.
 
 ## 5. Look before you play
 
@@ -165,13 +168,13 @@ The launcher saves `models.txt` straight away:
 - It writes the file in one step, so the game never reads half of it.
 - It works on the file as it is on disk at that moment, so edits you made in Notepad meanwhile stay.
 
-A pack is shown read-only, with the reason, in these cases:
-- its folder name isn't a valid pack id;
-- it has more than one line in `models.txt`;
-- `models.txt` can't be read.
+Some packs can't be fully edited there, and the page says why:
+- **Fully read-only:** the folder name isn't a valid pack id, or `models.txt` can't be read.
+- **Only Replaces locked (On still works):** the pack has more than one line in `models.txt`, or it has a wrestler
+  line and there is no roster.
 
-The same page installs packs and other mods: **Install files...**, **Install a pack folder...**, or drop files on the
-window.
+The page's **Install files...** and drop-a-file install mods and texture packs, not model packs. Install a model pack
+with `quick --install`, or by copying its folder into `mods\models\` (section 12).
 
 ### In the game: the Mods menu
 
@@ -213,7 +216,8 @@ Which line wins, in order:
 2. The first `slot` line that matches.
 3. The first `wrestler` line that matches. A matching `slot` line beats a `wrestler` line, wherever each one is in
    the file.
-4. `off` beats everything.
+4. `off <pack>`: when that pack is the one chosen for a slot, the slot stays stock. A lower-priority line for
+   another pack does not take over.
 
 Limits and rules:
 - Pack ids are lower case, as in the folder name.
@@ -263,12 +267,14 @@ wrestlers, so a single-sided surface (a cape, a skirt, hair cards) vanishes when
 
 **It hovers above the mat (or sinks into it).** The converter lowers the feet onto the game's floor when it can, and
 warns when the model still hovers (`the model's feet are N units above the game's floor`). Try these:
-- `--retarget stretch` (with `convert`): moves every bone onto the game's own skeleton, short legs included.
 - Check that the model's feet are at its lowest point, with no stray vertex below the soles.
+- Without smooth skinning (`convert` with no `--skin`), add `--retarget stretch`: it moves every bone onto the game's
+  own skeleton, short legs included. `quick`'s skinned builds use it already.
 
 **It looks faceted, or flat next to the stock wrestlers.** The game doesn't light its wrestlers: their soft shading is
 painted into the vertex colours. The converter does the same, with a soft light and shadowing in creases
-(`--bake-light`, on by default with smooth skinning). Options:
+(`--bake-light`, on by default with smooth skinning). These are `convert` options (section 9); `quick` always uses
+the default:
 - `--bake-light 0.5`: half the effect;
 - `--bake-light off`: a plain light;
 - `--crease 30`: keeps hard edges hard (the angle in degrees);
@@ -278,8 +284,10 @@ painted into the vertex colours. The converter does the same, with a soft light 
 holds at most 4096 of them. `quick` falls back to building without it (the model bends at the joints like the game's
 rigid parts). For smooth joints, lower the vertex count in Blender (the Decimate modifier) and convert again.
 
-**"too big for the memory left" in the log.** All the packs in a match share 3.75 MB. Use smaller textures, decimate
-the model, or use fewer packs in one match.
+**"too big for the memory left" in the log.** All the packs in a match share about 3.5 MB of the game's memory, and
+the mod keeps its depth image and the smooth-skinning buffers there too. `validate` checks the converter's limit,
+which is a little larger, so a pack close to it can still be refused in game. Use smaller textures, decimate the model,
+or use fewer packs in one match.
 
 **Blurry textures.** That's the N64's 4 KB texture memory. Install the `<id>-hd.rtz` texture pack and turn it on in
 the Mods menu. No `-hd.rtz`? Run `pip install xxhash` and convert again.
@@ -315,7 +323,8 @@ python aki-model.py validate packs\nomercy\mymodel.akimodel
   - `bake`: colours painted into the vertices, no textures (smallest);
   - `none`: material colours only.
 - `--final-height H`: the height as converted, in game units. Alternatively `--height` with `--fit`.
-- `--retarget move|stretch|off`: how far the model's joints are moved onto the game's skeleton.
+- `--retarget move|stretch|off`: how far the model's joints are moved onto the game's skeleton. The default is
+  `stretch` with `--weld --skin`, else `move`.
 - `--normals`, `--crease`, `--flat` and `--bake-light`: the shading (section 8).
 - `--subdivide N`: more triangles for a very low-poly model (watch the 4096 limit).
 
@@ -335,7 +344,7 @@ format is in `profile.schema.json`, and `aki-model.py` checks the rules. It hold
 - the rest joints of the game's skeleton, and the arm pose;
 - `model_space`: the floor, top and default height;
 - `runtime`: what the mod needs to know about the game's memory. That is the wrestler slots, part nodes, matrices,
-  the wrestler-id address, the 3.75 MB memory window and the texture formats.
+  the wrestler-id address, the converter's memory window for packs and the texture formats.
 
 The pack's header records the profile id, and the mod refuses a pack built for another game.
 
@@ -345,9 +354,11 @@ The pack's header records the profile id, and the mod refuses a pack built for a
    `--profile <game>` then just works, and `<game>-roster.json` adds names.
 2. **This mod:**
    - a four-line `src\adapters\<game>.c` (`AN_PROFILE`, `AN_PARTS`, `AN_EMITTER`, `#include "aki_nodes.c"`);
-   - a line in `src\adapter.c`;
-   - the game's addresses in `mod.psd1` (`MI_ACTORS`, `MI_WRESTLER_IDS`, `MI_MEM_BASE` / `MI_MEM_SIZE`, `MI_SCRATCH`,
-     `MI_COSTUMES`), mirroring the profile's `runtime` block.
+   - an `#elif defined(AKI_GAME_<KEY>)` / `#include "adapters/<game>.c"` pair in `src\adapter.c`;
+   - in `mod.psd1`: the game in `Games`, and a `PerGame` entry with its addresses (`MI_ACTORS`, `MI_WRESTLER_IDS`,
+     `MI_MEM_BASE` / `MI_MEM_SIZE`, `MI_SCRATCH`, and `MI_COSTUMES` or `MI_COSTUMES_U8` for the costume). They
+     follow the profile's `runtime` block; the mod's memory window is a little smaller than the converter's (it keeps
+     its own buffers there).
 3. **The game port:** the host exports `aki_log`, `aki_models_read` and `aki_models_list`.
 4. **AKI Launcher:** `"model_profile": "<game>"` on the game's entry in `assets\games.json` turns on its Model packs
    section.
@@ -370,7 +381,8 @@ Credits and sources are in `mods\models\CREDITS.md`.
   packs section or in `models.txt`.
 
 They were made with the steps in this guide:
-1. `aki-model-import.ps1` turned the `.blend` files into `.glb`, with `-Exclude` for the weapons.
+1. `aki-model-import.ps1` turned the Quaternius `.blend` files into `.glb`, with `-Exclude` for the weapons. The robot
+   came as a `.glb` already (via three.js).
 2. `aki-model.py convert --profile <game> --space model --weld --skin --textures tiles`.
 3. `validate`.
 
@@ -379,11 +391,9 @@ you share it.
 
 ## 12. Sharing your pack
 
-Zip the `<id>.akimodel` folder and, if there is one, its `<id>-hd.rtz`. To install it, a player can do either of
-these:
-- **In the AKI Launcher:** drop the zip or folder on the game's Mods page, and pick who it replaces in Model packs.
-- **By hand:**
-  1. Unzip the folder into `mods\models\` and put the `-hd.rtz` in `mods\`.
-  2. Add a `models.txt` line.
+Zip the `<id>.akimodel` folder. Its `<id>-hd.rtz`, if it has one, is inside it. To install it, a player:
+1. Unzips the folder into `mods\models\`.
+2. Copies the `-hd.rtz` from the pack folder into `mods\`.
+3. Picks who it replaces: in the AKI Launcher's Model packs section, or with a `models.txt` line.
 
 Nothing is rebuilt. Keep `pack.json` honest: the licence, the author, and where the model came from.
