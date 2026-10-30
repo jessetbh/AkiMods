@@ -10,3 +10,4 @@ local-tools.ps1
 
 # Python bytecode
 __pycache__/
+dist/
