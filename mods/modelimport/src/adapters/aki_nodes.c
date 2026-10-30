@@ -1,4 +1,4 @@
-// The adapter for AKI's node-based wrestler renderer, shared by the games that run it (No Mercy, VPW2; WM2000 next).
+// The adapter for AKI's node-based wrestler renderer, shared by the games that run it (No Mercy, VPW2, WM2000).
 // A game's adapter file sets four things and includes this one:
 //
 //     #define AN_PROFILE "nomercy"           // the profile a pack must be built for (pack header bytes 8..15)
@@ -13,12 +13,21 @@
 // part actors, 0xDC bytes each (MI_ACTORS + slot * AN_PARTS * 0xDC). Each part's render node (actor+0x14) has a
 // vertex block (+0x30, count +0x2C) that the emitter loads right after forcing the part's matrix (gSPForceMatrix of
 // node+0x38+parity*0x40), and a display list (+0x34) drawn over that cache. A slot's nodes are contiguous (part N's
-// node = part 0's + N x 0xB8), which is what welded packs rely on.
+// node = part 0's + N x 0xB8), which is what welded packs rely on. WM2000's root part has no node; its nodes start at
+// part 1 (node_layout.h, aki-roadmap#161).
 #include "../adapter.h"
 #include "../restore_rules.h"
+#include "../node_layout.h"
 
 #if !defined(AN_PROFILE) || !defined(AN_PARTS) || !defined(AN_EMITTER)
 #error "define AN_PROFILE, AN_PARTS and AN_EMITTER before including aki_nodes.c"
+#endif
+
+// Parts a welded pack's matrices come from: the leading AN_WELD_PARTS must be contiguous; parts after them (bones
+// only in the profile) may have nodes anywhere. WM2000 gives part 24 a node of its own, allocated after part 20's, for
+// some wrestlers (aki-roadmap#161).
+#ifndef AN_WELD_PARTS
+#define AN_WELD_PARTS AN_PARTS
 #endif
 
 #define AN_SLOTS 4
@@ -53,21 +62,32 @@ s32 mi_slot_costume(int slot) { return (s32)RAM8(MI_COSTUMES_U8 + slot); }
 s32 mi_slot_costume(int slot) { return -1; }
 #endif
 
-int mi_slot_active(int slot) { return mi_part_node(slot, 0) != 0 && mi_slot_wrestler(slot) != 0; }
+static void an_nodes(int slot, unsigned int* nodes) {
+    for (int i = 0; i < AN_PARTS; i++) nodes[i] = mi_part_node(slot, i);
+}
+
+int mi_slot_active(int slot) {
+    unsigned int nodes[AN_PARTS];
+    an_nodes(slot, nodes);
+    return mi_first_node(nodes, AN_PARTS) >= 0 && mi_slot_wrestler(slot) != 0;
+}
 
 u32 mi_part_matrix(u32 node, int parity) { return node + AN_NODE_MATRIX + (u32)parity * AN_PARITY_STRIDE; }
 
 int mi_matrices_contiguous(int slot) {
-    u32 node0 = mi_part_node(slot, 0);
-    if (!node0) return 0;
-    for (int i = 1; i < AN_PARTS; i++)
-        if (mi_part_node(slot, i) != node0 + (u32)i * AN_NODE_STRIDE) return 0;
-    return 1;
+    unsigned int nodes[AN_PARTS];
+    an_nodes(slot, nodes);
+    return mi_nodes_contiguous(nodes, AN_WELD_PARTS, AN_NODE_STRIDE);
 }
 
 // The pack's welded list loads part N's matrix from segment 0xD + N x 0xB8 + 0x38 (the profile's node_stride and
-// node_matrix): segment 0xD = part 0's node + this parity's matrix offset. These games use segment 1, not 0xD.
-u32 mi_matrix_segment(int slot, int parity) { return mi_part_node(slot, 0) + (u32)parity * AN_PARITY_STRIDE; }
+// node_matrix): segment 0xD = part 0's node (where it would be when part 0 has none) + this parity's matrix offset.
+// These games use segment 1, not 0xD.
+u32 mi_matrix_segment(int slot, int parity) {
+    unsigned int nodes[AN_PARTS];
+    an_nodes(slot, nodes);
+    return mi_node_base(nodes, AN_PARTS, AN_NODE_STRIDE) + (u32)parity * AN_PARITY_STRIDE;
+}
 
 static void put(u32** out, u32 w0, u32 w1) {
     (*out)[0] = w0;

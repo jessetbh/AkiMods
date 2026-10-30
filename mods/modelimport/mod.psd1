@@ -6,7 +6,7 @@
 @{
     Id      = 'aki_modelimport'
     Sources = @('src\core.c', 'src\adapter.c')
-    Games   = @('nomercy', 'vpw2')
+    Games   = @('nomercy', 'vpw2', 'wm2k')
     Bundle  = $true
     EnabledByDefault = $false           # a new install stays off until the player turns it on (build.ps1)
     Packs   = 'packs'                   # packs\<game>\: starter packs + their HD textures, shipped by stage.ps1
@@ -30,6 +30,18 @@
                 '-DMI_WRESTLER_IDS=0x8007F430u', # s16 per slot: the wrestler id (func_80014730)
                 '-DMI_COSTUMES=0x80079EBCu',     # s16 per slot: the costume the slot was built with (func_80014730)
                 '-DMI_MEM_BASE=0x80400000u',     # packs load here: Expansion RAM no VPW2 code addresses...
+                '-DMI_MEM_SIZE=0x00387C00u',     # ...up to 0x807C0000
+                '-DMI_SCRATCH=0x807C0000u'       # the core's lists and models.txt (32 KB; below 8 MB so RT64 reads it)
+            )
+        }
+        # WWF WrestleMania 2000 (USA). aki-roadmap#160/#161 (runtime-confirmed: actors, ids, costumes, Expansion RAM
+        # free in a match). These mirror AkiTools model-templates/profiles/wm2k.json.
+        wm2k = @{
+            Defines = @(
+                '-DMI_ACTORS=0x80088460u',       # part actors: + slot*0x157C + part*0xDC
+                '-DMI_WRESTLER_IDS=0x80073800u', # s16 per slot: the wrestler id
+                '-DMI_COSTUMES=0x8006E288u',     # s16 per slot: the costume
+                '-DMI_MEM_BASE=0x80400000u',     # packs load here: Expansion RAM WM2000 doesn't use (0/1024 pages)...
                 '-DMI_MEM_SIZE=0x00387C00u',     # ...up to 0x807C0000
                 '-DMI_SCRATCH=0x807C0000u'       # the core's lists and models.txt (32 KB; below 8 MB so RT64 reads it)
             )

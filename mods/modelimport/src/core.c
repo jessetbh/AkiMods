@@ -775,8 +775,45 @@ static void log_poses(void) {
     }
 }
 
+#ifdef MI_TEST_PARTDUMP
+// Profile work (aki-roadmap#161; build with -Define MI_TEST_PARTDUMP): every 30 frames from 600 to 1800, each part of
+// slot 1: its node, vertex count and the box of its vertex block (model space), then both rows of its matrix
+// translation, for the profile's part map and rest joints.
+static void dump_parts(void) {
+    if (frame_no % 300 == 0)
+        for (int slot = 0; slot < mi_slots(); slot++) {
+            mi_log_str("pn "); mi_log_dec((s32)frame_no); mi_log_str(" slot "); mi_log_dec(slot + 1);
+            for (int i = 0; i < mi_parts(); i++) { mi_log_str(" "); mi_log_hex(mi_part_node(slot, i), 8); }
+            mi_log_end();
+        }
+    if (frame_no < 600 || frame_no > 1800 || frame_no % 30 != 0 || !mi_slot_active(0)) return;
+    for (int i = 0; i < mi_parts(); i++) {
+        u32 node = mi_part_node(0, i);
+        mi_log_str("pd "); mi_log_dec((s32)frame_no); mi_log_str(" "); mi_log_dec(i);
+        if (!node) { mi_log_str(" none"); mi_log_end(); continue; }
+        u32 n = (u32)(u16)RAM16(node + 0x2C), v = RAM32(node + 0x30);
+        s32 lo[3] = { 32767, 32767, 32767 }, hi[3] = { -32768, -32768, -32768 };
+        for (u32 k = 0; mi_is_ram(v) && k < n && k < 64; k++)
+            for (int a = 0; a < 3; a++) {
+                s32 c = (s16)RAM16(v + k * 16 + a * 2);
+                if (c < lo[a]) lo[a] = c;
+                if (c > hi[a]) hi[a] = c;
+            }
+        mi_log_str(" n "); mi_log_dec((s32)n);
+        for (int a = 0; a < 3; a++) { mi_log_str(" "); mi_log_dec(n ? lo[a] : 0); mi_log_str(":"); mi_log_dec(n ? hi[a] : 0); }
+        u32 m = mi_part_matrix(node, 0);
+        mi_log_str(" M");
+        for (int w = 0; w < 16; w++) { mi_log_str(" "); mi_log_hex(RAM32(m + w * 4), 8); }
+        mi_log_end();
+    }
+}
+#endif
+
 void mi_core_frame(void) {
     frame_no++;
+#ifdef MI_TEST_PARTDUMP
+    dump_parts();
+#endif
     if (recomp_get_config_u32("log_poses")) log_poses();
     if (!recomp_get_config_u32("log")) return;
     for (int i = 0; i < mi_slots(); i++) {

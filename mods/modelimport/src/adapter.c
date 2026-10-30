@@ -3,6 +3,8 @@
 #include "adapters/nomercy.c"
 #elif defined(AKI_GAME_VPW2)
 #include "adapters/vpw2.c"
+#elif defined(AKI_GAME_WM2K)
+#include "adapters/wm2k.c"
 #else
 #error "aki_modelimport has no adapter for this game yet (mods/modelimport/src/adapters/<game>.c)"
 #endif
