@@ -89,12 +89,6 @@ u32 mi_matrix_segment(int slot, int parity) {
     return mi_node_base(nodes, AN_PARTS, AN_NODE_STRIDE) + (u32)parity * AN_PARITY_STRIDE;
 }
 
-static void put(u32** out, u32 w0, u32 w1) {
-    (*out)[0] = w0;
-    (*out)[1] = w1;
-    *out += 2;
-}
-
 // The depth clear (aki-roadmap#130): No Mercy has no depth buffer at all (no gDPSetDepthImage, nothing writes depth), so
 // the imported models clear one, once per frame, with a screen-covering quad that only writes far depth (Z_UPD, no
 // compare; the blender keeps the framebuffer's colour), and draw with Z_CMP | Z_UPD: their parts occlude each other
@@ -103,12 +97,12 @@ static void put(u32** out, u32 w0, u32 w1) {
 // Once per frame whatever the slots' draw order: each list calls the clear through segment 0xC (unused by these games),
 // the clear ends by pointing 0xC at an empty list, and before the game draws the parts each frame the emitter hook adds
 // a gSPSegment pointing 0xC back at the clear (mi_arm_depth_clear). The quad's matrix, vertices and both lists live past
-// the core's scratch (32 KB).
-#define MI_CLEAR (MI_SCRATCH + 0x8000u)
-#define MI_CLEAR_BODY (MI_CLEAR + 0x80u)    // the quad: depth 1.0 everywhere
-#define MI_CLEAR_DL (MI_CLEAR + 0x100u)     // segment 0xC's first target: the body, then 0xC -> the empty list
-#define MI_CLEAR_NOOP (MI_CLEAR + 0x120u)
-#define MI_CLEAR_AFTER (MI_CLEAR + 0x130u)  // after the wrestler parts: the body again, then the stock state
+// the core's lists and models.txt (MI_CLEAR_OFFSET, adapter.h). The commands are in the game's microcode (gbi.h).
+#define MI_CLEAR (MI_SCRATCH + MI_CLEAR_OFFSET)
+#define MI_CLEAR_BODY (MI_CLEAR + 0x80u)    // the quad: depth 1.0 everywhere (up to 32 commands)
+#define MI_CLEAR_DL (MI_CLEAR + 0x180u)     // segment 0xC's first target: the body, then 0xC -> the empty list
+#define MI_CLEAR_NOOP (MI_CLEAR + 0x1A0u)
+#define MI_CLEAR_AFTER (MI_CLEAR + 0x1B0u)  // after the wrestler parts: the body again, then the stock state
 // The depth image (480 x 240 x 16 bits): the pack window's top 0x38400 bytes. Set once from the emitter hook and never
 // reset (aki-roadmap#141): RT64 starts a new framebuffer pair on every depth image change, and its ray tracer gathers only
 // the first pair's perspective scene, so setting and resetting it around each list left the imports (and everything
@@ -132,37 +126,37 @@ static void write_clear(void) {
         RAM32(at + 12) = 0;
     }
     u32* out = (u32*)MI_CLEAR_BODY;
-    put(&out, 0xE7000000u, 0);              // G_RDPPIPESYNC
-    put(&out, 0xD7000000u, 0);              // texture off for the clear
-    put(&out, 0xE300080Fu, 0x00082C00u);    // othermode H as the lists set it (1-cycle)
-    put(&out, 0xE200001Cu, 0x5F5A4060u);    // Z_UPD, IM_RD, FORCE_BL; blender (MEM * 0 + MEM * 1): colour kept
-    put(&out, 0xE2001D00u, 0x00000004u);    // Z source: primitive depth (G_ZS_PRIM), the largest:
-    put(&out, 0xEE000000u, 0x7FFF0000u);    // gDPSetPrimDepth(0x7FFF, 0), so later game draws that test depth pass
-    put(&out, 0xFCFFFFFFu, 0xFFFE7D3Eu);    // combiner alpha 1, so an alpha compare the game left on keeps the quad
-    put(&out, 0xD9C0F9FAu, 0x00000001u);    // geometry: G_ZBUFFER only (no culling, lighting or shade)
-    put(&out, 0xDC38000Eu, MI_CLEAR - 0x80000000u); // gSPForceMatrix
-    put(&out, 0x01004008u, MI_CLEAR + 64 - 0x80000000u); // 4 vertices
-    put(&out, 0x06000204u, 0x00000406u);    // the two triangles
-    put(&out, 0xE7000000u, 0);
-    put(&out, 0xE2001D00u, 0);              // Z source: the pixel's again
-    put(&out, 0xDF000000u, 0);
+    mi_gbi_put(&out, 0xE7000000u, 0);       // G_RDPPIPESYNC
+    mi_gbi_texture(&out, 0, 0);             // texture off for the clear
+    mi_gbi_othermode_h(&out, MI_OM_H_PIPELINE_TO_CYCLE, 0x00082C00u); // othermode H as the lists set it (1-cycle)
+    mi_gbi_othermode_l(&out, MI_OM_L_RENDERMODE, 0x5F5A4060u); // Z_UPD, IM_RD, FORCE_BL; blender (MEM * 0 + MEM * 1): colour kept
+    mi_gbi_othermode_l(&out, MI_OM_L_ZSRCSEL, 0x00000004u); // Z source: primitive depth (G_ZS_PRIM), the largest:
+    mi_gbi_put(&out, 0xEE000000u, 0x7FFF0000u); // gDPSetPrimDepth(0x7FFF, 0), so later game draws that test depth pass
+    mi_gbi_put(&out, 0xFCFFFFFFu, 0xFFFE7D3Eu); // combiner alpha 1, so an alpha compare the game left on keeps the quad
+    mi_gbi_geometry(&out, MI_G_STATE | MI_G_SHADE | MI_G_ZBUFFER, MI_G_ZBUFFER); // G_ZBUFFER only (no culling, lighting or shade)
+    mi_gbi_force_matrix(&out, MI_CLEAR - 0x80000000u);
+    mi_gbi_vertex(&out, MI_CLEAR + 64 - 0x80000000u, 4, 0);
+    mi_gbi_tri2(&out, 0, 1, 2, 0, 2, 3);    // the two triangles
+    mi_gbi_put(&out, 0xE7000000u, 0);
+    mi_gbi_othermode_l(&out, MI_OM_L_ZSRCSEL, 0); // Z source: the pixel's again
+    mi_gbi_enddl(&out);
     out = (u32*)MI_CLEAR_DL;
-    put(&out, 0xDE000000u, MI_CLEAR_BODY - 0x80000000u);
-    put(&out, 0xDB060030u, MI_CLEAR_NOOP - 0x80000000u); // segment 0xC: the empty list, for the rest of this frame
-    put(&out, 0xDF000000u, 0);
+    mi_gbi_dl(&out, MI_CLEAR_BODY - 0x80000000u);
+    mi_gbi_segment(&out, 0xC, MI_CLEAR_NOOP - 0x80000000u); // segment 0xC: the empty list, for the rest of this frame
+    mi_gbi_enddl(&out);
     out = (u32*)MI_CLEAR_NOOP;
-    put(&out, 0xDF000000u, 0);
+    mi_gbi_enddl(&out);
     // After the parts (mi_aki_nodes_emit_done): depth back to 1.0, so the imports' depth never outlives the wrestler
     // chunk that drew it (the game's own draws before the next frame's parts, and after the imports stop, test against
     // it: the far ropes), then the state the lists leave (mi_list_close) and texturing on, as the stock parts have it.
     out = (u32*)MI_CLEAR_AFTER;
-    put(&out, 0xDE000000u, MI_CLEAR_BODY - 0x80000000u);
-    put(&out, 0xE7000000u, 0);
-    put(&out, 0xE3001001u, 0);
-    put(&out, 0xE200001Cu, 0x0F0A7008u);
-    put(&out, 0xD9FFFFFEu, 0x00020400u);
-    put(&out, 0xD7000002u, 0xFFFFFFFFu);
-    put(&out, 0xDF000000u, 0);
+    mi_gbi_dl(&out, MI_CLEAR_BODY - 0x80000000u);
+    mi_gbi_put(&out, 0xE7000000u, 0);
+    mi_gbi_othermode_h(&out, MI_OM_H_TEXTLUT, 0);
+    mi_gbi_othermode_l(&out, MI_OM_L_RENDERMODE, 0x0F0A7008u);
+    mi_gbi_geometry(&out, MI_G_ZBUFFER, MI_G_LIGHTING | MI_G_CULL_BACK);
+    mi_gbi_texture(&out, 1, 0xFFFFFFFFu);
+    mi_gbi_enddl(&out);
 }
 
 void mi_arm_depth_clear(u32 gfx) {
@@ -171,32 +165,33 @@ void mi_arm_depth_clear(u32 gfx) {
     write_clear();
     RAM32(head) = 0xFE000000u;              // gDPSetDepthImage, the same every frame (see MI_DEPTH)
     RAM32(head + 4) = MI_DEPTH - 0x80000000u;
-    RAM32(head + 8) = 0xDB060030u;          // gSPSegment(0xC, the clear) in the game's list, before the parts
+    RAM32(head + 8) = mi_gbi_segment_w0(0xC); // gSPSegment(0xC, the clear) in the game's list, before the parts
     RAM32(head + 12) = MI_CLEAR_DL - 0x80000000u;
     RAM32(gfx) = head + 16;
 }
 
 u32* mi_list_open(u32* out) {
-    put(&out, 0xE7000000u, 0);              // G_RDPPIPESYNC
-    put(&out, 0xDE000000u, 0x0C000000u);    // the frame's depth clear, the first time (segment 0xC, see above)
-    put(&out, 0xE7000000u, 0);              // (a sync between the clear's triangles and the state below)
-    put(&out, 0xD7000002u, 0xFFFFFFFFu);    // gSPTexture on, full scale, tile 0 (as the stock parts)
+    mi_gbi_put(&out, 0xE7000000u, 0);       // G_RDPPIPESYNC
+    mi_gbi_dl(&out, 0x0C000000u);           // the frame's depth clear, the first time (segment 0xC, see above)
+    mi_gbi_put(&out, 0xE7000000u, 0);       // (a sync between the clear's triangles and the state below)
+    mi_gbi_texture(&out, 1, 0xFFFFFFFFu);   // gSPTexture on, full scale, tile 0 (as the stock parts)
     // othermode H bits 8-23 (dither as the game has it): 1-cycle, G_TP_PERSP, G_TD_CLAMP, G_TL_TILE, G_TT_NONE,
     // G_TF_BILERP, G_TC_FILT, G_CK_NONE. A pack's material sets its own TLUT mode and combiner.
-    put(&out, 0xE300080Fu, 0x00082C00u);
-    put(&out, 0xE200001Cu, 0x0F0A7038u);    // the stock parts' render mode plus Z_CMP | Z_UPD
-    put(&out, 0xFCFFFFFFu, 0xFFFE7D3Eu);    // combiner SHADE (colour), 1 (alpha): untextured materials
+    mi_gbi_othermode_h(&out, MI_OM_H_PIPELINE_TO_CYCLE, 0x00082C00u);
+    mi_gbi_othermode_l(&out, MI_OM_L_RENDERMODE, 0x0F0A7038u); // the stock parts' render mode plus Z_CMP | Z_UPD
+    mi_gbi_put(&out, 0xFCFFFFFFu, 0xFFFE7D3Eu); // combiner SHADE (colour), 1 (alpha): untextured materials
     // Geometry as the game's preamble leaves it, whichever list drew the clear: lighting, fog, texgen, LOD and culling
     // off (pack vertices carry colours); G_ZBUFFER, shade and smooth shading on.
-    put(&out, 0xD9C0F9FFu, 0x00200005u);
+    mi_gbi_geometry(&out, MI_G_STATE, MI_G_ZBUFFER | MI_G_SHADE | MI_G_SHADING_SMOOTH);
     return out;
 }
 
 u32* mi_list_close(u32* out) {
-    put(&out, 0xE7000000u, 0);
-    put(&out, 0xE3001001u, 0);              // TLUT off again (CI4 materials turn it on)
-    put(&out, 0xE200001Cu, 0x0F0A7008u);    // the stock render mode (no depth)
-    put(&out, 0xD9FFFFFEu, 0x00020400u);    // G_ZBUFFER off; lighting and back-face culling back on, as the stock parts leave them
+    mi_gbi_put(&out, 0xE7000000u, 0);
+    mi_gbi_othermode_h(&out, MI_OM_H_TEXTLUT, 0); // TLUT off again (CI4 materials turn it on)
+    mi_gbi_othermode_l(&out, MI_OM_L_RENDERMODE, 0x0F0A7008u); // the stock render mode (no depth)
+    // G_ZBUFFER off; lighting and back-face culling back on, as the stock parts leave them
+    mi_gbi_geometry(&out, MI_G_ZBUFFER, MI_G_LIGHTING | MI_G_CULL_BACK);
     return out;
 }
 
@@ -246,7 +241,7 @@ RECOMP_HOOK_RETURN(AN_EMITTER) void mi_aki_nodes_emit_done(void) {
     if (!armed_gfx) return;
     u32 head = RAM32(armed_gfx);
     if (mi_is_ram(head)) {
-        RAM32(head) = 0xDE000000u;          // the after-clear, behind the parts this call drew
+        RAM32(head) = MI_GBI_DL << 24;      // the after-clear, behind the parts this call drew
         RAM32(head + 4) = MI_CLEAR_AFTER - 0x80000000u;
         RAM32(armed_gfx) = head + 8;
     }

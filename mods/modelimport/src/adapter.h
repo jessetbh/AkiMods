@@ -1,10 +1,23 @@
 // The interface between the shared core (core.c: packs, models.txt, the per-slot lists) and one game's adapter
-// (adapters/<game>.c, picked by adapter.c). The core knows the pack format and F3DEX2; the adapter knows how the game
-// stores a wrestler's body parts and when it draws them. Contract: aki-roadmap#130, "runtime contract v1".
+// (adapters/<game>.c, picked by adapter.c). The core knows the pack format and writes its lists in the game's
+// microcode (gbi.h: F3DEX2, or F3DEX 1.x with MI_F3DEX1); the adapter knows how the game stores a wrestler's body
+// parts and when it draws them. Contract: aki-roadmap#130, "runtime contract v1".
 #ifndef MI_ADAPTER_H
 #define MI_ADAPTER_H
 
 #include "aki_mod.h"
+#include "gbi.h"
+
+// The scratch (MI_SCRATCH, 256 KB below 8 MB): the per-slot lists (2 parities x MI_MAX_SLOTS), models.txt after them,
+// then the adapter's depth-clear lists at MI_CLEAR_OFFSET. F3DEX 1.x needs more room per list: a forced matrix is four
+// commands, not two (aki-roadmap#163).
+#ifdef MI_F3DEX1
+#define MI_LIST_BYTES 0xC00                        // per slot and parity: render state + up to 5 commands per entry
+#define MI_CLEAR_OFFSET 0xC000u
+#else
+#define MI_LIST_BYTES 0x800                        // per slot and parity: render state + 3 commands per entry
+#define MI_CLEAR_OFFSET 0x8000u
+#endif
 
 #define MI_MAX_SLOTS 4
 #define MI_MAX_PARTS 32
