@@ -39,6 +39,22 @@ int main(void) {
     CHECK(!mi_nodes_contiguous(none, 3, s));
     CHECK(mi_node_base(none, 3, s) == 0);
 
+    // Deferred pack lists (aki-roadmap#163): 8 slot lists of 0xC00 bytes at 0x807C0000, markers at 0x807CC200.
+    const unsigned int L = 0x807C0000u, B = 0xC00u, M = 0x807CC200u;
+    CHECK(mi_marker_of(L, L, B, M, 8) == M);
+    CHECK(mi_marker_of(L + 3 * B, L, B, M, 8) == M + 24);
+    CHECK(mi_marker_of(L + 7 * B, L, B, M, 8) == M + 56);
+    CHECK(mi_marker_of(L + 8 * B, L, B, M, 8) == 0);     // past the slot lists (models.txt)
+    CHECK(mi_marker_of(L + 4, L, B, M, 8) == 0);         // not a list start
+    CHECK(mi_marker_of(L - B, L, B, M, 8) == 0);
+    CHECK(mi_marker_of(0x80123450u, L, B, M, 8) == 0);   // a game list
+    CHECK(mi_marker_index(M + 24, M, 8) == 3);
+    CHECK(mi_marker_index(M + 24 - 0x80000000u, M, 8) == 3);   // as the emitter writes it (physical)
+    CHECK(mi_marker_index(M + 64, M, 8) == -1);
+    CHECK(mi_marker_index(M + 4, M, 8) == -1);
+    CHECK(mi_marker_index(M - 8, M, 8) == -1);
+    CHECK(mi_marker_index(0, M, 8) == -1);
+
     printf("[modelimport layout tests] %d checks, %d failed\n", checks, fails);
     return fails ? 1 : 0;
 }

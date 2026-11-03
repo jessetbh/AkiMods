@@ -778,6 +778,14 @@ static void dump_parts(void) {
             for (int i = 0; i < mi_parts(); i++) { mi_log_str(" "); mi_log_hex(mi_part_node(slot, i), 8); }
             mi_log_end();
         }
+#ifdef MI_TEST_PEEK
+    // A new game's id / costume arrays (aki-roadmap#163): 24 halfwords from MI_TEST_PEEK, every 300 frames.
+    if (frame_no % 300 == 0) {
+        mi_log_str("pk "); mi_log_dec((s32)frame_no);
+        for (int k = 0; k < 24; k++) { mi_log_str(" "); mi_log_hex((u32)(u16)RAM16(MI_TEST_PEEK + k * 2), 4); }
+        mi_log_end();
+    }
+#endif
     if (frame_no < 600 || frame_no > 1800 || frame_no % 30 != 0 || !mi_slot_active(0)) return;
     for (int i = 0; i < mi_parts(); i++) {
         u32 node = mi_part_node(0, i);

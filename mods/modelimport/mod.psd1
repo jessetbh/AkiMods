@@ -6,7 +6,7 @@
 @{
     Id      = 'aki_modelimport'
     Sources = @('src\core.c', 'src\adapter.c')
-    Games   = @('nomercy', 'vpw2', 'wm2k', 'revenge')
+    Games   = @('nomercy', 'vpw2', 'wm2k', 'revenge', 'vpw64')
     Bundle  = $true
     EnabledByDefault = $false           # a new install stays off until the player turns it on (build.ps1)
     Packs   = 'packs'                   # packs\<game>\: starter packs + their HD textures, shipped by stage.ps1
@@ -56,6 +56,19 @@
                 '-DMI_MEM_BASE=0x80400000u',     # packs load here: Expansion RAM Revenge doesn't use (0/1024 pages)...
                 '-DMI_MEM_SIZE=0x00387C00u',     # ...up to 0x807C0000
                 '-DMI_SCRATCH=0x807C0000u'       # the core's lists and models.txt (32 KB; below 8 MB so RT64 reads it)
+            )
+        }
+        # Virtual Pro Wrestling 64 (Japan), F3DEX 1.x. aki-roadmap#160/#163. These mirror AkiTools
+        # model-templates/profiles/vpw64.json.
+        vpw64 = @{
+            Defines = @(
+                '-DMI_F3DEX1',                   # the lists in F3DEX 1.x (gbi.h)
+                '-DMI_ACTORS=0x8005D090u',       # part actors: + slot*0x13C4 + part*0xDC
+                '-DMI_WRESTLER_IDS=0x80068C80u', # s16 per slot: the wrestler id (group << 8 | index + 1)
+                '-DMI_COSTUMES=0x80068CA8u',     # s16 per slot: the costume (live: 0 and 1 in a mirror match)
+                '-DMI_MEM_BASE=0x80400000u',     # packs load here: Expansion RAM no VPW64 code addresses...
+                '-DMI_MEM_SIZE=0x00387C00u',     # ...up to 0x807C0000
+                '-DMI_SCRATCH=0x807C0000u'       # the core's lists, models.txt and the depth clear (below 8 MB so RT64 reads it)
             )
         }
     }

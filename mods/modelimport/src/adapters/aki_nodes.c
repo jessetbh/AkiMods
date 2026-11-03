@@ -210,15 +210,43 @@ void mi_hide_part(u32 node) {
     RAM32(node + 0x34) = 0;
 }
 
+#ifdef AN_DEFER_HUNG_LISTS
+// AN_DEFER_HUNG_LISTS (VPW64, aki-roadmap#163): the emitter loads every node's vertices of a group first and calls
+// their lists after, so a pack list drawn among them reloads the vertex cache under the stock lists that come after it
+// (the other wrestler lost its body whenever it drew later). The host node gets a marker instead: an empty list, one
+// per slot list (MI_SCRATCH + k x MI_LIST_BYTES -> marker k), and the return hook appends the pack lists whose markers
+// this call drew, after everything the call emitted.
+#define MI_MARKERS (MI_CLEAR + 0x200u)
+#define MI_MARKER_COUNT (2 * MI_MAX_SLOTS)
+static u32 marker_of(u32 dl) { return mi_marker_of(dl, MI_SCRATCH, MI_LIST_BYTES, MI_MARKERS, MI_MARKER_COUNT); }
+// The slot list a node's list word stands for: a marker's list, else the word itself.
+static u32 list_of(u32 word) {
+    int k = mi_marker_index(word, MI_MARKERS, MI_MARKER_COUNT);
+    return k < 0 ? word : MI_SCRATCH + (u32)k * MI_LIST_BYTES;
+}
+#endif
+
 void mi_hang_list(u32 node, u32 dl) {
     RAM32(node + 0x30) = 0;
     RAM16(node + 0x2C) = 0;
+#ifdef AN_DEFER_HUNG_LISTS
+    u32 m = marker_of(dl);
+    if (m) {
+        RAM32(m) = MI_GBI_ENDDL << 24;
+        RAM32(m + 4) = 0;
+        dl = m;
+    }
+#endif
     RAM32(node + 0x34) = dl;
 }
 
 void mi_restore_part(const MiSavedPart* s, u32 dl0, u32 dl1, u32 current_node) {
     // A rebuilt wrestler has new nodes: the old one may be anyone's now, even when its list is 0 (aki-roadmap#167).
-    if (!mi_restore_ok(current_node, s->node, RAM32(s->node + 0x34), dl0, dl1)) return;
+    u32 node_dl = RAM32(s->node + 0x34);
+#ifdef AN_DEFER_HUNG_LISTS
+    node_dl = list_of(node_dl);
+#endif
+    if (!mi_restore_ok(current_node, s->node, node_dl, dl0, dl1)) return;
     RAM32(s->node + 0x30) = s->w0;
     RAM16(s->node + 0x2C) = (s16)s->w1;
     RAM32(s->node + 0x34) = s->w2;
@@ -227,6 +255,7 @@ void mi_restore_part(const MiSavedPart* s, u32 dl0, u32 dl1, u32 current_node) {
 // The emitter draws every slot's visible parts; its parity argument says which matrix half it uses this frame.
 // The game's head pointer this call armed the clear for (the caller reloads it after the emitter returns).
 static u32 armed_gfx;
+static u32 armed_start;     // the head after the arming: where this call's own commands start
 
 RECOMP_HOOK(AN_EMITTER) void mi_aki_nodes_emit(u32 gfx, s32 parity, s32 list) {
     mi_core_emit(parity & 1);
@@ -234,12 +263,30 @@ RECOMP_HOOK(AN_EMITTER) void mi_aki_nodes_emit(u32 gfx, s32 parity, s32 list) {
     if (mi_core_replacing()) {
         mi_arm_depth_clear(gfx);
         armed_gfx = gfx;
+        armed_start = RAM32(gfx);
     }
 }
 
 RECOMP_HOOK_RETURN(AN_EMITTER) void mi_aki_nodes_emit_done(void) {
     if (!armed_gfx) return;
     u32 head = RAM32(armed_gfx);
+#ifdef AN_DEFER_HUNG_LISTS
+    // The pack lists whose markers this call drew, once each, after the call's own lists.
+    if (mi_is_ram(head) && mi_is_ram(armed_start) && armed_start <= head && head - armed_start < 0x10000u) {
+        u32 drawn = 0;
+        for (u32 p = armed_start; p < head; p += 8) {
+            if (RAM32(p) != (MI_GBI_DL << 24)) continue;
+            int k = mi_marker_index(RAM32(p + 4), MI_MARKERS, MI_MARKER_COUNT);
+            if (k >= 0) drawn |= 1u << k;
+        }
+        for (u32 k = 0; k < MI_MARKER_COUNT; k++) {
+            if (!(drawn & (1u << k))) continue;
+            RAM32(head) = MI_GBI_DL << 24;
+            RAM32(head + 4) = MI_SCRATCH + k * MI_LIST_BYTES - 0x80000000u;
+            head += 8;
+        }
+    }
+#endif
     if (mi_is_ram(head)) {
         RAM32(head) = MI_GBI_DL << 24;      // the after-clear, behind the parts this call drew
         RAM32(head + 4) = MI_CLEAR_AFTER - 0x80000000u;
