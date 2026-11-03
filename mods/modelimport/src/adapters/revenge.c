@@ -5,5 +5,6 @@
 // model-templates/profiles/revenge.json.
 #define AN_PROFILE "revenge"
 #define AN_PARTS 23
+#define AN_WELD_PARTS 21     // parts 21-22 are bones only (profile static_parts); a node of theirs elsewhere mustn't block welds
 #define AN_EMITTER "func_80002454"
 #include "aki_nodes.c"

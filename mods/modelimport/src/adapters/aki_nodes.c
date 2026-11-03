@@ -1,4 +1,4 @@
-// The adapter for AKI's node-based wrestler renderer, shared by the games that run it (No Mercy, VPW2, WM2000).
+// The adapter for AKI's node-based wrestler renderer, shared by the games that run it (No Mercy, VPW2, WM2000, Revenge).
 // A game's adapter file sets four things and includes this one:
 //
 //     #define AN_PROFILE "nomercy"           // the profile a pack must be built for (pack header bytes 8..15)
@@ -13,8 +13,8 @@
 // part actors, 0xDC bytes each (MI_ACTORS + slot * AN_PARTS * 0xDC). Each part's render node (actor+0x14) has a
 // vertex block (+0x30, count +0x2C) that the emitter loads right after forcing the part's matrix (gSPForceMatrix of
 // node+0x38+parity*0x40), and a display list (+0x34) drawn over that cache. A slot's nodes are contiguous (part N's
-// node = part 0's + N x 0xB8), which is what welded packs rely on. WM2000's root part has no node; its nodes start at
-// part 1 (node_layout.h, aki-roadmap#161).
+// node = part 0's + N x 0xB8), which is what welded packs rely on. WM2000's and Revenge's root part has no node; their nodes start
+// at part 1 (node_layout.h, aki-roadmap#161/#162).
 #include "../adapter.h"
 #include "../restore_rules.h"
 #include "../node_layout.h"
