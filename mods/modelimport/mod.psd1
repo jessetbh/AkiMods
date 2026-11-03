@@ -6,7 +6,7 @@
 @{
     Id      = 'aki_modelimport'
     Sources = @('src\core.c', 'src\adapter.c')
-    Games   = @('nomercy', 'vpw2', 'wm2k')
+    Games   = @('nomercy', 'vpw2', 'wm2k', 'revenge')
     Bundle  = $true
     EnabledByDefault = $false           # a new install stays off until the player turns it on (build.ps1)
     Packs   = 'packs'                   # packs\<game>\: starter packs + their HD textures, shipped by stage.ps1
@@ -42,6 +42,18 @@
                 '-DMI_WRESTLER_IDS=0x80073800u', # s16 per slot: the wrestler id
                 '-DMI_COSTUMES=0x8006E288u',     # s16 per slot: the costume
                 '-DMI_MEM_BASE=0x80400000u',     # packs load here: Expansion RAM WM2000 doesn't use (0/1024 pages)...
+                '-DMI_MEM_SIZE=0x00387C00u',     # ...up to 0x807C0000
+                '-DMI_SCRATCH=0x807C0000u'       # the core's lists and models.txt (32 KB; below 8 MB so RT64 reads it)
+            )
+        }
+        # WCW/nWo Revenge (USA). aki-roadmap#160/#162 (ids and costumes from the slot setup at 0x8000CB00; Expansion RAM
+        # free in a match). These mirror AkiTools model-templates/profiles/revenge.json.
+        revenge = @{
+            Defines = @(
+                '-DMI_ACTORS=0x800651A0u',       # part actors: + slot*0x13C4 + part*0xDC
+                '-DMI_WRESTLER_IDS=0x8006A2A4u', # s16 per slot: the wrestler id (group << 8 | index + 1)
+                '-DMI_COSTUMES=0x8007DFB0u',     # s16 per slot: the costume (clamped to the wrestler's count)
+                '-DMI_MEM_BASE=0x80400000u',     # packs load here: Expansion RAM Revenge doesn't use (0/1024 pages)...
                 '-DMI_MEM_SIZE=0x00387C00u',     # ...up to 0x807C0000
                 '-DMI_SCRATCH=0x807C0000u'       # the core's lists and models.txt (32 KB; below 8 MB so RT64 reads it)
             )
