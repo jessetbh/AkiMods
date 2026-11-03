@@ -31,4 +31,19 @@ static inline unsigned int mi_node_base(const unsigned int* nodes, int parts, un
     return f < 0 ? 0 : nodes[f] - (unsigned int)f * stride;
 }
 
+// Deferred pack lists (AN_DEFER_HUNG_LISTS, aki-roadmap#163): slot list k (lists + k x list_bytes, k < count) has the
+// marker markers + k x 8. mi_marker_of: a slot list's marker, 0 for anything else. mi_marker_index: the k of a list
+// word that points at a marker (any segment bits), -1 otherwise.
+static inline unsigned int mi_marker_of(unsigned int dl, unsigned int lists, unsigned int list_bytes,
+                                        unsigned int markers, unsigned int count) {
+    if (dl < lists || (dl - lists) % list_bytes || (dl - lists) / list_bytes >= count) return 0;
+    return markers + (dl - lists) / list_bytes * 8u;
+}
+
+static inline int mi_marker_index(unsigned int word, unsigned int markers, unsigned int count) {
+    unsigned int v = word | 0x80000000u;
+    if (v < markers || v >= markers + count * 8u || (v - markers) % 8u) return -1;
+    return (int)((v - markers) / 8u);
+}
+
 #endif

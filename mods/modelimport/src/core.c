@@ -30,7 +30,6 @@ RECOMP_IMPORT("*", s32 aki_models_read(const char* path, void* dest, u32 max));
 #define MI_PACK_ENTRIES 64
 #define MI_RULES 32
 #define MI_ID_LEN 32
-#define MI_LIST_BYTES 0x800                        // per slot and parity: render state + 3 commands per entry
 #define MI_TEXT (MI_SCRATCH + 2 * MI_MAX_SLOTS * MI_LIST_BYTES)
 #define MI_TEXT_MAX 0x4000
 
@@ -561,36 +560,29 @@ static u32 slot_signature(int slot) {
     return (sig ^ (u32)mi_slot_wrestler(slot)) * 0x01000193u;
 }
 
-static void put(u32** out, u32 w0, u32 w1) {
-    (*out)[0] = w0;
-    (*out)[1] = w1;
-    *out += 2;
-}
-
 static void build_list(int slot, const MiSlot* s, const MiPack* p, u32 dl, int parity) {
     u32* out = mi_list_open((u32*)dl);
     // The game draws its wrestlers without depth, back faces culled. A pack with consistent winding gets the same; one
     // without it draws both sides (a rip's mixed winding would otherwise lose half its faces).
-    if (p->flags & AKP1_FLAG_CULL) put(&out, 0xD9FFFFFFu, 0x00000400u); // G_CULL_BACK on
+    if (p->flags & AKP1_FLAG_CULL) mi_gbi_geometry(&out, 0, MI_G_CULL_BACK);
     for (int e = 0; e < p->count; e++) {
         if (p->part[e] == AKP1_WELDED) {
-            put(&out, 0xDB060034u, mi_matrix_segment(slot, parity) - 0x80000000u); // gSPSegment(0xD, part matrices)
+            mi_gbi_segment(&out, 0xD, mi_matrix_segment(slot, parity) - 0x80000000u); // part matrices
             // Segment 0xE only for a skinned pack (the slot keeps its buffers when it changes to another pack).
             const int skinned = p->skin_count && s->skin_buf[parity];
-            if (skinned) put(&out, 0xDB060038u, s->skin_buf[parity] - 0x80000000u); // segment 0xE
-            put(&out, 0xDE000000u, p->dl[e] - 0x80000000u);
-            put(&out, 0xDB060034u, 0);
-            if (skinned) put(&out, 0xDB060038u, 0);
+            if (skinned) mi_gbi_segment(&out, 0xE, s->skin_buf[parity] - 0x80000000u);
+            mi_gbi_dl(&out, p->dl[e] - 0x80000000u);
+            mi_gbi_segment(&out, 0xD, 0);
+            if (skinned) mi_gbi_segment(&out, 0xE, 0);
             continue;
         }
         u32 node = mi_part_node(slot, (int)p->part[e]);
         if (!node) continue;
-        put(&out, 0xDC38000Eu, mi_part_matrix(node, parity) - 0x80000000u); // gSPForceMatrix: that part's matrix
-        put(&out, 0xDB0C0000u, 0x00010000u);
-        put(&out, 0xDE000000u, p->dl[e] - 0x80000000u);
+        mi_gbi_force_matrix(&out, mi_part_matrix(node, parity) - 0x80000000u); // that part's matrix
+        mi_gbi_dl(&out, p->dl[e] - 0x80000000u);
     }
     out = mi_list_close(out);
-    put(&out, 0xDF000000u, 0);
+    mi_gbi_enddl(&out);
 }
 
 static void restore_slot(MiSlot* s) {
@@ -665,13 +657,13 @@ static void restore_all(void) {
 }
 
 // aki-roadmap#155: the window (packs, the adapter's depth area after them, then the scratch: lists, models.txt and
-// the adapter's clear list at MI_SCRATCH + 0x8000) must still be all zero before the mod first writes it. A conversion that uses Expansion RAM (the relinked No Mercy hacks) fills it from boot; then model imports stay
+// the adapter's clear list at MI_SCRATCH + MI_CLEAR_OFFSET) must still be all zero before the mod first writes it. A conversion that uses Expansion RAM (the relinked No Mercy hacks) fills it from boot; then model imports stay
 // off for the session, with one log line.
 static int window_state; // 0 not checked, 1 free, -1 in use
 
 static int window_free(void) {
     if (window_state == 0) {
-        const u32 words = (MI_SCRATCH + 0x9000u - MI_MEM_BASE) / 4; // through the adapter's clear list (aki_nodes.c)
+        const u32 words = (MI_SCRATCH + MI_CLEAR_OFFSET + 0x1000u - MI_MEM_BASE) / 4; // through the adapter's clear list (aki_nodes.c)
         int used = mi_first_used_word((const volatile unsigned int*)MI_MEM_BASE, words);
         window_state = used < 0 ? 1 : -1;
         if (used >= 0) {
@@ -786,6 +778,14 @@ static void dump_parts(void) {
             for (int i = 0; i < mi_parts(); i++) { mi_log_str(" "); mi_log_hex(mi_part_node(slot, i), 8); }
             mi_log_end();
         }
+#ifdef MI_TEST_PEEK
+    // A new game's id / costume arrays (aki-roadmap#163): 24 halfwords from MI_TEST_PEEK, every 300 frames.
+    if (frame_no % 300 == 0) {
+        mi_log_str("pk "); mi_log_dec((s32)frame_no);
+        for (int k = 0; k < 24; k++) { mi_log_str(" "); mi_log_hex((u32)(u16)RAM16(MI_TEST_PEEK + k * 2), 4); }
+        mi_log_end();
+    }
+#endif
     if (frame_no < 600 || frame_no > 1800 || frame_no % 30 != 0 || !mi_slot_active(0)) return;
     for (int i = 0; i < mi_parts(); i++) {
         u32 node = mi_part_node(0, i);
