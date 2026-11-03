@@ -5,6 +5,8 @@
 #include "adapters/vpw2.c"
 #elif defined(AKI_GAME_WM2K)
 #include "adapters/wm2k.c"
+#elif defined(AKI_GAME_REVENGE)
+#include "adapters/revenge.c"
 #else
 #error "aki_modelimport has no adapter for this game yet (mods/modelimport/src/adapters/<game>.c)"
 #endif
