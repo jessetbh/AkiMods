@@ -60,3 +60,45 @@ don't have the rights to**: make your own from your own ROMs.
 ```powershell
 python -m unittest discover -s tools\romhack\tests
 ```
+
+## Importing downloads (aki_import.py, aki-roadmap#228)
+
+`aki_import.py` is the converter's engine: it takes a pile of downloads (ROMs in any byte order,
+patch files, `.nrm` mods, AKI packages, Project64 bundles, texture packs, zips, 7z archives) and
+says what each item is, which game it is for and how it would be built. First slice: it
+classifies; building the conversions is the next step.
+
+```powershell
+python -I tools\romhack\aki_import.py plan C:\Downloads\wrestling --rom nomercy=nomercy.z64 `
+    --rom-dir C:\ROMs --ledger import-ledger.json --json results.json
+```
+
+- **Status per item:** `ready` (with a `route`: `survey` for hack ROMs, which `aki-hack survey`
+  sends to make_patch_mod or derelink; `import-pj64`; `wrap-rice` / `wrap-jabo` / `hts-export` /
+  `install`), `stock`, `have-it`, `needs-rom` (`needs` names the base when the patch says which),
+  `unsupported` (`why`), `failed` (`why`).
+- **Tiers:** a hack that matches the recipe catalog (`--catalog`, by SHA-1) gets that entry's id,
+  name, route and tier; any other hack is `untested` (#224, #172).
+- **Patches** are applied with `patchfmt.py` in this folder (`detect(patch)`,
+  `apply(patch, source) -> (target, info)`, `PatchError`). Every given stock ROM is tried as the
+  base, port ROMs first; stock ROMs among the inputs count too. Without `patchfmt.py` patches are
+  still recognised but reported as failed.
+- **Ids and names** come from the catalog, else from the file or folder name, made unique
+  against the ledger.
+- **The ledger** keys every input by content hash (a ROM in `.z64` order, a patch file, a
+  folder's files), so a rerun reports `have-it` instead of building again. `plan` only reads it;
+  `--record` (worker: `"record": true`) adds the items made ready.
+- **Archives:** zip members are read on demand (nothing is extracted); members over 128 MB or
+  inflating more than 100:1 are refused. 7z needs `7zr.exe` (`bin\7zr.exe` here, PATH, or
+  `--sevenzip`) and unpacks into `--work` (keyed by the archive's content), or into a temp folder
+  deleted after the batch. RAR: extract first.
+- **Untrusted input:** one bad file fails alone; links and junctions aren't followed; files are
+  read whole only when they look like a ROM, patch or mod, and their bytes are dropped after each
+  item.
+- **`worker`** is the launcher's entry point: one process per batch (process starts are
+  expensive on some PCs, aki-roadmap#111). It reads one JSON job on stdin (`paths`, `roms` or
+  `rom_dirs`, `ledger`, `record`, `catalog`, `sevenzip`, `work`) and writes one JSON line per item, then a
+  `done` line with counts.
+
+Stdlib only. It never writes ROM bytes; tests use synthetic images
+(`python -m unittest discover -s tools/romhack/tests`).
