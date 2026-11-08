@@ -36,9 +36,9 @@ Routes (build): a hack ROM or applied patch is surveyed (aki_hack.survey_rom aga
 derelink, and derelink also takes what make_patch_mod refuses; different-base is refused. A Project64 bundle goes
 through aki_conv import-pj64 with an automatic id and name. The tools run in this process.
 
-Patch files are applied by patchfmt.py next to this file (aki-roadmap#228: detect(patch) and
-apply(patch, source) -> (target, info), raising PatchError); until Worker Ant's module lands, patchfmt_standin.py
-(BPS, IPS, UPS) stands in. Stdlib only; run with python -I. Writes nothing but --ledger / --json, files under --work
+Patch files are applied by patchfmt.py next to this file (aki-roadmap#228: xdelta/VCDIFF, BPS, IPS, UPS, APS;
+detect(patch) and apply(patch, source) -> (target, info), raising PatchError). .rup (NINJA2) and PPF are refused by
+name here (import-pj64 applies a bundle's .rup). Stdlib only; run with python -I. Writes nothing but --ledger / --json, files under --work
 (7z unpacks, build temp files, removed after each item) and, for build, the packages under --out. A hacked ROM is
 on disk only while derelink reads it; packages never hold ROM bytes beyond what a patch carries.
 """
@@ -92,7 +92,7 @@ MAX_RATIO = 100           # a zip member inflating more than this (past 16 MB) i
 MAX_DEPTH = 8             # folders walked at most this deep
 
 # Fallback magic when romhack/patchfmt.py isn't there: enough to say "a patch" and its format.
-PATCH_MAGIC = ((b'BPS1', 'bps'), (b'UPS1', 'ups'), (b'PATCH', 'ips'), (b'APS10', 'aps'), (b'\xd6\xc3\xc4', 'xdelta'),
+PATCH_MAGIC = ((b'BPS1', 'bps'), (b'UPS1', 'ups'), (b'PATCH', 'ips'), (b'APS10', 'aps'), (b'\xd6\xc3\xc4', 'vcdiff'),
                (b'NINJA', 'rup'), (b'PPF', 'ppf'))
 PATCH_EXTS = ('.bps', '.ups', '.ips', '.aps', '.xdelta', '.vcdiff', '.delta', '.rup', '.ppf')
 
@@ -104,12 +104,11 @@ class ImportError_(Exception):
 # ------------------------------------------------------------------------------------ helpers
 
 def load_patchfmt(path=None):
-    """Worker Ant's romhack/patchfmt.py (detect, apply, PatchError); until it lands, patchfmt_standin.py next to this
-    file (BPS, IPS, UPS). None when neither is there."""
+    """romhack/patchfmt.py next to this file (detect, apply, PatchError), or None when it isn't there."""
     candidates = [path] if path else []
     if os.environ.get('AKI_PATCHFMT'):
         candidates.append(os.environ['AKI_PATCHFMT'])
-    candidates += [os.path.join(TOOLS, 'patchfmt.py'), os.path.join(TOOLS, 'patchfmt_standin.py')]
+    candidates.append(os.path.join(TOOLS, 'patchfmt.py'))
     for c in candidates:
         if c and os.path.isfile(c):
             return load_module(os.path.splitext(os.path.basename(c))[0], c)
@@ -699,8 +698,9 @@ def classify_rom(rom, order, res, roms, catalog, base_game=None):
 def classify_patch(data, fmt, res, roms, catalog, patchfmt, keep=False):
     sha1 = hashlib.sha1(data).hexdigest().upper()
     res.update(kind='patch', format=fmt, sha1=sha1)
-    if fmt in ('ppf', 'rup') and patchfmt is None:
-        return res.update(status='unsupported', why='%s patches are not read by the importer yet' % fmt)
+    if fmt in ('ppf', 'rup'):
+        return res.update(status='unsupported', why='%s patches are not read by the importer yet%s' % (
+            fmt, ' (in a Project64 bundle, import the bundle)' if fmt == 'rup' else ''))
     if patchfmt is None:
         return res.update(status='failed', why='the patch engine (patchfmt.py) is not installed')
     # Every base is tried: formats without a source check (IPS, APS) "apply" to anything, so the result whose header
@@ -716,7 +716,7 @@ def classify_patch(data, fmt, res, roms, catalog, patchfmt, keep=False):
         except Exception as e:
             errors.append('%s: %s: %s' % (name, type(e).__name__, e))
             continue
-        out, _ = to_z64(target)
+        out, _ = to_z64(bytes(target))
         if out is None:
             errors.append('%s: the result is not an N64 ROM' % name)
             continue

@@ -83,8 +83,8 @@ python -I tools\romhack\aki_import.py build C:\Downloads\wrestling --rom nomercy
   name, route and tier; any other hack is `untested` (#224, #172).
 - **Patches** are applied with `patchfmt.py` in this folder (`detect(patch)`,
   `apply(patch, source) -> (target, info)`, `PatchError`). Every given stock ROM is tried as the
-  base, port ROMs first; stock ROMs among the inputs count too. Until `patchfmt.py` lands,
-  `patchfmt_standin.py` stands in (BPS, IPS and UPS; xdelta, APS, PPF and .rup are refused by name).
+  base, port ROMs first; stock ROMs among the inputs count too. `.rup` and PPF files are refused
+  by name (a Project64 bundle's `.rup` is applied by import-pj64).
 - **Ids and names** come from the catalog, else from the file or folder name, made unique
   against the ledger.
 - **The ledger** keys every input by content hash (a ROM in `.z64` order, a patch file, a

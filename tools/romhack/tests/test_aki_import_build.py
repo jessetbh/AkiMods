@@ -582,90 +582,28 @@ class Layouts(BuildBase):
         self.assertEqual(aki_hack.masked_words(data, limit=100), ref(data[:100]))
 
 
-class Standin(unittest.TestCase):
-    def setUp(self):
-        self.pf = ai.load_module('patchfmt_standin')
+class RealPatchfmt(BuildBase):
+    """The importer with patchfmt.py (not the test's fake format)."""
 
-    def test_bps_round_trip_and_wrong_source(self):
+    def test_patchfmt_is_the_engine(self):
+        self.assertEqual(ai.load_patchfmt().__name__, 'patchfmt')
+
+    def test_bps_file_builds_with_patchfmt(self):
         import make_patch_mod as mpm
-        src = t.fake_rom()
-        dst = bytearray(src)
-        dst[0x2000:0x2004] = b'HACK'
-        patch = mpm.bps_encode(src, bytes(dst))
-        self.assertEqual(self.pf.detect(patch), 'bps')
-        self.assertEqual(self.pf.apply(patch, src)[0], bytes(dst))
-        with self.assertRaises(self.pf.PatchError) as e:
-            self.pf.apply(patch, t.REV0)
-        self.assertEqual(e.exception.source_crc32, ai.zipcrc(src))
+        hack = bytearray(STOCK)
+        hack[0x2000:0x2004] = b'HACK'
+        items, done = self.build([self.write('in/Real.bps', mpm.bps_encode(STOCK, bytes(hack)))],
+                                 patchfmt=ai.load_patchfmt())
+        self.assertEqual((items[0]['status'], items[0]['format'], items[0]['converter']),
+                         ('converted', 'bps', 'make_patch_mod'), items[0])
+        self.assertEqual(done['patch_engine_name'], 'patchfmt')
+        _, _, nrm = check_package(self, items[0]['package'], 'conversion')
+        self.assertEqual(mpm.bps_apply(STOCK, zipfile.ZipFile(io.BytesIO(nrm)).read('patch.bps')), bytes(hack))
 
-    def test_ips_records_rle_and_truncate(self):
-        src = bytes(64)
-        patch = b'PATCH' + (4).to_bytes(3, 'big') + (2).to_bytes(2, 'big') + b'AB' + \
-            (10).to_bytes(3, 'big') + (0).to_bytes(2, 'big') + (3).to_bytes(2, 'big') + b'Z' + b'EOF' + (32).to_bytes(3, 'big')
-        out, _ = self.pf.apply(patch, src)
-        self.assertEqual(len(out), 32)
-        self.assertEqual(out[4:6] + out[10:13], b'ABZZZ')
-        with self.assertRaises(self.pf.PatchError):
-            self.pf.apply(b'PATCH' + b'\x00\x00', src)
-
-    def test_ups(self):
-        import zlib
-        src = bytes(range(16))
-        dst = bytearray(src)
-        dst[3] ^= 0x40
-        body = b'UPS1' + bytes([0x80 | 16]) + bytes([0x80 | 16]) + bytes([0x80 | 3]) + bytes([0x40, 0])
-        body += (zlib.crc32(src) & 0xFFFFFFFF).to_bytes(4, 'little') + (zlib.crc32(bytes(dst)) & 0xFFFFFFFF).to_bytes(4, 'little')
-        body += (zlib.crc32(body) & 0xFFFFFFFF).to_bytes(4, 'little')
-        self.assertEqual(self.pf.apply(body, src)[0], bytes(dst))
-
-    def test_other_formats_are_refused_by_name(self):
-        with self.assertRaises(self.pf.PatchError) as e:
-            self.pf.apply(b'\xd6\xc3\xc4\x00rest', bytes(16))
-        self.assertIn('xdelta', str(e.exception))
-
-    def test_hostile_bps(self):
-        import make_patch_mod as mpm
-        src = t.fake_rom()
-        dst = bytearray(src)
-        dst[0x2000:0x2010] = b'ABCD' * 4
-        patch = bytearray(mpm.bps_encode(src, bytes(dst)))
-        for bad in (bytes(patch[:10]), bytes(patch[:-1]) + bytes([patch[-1] ^ 1]), b'BPS1' + b'\x00' * 3):
-            with self.assertRaises(self.pf.PatchError):
-                self.pf.apply(bad, src)
-
-    def bps(self, src, actions, tgt_size):
-        """A hand-made BPS: actions are (kind, length, extra bytes)."""
-        num = lambda n: t.ai.load_module('make_patch_mod').bps_number(n)
-        body = bytearray(b'BPS1' + num(len(src)) + num(tgt_size) + num(0))
-        for kind, length, extra in actions:
-            body += num(((length - 1) << 2) | kind) + extra
-        return body
-
-    def finish(self, body, src, target):
-        import zlib
-        body += (zlib.crc32(src) & 0xFFFFFFFF).to_bytes(4, 'little') + (zlib.crc32(target) & 0xFFFFFFFF).to_bytes(4, 'little')
-        body += (zlib.crc32(bytes(body)) & 0xFFFFFFFF).to_bytes(4, 'little')
-        return bytes(body)
-
-    def test_bps_overlapping_target_copy_repeats(self):
-        num = lambda n: t.ai.load_module('make_patch_mod').bps_number(n)
-        src = bytes(4)
-        target = b'AB' + b'AB' * 50             # TargetRead "AB", then TargetCopy from 0 for 100 bytes
-        body = self.bps(src, [(1, 2, b'AB'), (3, 100, num(0))], len(target))
-        self.assertEqual(self.pf.apply(self.finish(body, src, target), src)[0], target)
-
-    def test_bps_copies_outside_are_refused(self):
-        num = lambda n: t.ai.load_module('make_patch_mod').bps_number(n)
-        src = bytes(8)
-        body = self.bps(src, [(2, 4, num(100 << 1))], 4)      # SourceCopy from offset 100 of an 8-byte ROM
-        with self.assertRaises(self.pf.PatchError):
-            self.pf.apply(self.finish(body, src, bytes(4)), src)
-        body = self.bps(src, [(3, 4, num(0))], 4)             # TargetCopy before any output
-        with self.assertRaises(self.pf.PatchError):
-            self.pf.apply(self.finish(body, src, bytes(4)), src)
-
-    def test_importer_uses_it_without_patchfmt(self):
-        self.assertIn(ai.load_patchfmt().__name__, ('patchfmt', 'patchfmt_standin'))
+    def test_rup_and_ppf_are_refused_by_name(self):
+        for name, data in (('a.rup', b'NINJA2' + bytes(32)), ('b.ppf', b'PPF30' + bytes(32))):
+            r = self.one([self.write('in/' + name, data)], patchfmt=ai.load_patchfmt())
+            self.assertEqual(r['status'], 'unsupported', r)
 
 
 if __name__ == '__main__':
