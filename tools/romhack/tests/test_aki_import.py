@@ -136,7 +136,7 @@ class Roms(Base):
         r = self.one([self.write('in/pal.z64', fake_rom(code='NW4P'))])
         self.assertEqual((r['status'], r['game']), ('unsupported', 'nomercy'))
         self.assertIn('PAL', r['why'])
-        r = self.one([self.write('in/zelda.z64', fake_rom(code='NZLE', title='ZELDA'))])
+        r = self.one([self.write('in/zelda.z64', fake_rom(code='NZLE', title='ZELDA', salt=5))])
         self.assertEqual(r['status'], 'unsupported')
         self.assertIn('not one of the six', r['why'])
 

@@ -630,8 +630,22 @@ def folder_key(src):
     return 'F' + h.hexdigest().upper()
 
 
-def classify_rom(rom, order, res, roms, catalog):
-    """Fill res for a ROM image (z64 bytes)."""
+def similar_game(rom, roms, threshold=0.3):
+    """The port whose ROM shares the most aligned words with this one in the first MB of code (a hack that renamed
+    its header game code, e.g. "VPW2 freem"), or None under the threshold (aki_hack's word_similarity)."""
+    best = (threshold, None)
+    for game, (_, stock) in roms.by_game.items():
+        end = min(0x101000, len(rom), len(stock))
+        total = len(range(0x1000, end, 64))
+        if total:
+            same = sum(rom[i:i + 4] == stock[i:i + 4] for i in range(0x1000, end, 64)) / total
+            if same >= best[0]:
+                best = (same, game)
+    return best[1]
+
+
+def classify_rom(rom, order, res, roms, catalog, base_game=None):
+    """Fill res for a ROM image (z64 bytes). base_game: the game of the stock ROM a patch made it from."""
     sha1 = hashlib.sha1(rom).hexdigest().upper()
     hdr = rom_header(rom)
     res.update(kind='rom', order=order, sha1=sha1, header=hdr)
@@ -652,8 +666,12 @@ def classify_rom(rom, order, res, roms, catalog):
         return res.update(status='unsupported', game=game, why='%s version of %s; the port needs the %s release' % (
             region, GAMES[game]['title'], GAMES[game]['code'][-1] == 'E' and 'USA' or 'Japanese'))
     if not game:
-        return res.update(status='unsupported', why='header %r (%s) is not one of the six AKI games' % (
-            hdr['code'], hdr['name']))
+        # A hack may rename its header (Freem: "NVFE"): the base a patch applied to, or the code, says the game.
+        game = base_game or similar_game(rom, roms)
+        if not game:
+            return res.update(status='unsupported', why='header %r (%s) is not one of the six AKI games' % (
+                hdr['code'], hdr['name']))
+        res['header_note'] = 'header game code %r: a renamed %s hack' % (hdr['code'], GAMES[game]['title'])
     # A hack of a port's game. Which converter (make_patch_mod for in-place hacks, derelink for moved code) is
     # decided by `aki-hack survey --layout` in the build step.
     return res.update(status='ready', game=game, route='survey', tier='untested')
@@ -699,8 +717,8 @@ def classify_patch(data, fmt, res, roms, catalog, patchfmt, keep=False):
     game, name, (out, info), _ = found
     res.update(base=name, patch_info=_jsonable(info))
     sub = {}
-    classify_rom(out, 'z64', sub, roms, catalog)
-    for k in ('status', 'game', 'route', 'tier', 'catalog', 'why', 'id', 'name'):
+    classify_rom(out, 'z64', sub, roms, catalog, base_game=game)
+    for k in ('status', 'game', 'route', 'tier', 'catalog', 'why', 'id', 'name', 'header_note'):
         if k in sub and sub[k] is not None:
             res[k] = sub[k]
     res['result_sha1'] = sub.get('sha1')
@@ -1011,7 +1029,9 @@ class Builder:
 
     def tables(self, game):
         """(sections, repaired names) for make_patch_mod / aki_hack, or (None, set()). From a game repo's
-        RecompiledFuncs (job "repos"); without one, survey can't tell in-place hacks apart and derelink builds them."""
+        RecompiledFuncs (job "repos", developers: it also lists the functions the port repaired), else from the
+        derelink layout for the port's ROM (layouts/, or job "layouts"); with neither, survey can't tell in-place
+        hacks apart and derelink builds them."""
         if game not in self._tables:
             mpm = self.mod('make_patch_mod')
             sections, repaired = None, set()
@@ -1021,6 +1041,10 @@ class Builder:
                 if os.path.isfile(inl):
                     sections = mpm.load_sections(inl)
                     repaired = mpm.load_repaired(os.path.join(repo, 'RecompiledFuncs', 'repaired_functions.txt')) or set()
+            if sections is None and game in self.roms.by_game:
+                layout = mpm.find_layout(self.roms.by_game[game][1], self.job.get('layouts'))
+                if layout:
+                    sections = mpm.layout_sections(layout)
             self._tables[game] = (sections, repaired)
         return self._tables[game]
 

@@ -4,11 +4,13 @@ The mod holds only a BPS patch against the stock ROM (no ROM data): players inst
 any other mod, and the runtime applies the patch to their own ROM when the game starts.
 
 Run it from the game's repository root (it reads that game's RecompiledFuncs/), usually through
-the game's own tools/romhack/make_patch_mod.py, which forwards here:
+the game's own tools/romhack/make_patch_mod.py, which forwards here, or anywhere with --layout
+(the game's layouts/<game>.json next to this file: addresses only, no RecompiledFuncs needed):
 
     python tools/romhack/make_patch_mod.py --base vpw2.z64 --hack hack.z64 \\
         --game-id vpw2 --id my_hack --name "My Hack" --version 1.0.0 --author me \\
         --out my_hack.nrm
+    python make_patch_mod.py --layout auto --base vpw2.z64 --hack hack.z64 ... --out my_hack.nrm
 
 Both ROMs must be big-endian .z64 (the byte order the runtime stores ROMs in).
 
@@ -18,7 +20,9 @@ functions) work on any runtime that supports ROM-patch mods. Changed functions n
 runtime that recompiles them from the patched ROM at load time (the wcw-romhack runtime
 does); a plain runtime silently keeps running the stock code for them.
 """
-import argparse, io, json, re, sys, zipfile, zlib
+import argparse, glob, hashlib, io, json, os, re, sys, zipfile, zlib
+
+LAYOUTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'layouts')
 
 
 # ---------------------------------------------------------------------------- BPS encoder
@@ -227,6 +231,53 @@ def load_sections(overlays_inl):
     return sections
 
 
+def layout_sections(layout):
+    """load_sections' tables from a derelink layout (a dict, or the path of layouts/<game>.json): every section's
+    recompiled range is text..data, and the stock code a segment keeps in its data area (extra_code) is a section of
+    its own. Functions are named func_<vram>, as the recompiler names functions without a symbol."""
+    if not isinstance(layout, dict):
+        with open(layout, encoding='utf-8') as f:
+            layout = json.load(f)
+    out = []
+    for s in layout['sections']:
+        out.append((s['name'], s['rom'], s['text'], s['data'] - s['text'],
+                    [('func_%08X' % (s['text'] + off), off, size) for off, size in s['funcs']]))
+    for i, x in enumerate(layout.get('extra_code', [])):
+        out.append(('%s_extra_%X' % (x['section'], x['rom']), x['rom'], x['ram'], x['size'],
+                    [('func_%08X' % (x['ram'] + off), off, size) for off, size in x['funcs']]))
+    return out
+
+
+def find_layout(base, layouts_dir=None):
+    """The layouts/*.json whose base_sha1 is this ROM's (big-endian .z64 bytes), or None."""
+    sha1 = hashlib.sha1(base).hexdigest()
+    for path in sorted(glob.glob(os.path.join(layouts_dir or LAYOUTS_DIR, '*.json'))):
+        with open(path, encoding='utf-8') as f:
+            if json.load(f).get('base_sha1', '').lower() == sha1:
+                return path
+    return None
+
+
+def resolve_layout(spec, base, layouts_dir=None):
+    """--layout's value -> a layout path: 'auto' (the one for the base ROM), a game name (layouts/<game>.json) or a
+    file. Raises PatchModError when there's none, or when it is for another ROM than base."""
+    d = layouts_dir or LAYOUTS_DIR
+    if spec == 'auto':
+        path = find_layout(base, d)
+        if path is None:
+            raise PatchModError('no layout in %s is for this base ROM (it must be the ROM the port uses)' % d)
+        return path
+    path = spec if os.path.isfile(spec) else os.path.join(d, spec + '.json')
+    if not os.path.isfile(path):
+        raise PatchModError('no layout %s' % spec)
+    with open(path, encoding='utf-8') as f:
+        want = json.load(f).get('base_sha1', '').lower()
+    if want and want != hashlib.sha1(base).hexdigest():
+        raise PatchModError('%s is for another ROM (SHA-1 %s); --base must be the ROM the port uses' % (
+            os.path.basename(path), want))
+    return path
+
+
 def changed_functions(sections, base, hack):
     """Functions whose ROM bytes differ, plus changed bytes in code sections outside any function."""
     funcs, loose = [], 0
@@ -377,6 +428,8 @@ def main(argv=None):
     ap.add_argument('--description', default='')
     ap.add_argument('--minimum-recomp-version', default='0.1.0')
     ap.add_argument('--overlays', default='RecompiledFuncs/recomp_overlays.inl', help='generated section tables for the report')
+    ap.add_argument('--layout', help="read the tables from a derelink layout instead of RecompiledFuncs: 'auto' (the "
+                                     "one for --base), a game (layouts/<game>.json) or a file")
     ap.add_argument('--repaired', default='RecompiledFuncs/repaired_functions.txt',
                     help='functions the post-recompile pipeline changed (tools/romhack/list_repaired_functions.py)')
     ap.add_argument('--out', help='output .nrm (omit to only print the report)')
@@ -387,7 +440,15 @@ def main(argv=None):
 
     base = open(args.base, 'rb').read()
     hack = open(args.hack, 'rb').read()
-    sections = load_sections(args.overlays)
+    if args.layout:
+        try:
+            layout = resolve_layout(args.layout, base)
+        except PatchModError as e:
+            sys.exit(str(e))
+        sections = layout_sections(layout)
+        print('tables: %s' % layout)
+    else:
+        sections = load_sections(args.overlays)
     repaired = load_repaired(args.repaired)
     if repaired is None:
         print('(no %s: run tools/romhack/list_repaired_functions.py to check for pipeline repairs)' % args.repaired)

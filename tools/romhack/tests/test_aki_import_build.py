@@ -404,6 +404,87 @@ class ReviewFixes(BuildBase):
         with self.assertRaises(OSError):
             ai.zip_write(path, {'a.bin': os.path.join(self.dir, 'missing.bin')})
         self.assertEqual(os.listdir(os.path.dirname(path)), [])
+class RenamedHeaders(BuildBase):
+    def renamed(self):
+        hack = bytearray(STOCK)
+        hack[0x3B:0x3F] = b'NVFE'           # a hack that renamed its game code, as VPW2 Freem does
+        hack[0x2000] ^= 1
+        return bytes(hack)
+
+    def test_patch_result_takes_its_base_game(self):
+        r = self.one([self.write('in/f.bps', t.make_patch(STOCK, [(0x3B, ord('N')), (0x3C, ord('V')),
+                                                                  (0x3D, ord('F')), (0x3E, ord('E'))]))])
+        self.assertEqual((r['status'], r['game']), ('ready', 'nomercy'))
+        self.assertIn('NVFE', r['header_note'])
+
+    def test_rom_matched_by_code_similarity(self):
+        r = self.one([self.write('in/f.z64', self.renamed())])
+        self.assertEqual((r['status'], r['game']), ('ready', 'nomercy'))
+
+
+class Layouts(BuildBase):
+    def layout(self, rom=STOCK):
+        lay = {'game': 'nomercy', 'base_sha1': hashlib.sha1(rom).hexdigest(), 'extra_code': [],
+               'sections': [{'name': 'main', 'rom': 0x1000, 'text': 0x80000400, 'data': 0x80000430,
+                             'bss': 0x80000430, 'end': 0x80000440, 'funcs': [[0, 0x10], [0x10, 0x20]], 'slot': None}]}
+        d = os.path.join(self.dir, 'layouts')
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, 'nomercy.json'), 'w') as f:
+            json.dump(lay, f)
+        return d
+
+    def test_layout_sections_match_recompiled_tables(self):
+        import make_patch_mod as mpm
+        inl = mpm.load_sections(os.path.join(self.repo, 'RecompiledFuncs', 'recomp_overlays.inl'))
+        lay = mpm.layout_sections(os.path.join(self.layout(), 'nomercy.json'))
+        strip = lambda secs: [(rom, ram, size, [(o, z) for _, o, z in fs]) for _, rom, ram, size, fs in secs]
+        self.assertEqual(strip(lay), strip(inl))
+
+    def test_build_without_a_repo_uses_the_layout_for_make_patch_mod(self):
+        hack = bytearray(STOCK)
+        hack[0x2000] ^= 0x11
+        r = self.build_one([self.write('in/h.z64', bytes(hack))], repos={}, layouts=self.layout())
+        self.assertEqual((r['status'], r['converter'], r['survey_tier']), ('converted', 'make_patch_mod', 'patch-data'))
+
+    def test_make_patch_mod_cli_layout_auto_and_wrong_rom(self):
+        import make_patch_mod as mpm
+        d = self.layout()
+        hack = bytearray(STOCK)
+        hack[0x2000] ^= 1
+        base, h = self.stock_path, self.write('h.z64', bytes(hack))
+        out = os.path.join(self.dir, 'h.nrm')
+        saved = mpm.LAYOUTS_DIR
+        mpm.LAYOUTS_DIR = d
+        try:
+            with open(os.devnull, 'w') as null:
+                stdout, sys.stdout = sys.stdout, null
+                try:
+                    mpm.main(['--base', base, '--hack', h, '--game-id', 'wwfnomercy', '--id', 'h', '--name', 'H',
+                              '--layout', 'auto', '--out', out, '--repaired', os.path.join(self.dir, 'none.txt')])
+                    self.assertTrue(os.path.isfile(out))
+                    with self.assertRaises(SystemExit):
+                        mpm.main(['--base', h, '--hack', h, '--game-id', 'wwfnomercy', '--id', 'h', '--name', 'H',
+                                  '--layout', 'nomercy'])
+                finally:
+                    sys.stdout = stdout
+        finally:
+            mpm.LAYOUTS_DIR = saved
+
+    def test_masked_words_without_numpy(self):
+        aki_hack = ai.load_module('aki_hack')
+        data = bytes((i * 37 + 11) & 0xFF for i in range(4096))
+
+        def ref(rom):
+            out = bytearray()
+            for i in range(0, len(rom) // 4 * 4, 4):
+                w = int.from_bytes(rom[i:i + 4], 'big')
+                op = w >> 26
+                w = w & 0xFC000000 if op in (2, 3) else (w if op == 0 else w & 0xFFFF0000)
+                out += w.to_bytes(4, 'big')
+            return bytes(out)
+        self.assertEqual(aki_hack.masked_words(data), ref(data))
+        self.assertEqual(aki_hack.masked_words(data + b'\x01\x02'), ref(data))
+        self.assertEqual(aki_hack.masked_words(data, limit=100), ref(data[:100]))
 
 
 class Standin(unittest.TestCase):

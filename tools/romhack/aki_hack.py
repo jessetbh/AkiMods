@@ -181,12 +181,28 @@ def immediate_only(base_word, hack_word):
 def masked_words(rom, limit=None):
     """The ROM as big-endian words with address-like immediates zeroed (J-type targets, I-type immediates), so code
     that only moved compares equal. R-type (op 0) words are kept whole."""
-    import numpy as np
+    # Stdlib only (the converter runs on embeddable Python): each word's first byte says its kind (op = byte >> 2), so
+    # per-byte masks from a translate table, ANDed with each byte column as one big integer, do it without a loop.
     n = (min(len(rom), limit) if limit else len(rom)) // 4
-    w = np.frombuffer(rom[:n * 4], dtype='>u4').astype(np.uint32)
-    op = w >> 26
-    out = np.where((op == 2) | (op == 3), w & 0xFC000000, np.where(op == 0, w, w & 0xFFFF0000))
-    return out.astype('>u4').tobytes()
+    if n == 0:
+        return b''
+    rom = bytes(rom[:n * 4])
+    first = rom[0::4]
+
+    def masked(column, table):
+        mask = first.translate(table)
+        return (int.from_bytes(column, 'big') & int.from_bytes(mask, 'big')).to_bytes(n, 'big')
+    out = bytearray(n * 4)
+    out[0::4] = first.translate(_FIRST_BYTE)
+    out[1::4] = masked(rom[1::4], _KEEP_UNLESS_J)
+    out[2::4] = masked(rom[2::4], _KEEP_IF_R)
+    out[3::4] = masked(rom[3::4], _KEEP_IF_R)
+    return bytes(out)
+
+
+_FIRST_BYTE = bytes((b & 0xFC) if (b >> 2) in (2, 3) else b for b in range(256))   # J-type: only the op stays
+_KEEP_UNLESS_J = bytes(0x00 if (b >> 2) in (2, 3) else 0xFF for b in range(256))     # byte 1: rs/rt, not a J target
+_KEEP_IF_R = bytes(0xFF if (b >> 2) == 0 else 0x00 for b in range(256))              # bytes 2-3: R-type only
 
 
 def relink_probe(base, rom, sections, samples=300, sig_words=12):
@@ -588,8 +604,32 @@ def markdown(results):
     return '\n'.join(rows) + '\n'
 
 
+def layout_tables(stock):
+    """Stock tables from derelink layouts (layouts/<game>.json next to this file) instead of RecompiledFuncs:
+    a layout counts only for the ROM it was made from. No repaired-function list (layouts don't carry one)."""
+    def tables(game):
+        rom = stock.rom(game)
+        if rom is None or stock.packager is None:
+            return None, set()
+        try:
+            path = stock.packager.resolve_layout(game, rom)
+        except stock.packager.PatchModError:
+            return None, set()
+        return stock.packager.layout_sections(path), set()
+    return tables
+
+
 def cmd_survey(args):
-    stock = Stock()
+    roms = None
+    for spec in args.rom or []:
+        game, _, path = spec.partition('=')
+        if game not in GAMES or not path:
+            sys.exit('--rom takes GAME=PATH (games: %s)' % ', '.join(GAMES))
+        roms = roms or {}
+        roms[game] = to_z64(open(path, 'rb').read())[0]
+    stock = Stock(roms=roms)
+    if args.layout:
+        stock.table_source = layout_tables(stock)
     for ref in args.ref or []:
         label, _, path = ref.partition('=')
         stock.refs[label] = to_z64(open(path, 'rb').read())[0]
@@ -620,6 +660,10 @@ def main():
     s.add_argument('--print-json', action='store_true', help='print JSON instead of the table')
     s.add_argument('--ref', action='append', metavar='LABEL=PATH',
                    help='extra reference dump, e.g. nomercy-rev0=C:\roms\nm10.z64 (your own; read only)')
+    s.add_argument('--layout', action='store_true',
+                   help='function tables from layouts/<game>.json (no game repo or RecompiledFuncs needed)')
+    s.add_argument('--rom', action='append', metavar='GAME=PATH',
+                   help='a port ROM to compare with instead of the game repos\' ROMs (only these games then)')
     s.set_defaults(func=cmd_survey)
     args = ap.parse_args()
     args.func(args)
