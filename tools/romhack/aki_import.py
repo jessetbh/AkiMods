@@ -101,6 +101,17 @@ def load_patchfmt(path=None):
     return None
 
 
+def load_unpack():
+    """Worker Ant's romhack/unpack.py (extract_7z, UnpackError, MAX_TOTAL), or None when it isn't installed."""
+    path = os.path.join(TOOLS, 'unpack.py')
+    if not os.path.isfile(path):
+        return None
+    spec = importlib.util.spec_from_file_location('aki_unpack', path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def to_z64(data):
     """(big-endian ROM bytes, original order) or (None, None) when it isn't an N64 ROM (or a byte-swapped image's
     length doesn't divide into its swap unit)."""
@@ -463,10 +474,20 @@ def expand_7z(path, job, sources, notes):
     if not os.path.isfile(marker):
         if os.path.isdir(out):
             shutil.rmtree(out, ignore_errors=True)
-        os.makedirs(out)
-        r = subprocess.run([exe, 'x', '-y', '-bd', '-snl-', '-o' + out, path], stdout=subprocess.PIPE,
-                           stderr=subprocess.STDOUT)
-        if r.returncode != 0:
+        unpack = load_unpack()
+        if unpack is not None:   # romhack/unpack.py: size cap, path checks, unpacked aside and renamed into out
+            try:
+                unpack.extract_7z(path, out, max_total=job.get('max_unpack') or unpack.MAX_TOTAL, sevenzip=exe)
+            except unpack.UnpackError as e:
+                bad = e.kind in ('too-big', 'bad-path', 'need-7zip')
+                notes.append(dict(item=path, status='unsupported' if bad else 'failed', why=str(e)))
+                return
+            r = None
+        else:
+            os.makedirs(out)
+            r = subprocess.run([exe, 'x', '-y', '-bd', '-snl-', '-o' + out, path], stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT)
+        if r is not None and r.returncode != 0:
             shutil.rmtree(out, ignore_errors=True)
             notes.append(dict(item=path, status='failed', why='7zr exit %d' % r.returncode))
             return
