@@ -319,8 +319,16 @@ def expand(path, job, sources, notes, depth=0):
             return
         if depth >= MAX_DEPTH:
             return
-        for entry in sorted(os.listdir(path)):
-            expand(os.path.join(path, entry), job, sources, notes, depth + 1)
+        try:
+            entries = sorted(os.listdir(path))
+        except OSError as e:
+            notes.append(dict(item=path, status='failed', why='cannot read the folder: %s' % e.strerror))
+            return
+        for entry in entries:
+            try:
+                expand(os.path.join(path, entry), job, sources, notes, depth + 1)
+            except Exception as e:  # one unreadable entry doesn't hide its siblings
+                notes.append(dict(item=os.path.join(path, entry), status='failed', why='%s: %s' % (type(e).__name__, e)))
         return
     if not os.path.isfile(path):
         notes.append(dict(item=path, status='failed', why='not found'))
