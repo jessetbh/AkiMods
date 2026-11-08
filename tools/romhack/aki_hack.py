@@ -613,7 +613,8 @@ def layout_tables(stock):
             return None, set()
         try:
             path = stock.packager.resolve_layout(game, rom)
-        except stock.packager.PatchModError:
+        except stock.packager.PatchModError as e:
+            print('note: no layout tables for %s (%s)' % (game, e), file=sys.stderr)
             return None, set()
         return stock.packager.layout_sections(path), set()
     return tables
@@ -625,8 +626,12 @@ def cmd_survey(args):
         game, _, path = spec.partition('=')
         if game not in GAMES or not path:
             sys.exit('--rom takes GAME=PATH (games: %s)' % ', '.join(GAMES))
+        if not os.path.isfile(path):
+            sys.exit('--rom %s: no such file' % spec)
         roms = roms or {}
         roms[game] = to_z64(open(path, 'rb').read())[0]
+        if roms[game] is None:
+            sys.exit('--rom %s: not an N64 ROM' % spec)
     stock = Stock(roms=roms)
     if args.layout:
         stock.table_source = layout_tables(stock)

@@ -472,6 +472,42 @@ class Layouts(BuildBase):
         finally:
             mpm.LAYOUTS_DIR = saved
 
+    def test_layout_lookup_is_strict(self):
+        import make_patch_mod as mpm
+        d = self.layout()
+        with open(os.path.join(d, 'broken.json'), 'w') as f:
+            f.write('{not json')
+        with open(os.path.join(d, 'list.json'), 'w') as f:
+            f.write('[1, 2]')
+        self.assertEqual(os.path.basename(mpm.find_layout(STOCK, d)), 'nomercy.json')
+        self.assertIsNone(mpm.find_layout(t.REV0, d))
+        with self.assertRaises(mpm.PatchModError):
+            mpm.resolve_layout('auto', t.REV0, d)
+        with self.assertRaises(mpm.PatchModError):
+            mpm.resolve_layout('nomercy', t.REV0, d)          # made for another ROM
+        lay = json.load(open(os.path.join(d, 'nomercy.json')))
+        del lay['base_sha1']
+        nosha = os.path.join(self.dir, 'nosha.json')
+        json.dump(lay, open(nosha, 'w'))
+        with self.assertRaises(mpm.PatchModError):
+            mpm.resolve_layout(nosha, STOCK, d)                 # unverifiable
+        self.assertTrue(mpm.resolve_layout('nomercy', STOCK, d).endswith('nomercy.json'))
+
+    def test_layout_extra_code_is_a_section(self):
+        import make_patch_mod as mpm
+        lay = {'sections': [], 'extra_code': [{'section': 'main', 'ram': 0x80002000, 'rom': 0x3000, 'size': 0x40,
+                                               'funcs': [[0, 0x20], [0x20, 0x20]]}]}
+        self.assertEqual(mpm.layout_sections(lay), [('main_extra_3000', 0x3000, 0x80002000, 0x40,
+                                                     [('func_80002000', 0, 0x20), ('func_80002020', 0x20, 0x20)])])
+
+    def test_repaired_names_map_to_layout_names(self):
+        import make_patch_mod as mpm
+        inl = os.path.join(self.repo, 'RecompiledFuncs', 'recomp_overlays.inl')
+        self.assertEqual(mpm.repaired_by_vram({'func_80000410', 'unknown_sym'}, inl), {'func_80000410', 'unknown_sym'})
+        named = INL.replace('func_80000410', 'game_main')
+        p = self.write('named.inl', named.encode())
+        self.assertEqual(mpm.repaired_by_vram({'game_main'}, p), {'func_80000410'})
+
     def test_masked_words_without_numpy(self):
         aki_hack = ai.load_module('aki_hack')
         data = bytes((i * 37 + 11) & 0xFF for i in range(4096))

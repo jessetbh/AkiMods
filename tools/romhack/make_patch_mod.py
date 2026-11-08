@@ -252,10 +252,20 @@ def find_layout(base, layouts_dir=None):
     """The layouts/*.json whose base_sha1 is this ROM's (big-endian .z64 bytes), or None."""
     sha1 = hashlib.sha1(base).hexdigest()
     for path in sorted(glob.glob(os.path.join(layouts_dir or LAYOUTS_DIR, '*.json'))):
-        with open(path, encoding='utf-8') as f:
-            if json.load(f).get('base_sha1', '').lower() == sha1:
-                return path
+        layout = _read_layout(path)
+        if layout and str(layout.get('base_sha1', '')).lower() == sha1:
+            return path
     return None
+
+
+def _read_layout(path):
+    """A layout's JSON, or None for a file that isn't one (unreadable, not an object)."""
+    try:
+        with open(path, encoding='utf-8') as f:
+            layout = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return layout if isinstance(layout, dict) and 'sections' in layout else None
 
 
 def resolve_layout(spec, base, layouts_dir=None):
@@ -267,15 +277,28 @@ def resolve_layout(spec, base, layouts_dir=None):
         if path is None:
             raise PatchModError('no layout in %s is for this base ROM (it must be the ROM the port uses)' % d)
         return path
-    path = spec if os.path.isfile(spec) else os.path.join(d, spec + '.json')
-    if not os.path.isfile(path):
+    # A file when it looks like one (a .json name or a path), else a game: layouts/<game>.json.
+    is_file = spec.lower().endswith('.json') or os.sep in spec or '/' in spec
+    path = spec if is_file else os.path.join(d, spec + '.json')
+    layout = _read_layout(path) if os.path.isfile(path) else None
+    if layout is None:
         raise PatchModError('no layout %s' % spec)
-    with open(path, encoding='utf-8') as f:
-        want = json.load(f).get('base_sha1', '').lower()
-    if want and want != hashlib.sha1(base).hexdigest():
+    want = str(layout.get('base_sha1', '')).lower()
+    if not want:
+        raise PatchModError('%s names no base_sha1: it can\'t be checked against --base' % os.path.basename(path))
+    if want != hashlib.sha1(base).hexdigest():
         raise PatchModError('%s is for another ROM (SHA-1 %s); --base must be the ROM the port uses' % (
             os.path.basename(path), want))
     return path
+
+
+def repaired_by_vram(repaired, overlays_inl):
+    """The repaired list (recompiled symbol names) as func_<vram> names, as layout_sections names functions, through
+    recomp_overlays.inl's tables; names it doesn't find stay as they are."""
+    if not repaired or not os.path.isfile(overlays_inl):
+        return repaired
+    vram = {func: ram + off for _, rom, ram, size, fs in load_sections(overlays_inl) for func, off, _ in fs}
+    return {('func_%08X' % vram[n]) if n in vram else n for n in repaired}
 
 
 def changed_functions(sections, base, hack):
@@ -452,6 +475,14 @@ def main(argv=None):
     repaired = load_repaired(args.repaired)
     if repaired is None:
         print('(no %s: run tools/romhack/list_repaired_functions.py to check for pipeline repairs)' % args.repaired)
+    elif args.layout:
+        # Layout functions are func_<vram>; the list names the port's symbols. Map them through the inl, if it's here.
+        if os.path.isfile(args.overlays):
+            repaired = repaired_by_vram(repaired, args.overlays)
+        else:
+            print('(%s names symbols and there is no %s to map them to addresses: repaired functions are not flagged)'
+                  % (args.repaired, args.overlays))
+            repaired = set()
     try:
         nrm, report = make_mod(base, hack, sections, repaired, args.game_id, args.id, args.name, args.version, args.author,
                           args.description, args.minimum_recomp_version, args.force, args.max_target_read,
