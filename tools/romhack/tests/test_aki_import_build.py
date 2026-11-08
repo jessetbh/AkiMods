@@ -231,7 +231,7 @@ class HackRoutes(BuildBase):
         m, aki, _ = check_package(self, r['package'], 'conversion')
         self.assertEqual((aki['survey']['catalog'], aki['survey']['output_sha1'], aki['survey']['known_issues']),
                          ('known-hack', sha1, ['aki-roadmap#1']))
-        self.assertEqual(m['short_description'], 'Verified by the AKI team. Mind the gap.')
+        self.assertEqual(m['short_description'], 'Verified Mind the gap.')   # no tier texts in this catalog
 
     def test_known_input_built_differently_is_untested_with_a_note(self):
         hack = bytearray(STOCK)
@@ -264,6 +264,37 @@ class HackRoutes(BuildBase):
         os.remove(first['package'])
         r = self.build_one([bundle], catalog=cat)
         self.assertEqual(r['aki_tier'], 'verified')
+
+    def test_patch_with_other_codes_is_untested(self):
+        hack = bytearray(STOCK)
+        hack[0x2000] ^= 3
+        sha1 = hashlib.sha1(bytes(hack)).hexdigest().upper()
+        cat = self.catalog([{'id': 'k', 'name': 'K', 'game': 'nomercy', 'tier': 'verified', 'converter': 'derelink',
+                             'outputs': {'sha1': [sha1], 'codes_sha1': ['1' * 40]}}])
+        r = self.build_one([self.write('in/k.z64', bytes(hack))], fakes={'derelink': fake_derelink(codes='x\n')},
+                           catalog=cat)
+        self.assertEqual(r['aki_tier'], 'untested')
+
+    def test_shared_codes_hash_matches_nothing(self):
+        bundle = Pj64Bundles.bundle(self)
+        first = self.build_one([bundle])
+        h = first['codes_sha1']
+        cat = self.catalog([{'id': 'a', 'name': 'A', 'game': 'nomercy', 'tier': 'verified', 'outputs': {'codes_sha1': [h]}},
+                            {'id': 'b', 'name': 'B', 'game': 'nomercy', 'tier': 'experimental', 'outputs': {'codes_sha1': [h]}}])
+        os.remove(first['package'])
+        self.assertEqual(self.build_one([bundle], catalog=cat)['aki_tier'], 'untested')
+
+    def test_damaged_patch_fails_and_wrong_rom_names_the_base(self):
+        import make_patch_mod as mpm
+        pf = ai.load_patchfmt()
+        good = mpm.bps_encode(t.REV0, bytes(t.REV0[:0x2000]) + b'X' + bytes(t.REV0[0x2001:]))
+        r = self.one([self.write('in/w.bps', good)], patchfmt=pf)          # only the Rev 1 port ROM given
+        self.assertEqual(r['status'], 'needs-rom')
+        self.assertEqual(r['needs'], 'WWF No Mercy (USA) 1.0')               # from the BPS footer's source CRC
+        bad = bytearray(good)
+        bad[-1] ^= 0xFF                                                       # its own checksum broken
+        r = self.one([self.write('in/d.bps', bytes(bad))], patchfmt=pf)
+        self.assertEqual(r['status'], 'failed')
 
     def test_shipped_catalog_loads_and_holds_hashes_only(self):
         cat = ai.load_catalog()

@@ -120,18 +120,6 @@
    }
   },
   {
-   "id": "n64modderz_mod",
-   "name": "WWF No Mercy MOD",
-   "game": "nomercy",
-   "version": "1.0.0",
-   "tier": "verified",
-   "converter": "import-pj64",
-   "known_issues": [
-    "aki-roadmap#195"
-   ],
-   "outputs": {}
-  },
-  {
    "id": "njpw2017",
    "name": "NJPW 2017",
    "game": "nomercy",

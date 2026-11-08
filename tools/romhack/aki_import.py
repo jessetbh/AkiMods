@@ -590,7 +590,8 @@ class Catalog(dict):
             for h in e.get('outputs', {}).get('sha1', []):
                 self.outputs[h.upper()] = e
             for h in e.get('outputs', {}).get('codes_sha1', []):
-                self.codes[h.upper()] = e
+                # The same codes.txt in several tested packs (No Mercy Plus V3, V3 SC, POE) says nothing alone.
+                self.codes[h.upper()] = None if h.upper() in self.codes else e
 
 
 def load_catalog(path=DEFAULT_CATALOG):
@@ -710,8 +711,10 @@ def classify_patch(data, fmt, res, roms, catalog, patchfmt, keep=False):
         try:
             target, info = patchfmt.apply(data, base)
         except patchfmt.PatchError as e:
+            if getattr(e, 'kind', 'wrong-rom') not in ('wrong-rom', 'already-patched'):
+                return res.update(status='failed', why=str(e))   # damaged, unsupported, too large: no base helps
             tried.append(name)
-            needs = needs or base_named_by(e)
+            needs = needs or base_named_by(e) or base_named_by_footer(data, fmt)
             continue
         except Exception as e:
             errors.append('%s: %s: %s' % (name, type(e).__name__, e))
@@ -747,6 +750,15 @@ def classify_patch(data, fmt, res, roms, catalog, patchfmt, keep=False):
         e = catalog[sha1]
         res.update(catalog=e.get('id'), tier=e.get('tier', 'verified'), id=e.get('id'), name=e.get('name'))
     return res
+
+
+def base_named_by_footer(patch, fmt):
+    """BPS and UPS end with the source ROM's CRC32: the known dump it names, or that CRC."""
+    if fmt not in ('bps', 'ups') or len(patch) < 12:
+        return None
+    crc = '%08X' % int.from_bytes(patch[-12:-8], 'little')
+    hit = OTHER_DUMPS_CRC32.get(crc)
+    return hit[1] if hit else 'the ROM with CRC32 %s' % crc
 
 
 def base_named_by(err):
@@ -1106,15 +1118,24 @@ class Builder:
         codes = getattr(self.catalog, 'codes', {})
         got = None
         nrm = files.get('conversion/patch.nrm')
-        if nrm is not None and game in self.roms.by_game:
-            bps = zipfile.ZipFile(io.BytesIO(nrm)).read('patch.bps')
-            target = self.mod('make_patch_mod').bps_apply(self.roms.by_game[game][1], bps)
-            res['output_sha1'] = hashlib.sha1(target).hexdigest().upper()
-            got = outputs.get(res['output_sha1'])
-            del target
-        elif 'conversion/codes.txt' in files:
+        if 'conversion/codes.txt' in files:
             res['codes_sha1'] = hashlib.sha1(files['conversion/codes.txt']).hexdigest().upper()
+        if nrm is not None:
+            # A patch decides; one that can't be checked (no port ROM) leaves the pack Untested.
+            if outputs and game in self.roms.by_game:
+                bps = zipfile.ZipFile(io.BytesIO(nrm)).read('patch.bps')
+                target = self.mod('make_patch_mod').bps_apply(self.roms.by_game[game][1], bps)
+                res['output_sha1'] = hashlib.sha1(target).hexdigest().upper()
+                del target
+                got = outputs.get(res['output_sha1'])
+                # Same patch, other codes (a codes translation that changed, #205): not the tested build.
+                want = (got or {}).get('outputs', {}).get('codes_sha1')
+                if got is not None and want and res.get('codes_sha1') not in [h.upper() for h in want]:
+                    got = None
+        elif res.get('codes_sha1'):
             got = codes.get(res['codes_sha1'])
+            if got is not None and got.get('outputs', {}).get('sha1'):
+                got = None      # the tested pack had a patch too: codes alone aren't that build
         if got is not None and got.get('game') in (None, game):
             return got.get('tier') or UNTESTED, got, None
         known = self.catalog_entry(res)
@@ -1248,8 +1269,8 @@ class Builder:
         if tier == UNTESTED:
             man['short_description'] = 'Untested: built by aki-import, not tested by the AKI team; it may crash.'
         else:
-            man['short_description'] = ('%s by the AKI team. %s' % (TIER_LABELS.get(tier, tier), (entry or {}).get(
-                'note') or '')).strip()[:250]
+            text = getattr(self.catalog, 'tiers', {}).get(tier) or TIER_LABELS.get(tier, tier)
+            man['short_description'] = ('%s %s' % (text, (entry or {}).get('note') or '')).strip()
         files = dict(files)
         files['aki-package.json'] = json.dumps(man, indent=2).encode('utf-8')
         files['conversion/aki.json'] = json.dumps(aki, indent=2).encode('utf-8')
