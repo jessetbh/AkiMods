@@ -2,11 +2,11 @@
 
 Subcommands (python aki_import.py <cmd> -h):
   plan   PATH...   scan files, folders and archives; say what each item is, which game, and what would be done with
-                   it (a table, or --json). Reads only; with --ledger it also records the results.
+                   it (a table, or --json). Reads only; --ledger marks inputs imported before (have-it).
   worker           the launcher's entry point: one process per batch (aki-roadmap#111: process starts leak pool on
                    this machine class). Reads one JSON job from stdin, writes one JSON line per item to stdout, then a
                    "done" line. Job: {"paths": [...], "roms": {"<game>": "<port ROM path>"} | "rom_dirs": [...],
-                   "ledger": "<path>", "catalog": "<path>", "sevenzip": "<7zr.exe>", "work": "<temp folder>"}.
+                   "ledger": "<path>", "record": false, "catalog": "<path>", "sevenzip": "<7zr.exe>", "work": "<temp folder>"}.
 
 What an item can be (kind): rom, patch, nrm (a patch mod), package (aki-package.json / aki.json), pj64-bundle (a
 Project64 folder with the mod's cheats, save and textures), texture-pack (rt64 / rice / jabo / hts naming), save,
@@ -34,6 +34,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -69,6 +70,9 @@ JABO_NAME = re.compile(r'^[0-9A-Fa-f]{32}\.(png|dds|bmp)$')
 RT64_NAME = re.compile(r'^[0-9A-Fa-f]{16}\.(png|dds)$')
 PJ64_MARKERS = ('project64.cht', 'project64.rdb', 'project64.cfg', 'project64.exe')
 MIN_PACK_IMAGES = 5
+MAX_ITEM = 128 << 20      # the biggest file read whole (N64 ROMs are 64 MB at most)
+MAX_RATIO = 100           # a zip member inflating more than this (past 16 MB) is refused as a possible zip bomb
+MAX_DEPTH = 8             # folders walked at most this deep
 
 # Fallback magic when romhack/patchfmt.py isn't there: enough to say "a patch" and its format.
 PATCH_MAGIC = ((b'BPS1', 'bps'), (b'UPS1', 'ups'), (b'PATCH', 'ips'), (b'APS10', 'aps'), (b'\xd6\xc3\xc4', 'xdelta'),
@@ -98,20 +102,36 @@ def load_patchfmt(path=None):
 
 
 def to_z64(data):
-    """(big-endian ROM bytes, original order) or (None, None) when it isn't an N64 ROM."""
+    """(big-endian ROM bytes, original order) or (None, None) when it isn't an N64 ROM (or a byte-swapped image's
+    length doesn't divide into its swap unit)."""
     head = data[:4]
     if head == b'\x80\x37\x12\x40':
         return data, 'z64'
     if head == b'\x37\x80\x40\x12':
+        if len(data) % 2:
+            return None, None
         b = bytearray(data)
         b[0::2], b[1::2] = data[1::2], data[0::2]
         return bytes(b), 'v64'
     if head == b'\x40\x12\x37\x80':
+        if len(data) % 4:
+            return None, None
         b = bytearray(len(data))
         for k in range(4):
             b[k::4] = data[3 - k::4]
         return bytes(b), 'n64'
     return None, None
+
+
+ROM_MAGICS = (b'\x80\x37\x12\x40', b'\x37\x80\x40\x12', b'\x40\x12\x37\x80')
+
+
+def looks_like_rom(head):
+    return head[:4] in ROM_MAGICS
+
+
+def looks_like_patch(head):
+    return any(head.startswith(m) for m, _ in PATCH_MAGIC)
 
 
 def rom_header(rom):
@@ -200,34 +220,78 @@ def texture_naming(names):
 # ------------------------------------------------------------------------------------ inputs
 
 class Source:
-    """One input: a file on disk, a member of a zip (read in memory), or a folder (bundle / texture pack)."""
+    """One input: a file on disk, a zip member, or a folder (bundle / texture pack, on disk or zipped).
+    Bytes are read only when the item needs them and dropped after it's classified (release)."""
 
-    def __init__(self, label, kind_hint, reader=None, names=None, path=None):
+    def __init__(self, label, kind_hint, reader=None, names=None, path=None, size=0, head=b''):
         self.label = label          # what the results show: path, or archive!member
         self.kind_hint = kind_hint  # 'file' or 'folder'
         self.reader = reader        # () -> bytes, for files
         self.names = names or []    # relative file names, for folders
         self.path = path            # the folder or file on disk, when there is one
+        self.size = size            # bytes, for files
+        self.head = head            # the first 64 bytes, for files
+        self.zip_path = None        # a zipped folder: the zip on disk, or its bytes (zip_blob)
+        self.zip_blob = None
         self._data = None
 
     def data(self):
         if self._data is None:
+            if self.size > MAX_ITEM:
+                raise TooBig('%d MB, more than the %d MB limit' % (self.size >> 20, MAX_ITEM >> 20))
             self._data = self.reader()
         return self._data
 
+    def release(self):
+        self._data = None
 
-def folder_files(root):
+
+class TooBig(Exception):
+    pass
+
+
+def is_link(path):
+    """Symlinks and Windows junctions (reparse points): never followed, so a loop or a link to C:\\ can't be walked."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    return stat.S_ISLNK(st.st_mode) or bool(getattr(st, 'st_file_attributes', 0) & 0x400)
+
+
+def folder_files(root, notes=None, depth=0):
+    """Relative file names under root, links skipped, at most MAX_DEPTH folders deep."""
     out = []
-    for dirpath, _, files in os.walk(root):
-        for f in files:
-            out.append(os.path.relpath(os.path.join(dirpath, f), root).replace('\\', '/'))
-    return sorted(out)
+    try:
+        entries = sorted(os.listdir(root))
+    except OSError as e:
+        if notes is not None:
+            notes.append(dict(item=root, status='failed', why='cannot read the folder: %s' % e.strerror))
+        return out
+    for e in entries:
+        full = os.path.join(root, e)
+        if is_link(full):
+            continue
+        if os.path.isdir(full):
+            if depth < MAX_DEPTH:
+                out += [e + '/' + n for n in folder_files(full, notes, depth + 1)]
+        elif os.path.isfile(full):
+            out.append(e)
+    return out
 
 
-def is_bundle(names):
+def strip_root(names):
+    """Names relative to the one top folder they all share (a zip of 'My Mod/...'), else unchanged."""
+    tops = {n.split('/', 1)[0] for n in names}
+    if len(tops) == 1 and all('/' in n for n in names):
+        return [n.split('/', 1)[1] for n in names]
+    return names
+
+
+def is_bundle(names, zipped=False):
     """A Project64 folder: its markers at the top or in Config/ (Config/Project64.cfg), not deeper, so a
-    folder that holds several bundles isn't taken as one."""
-    lower = [n.lower() for n in names]
+    folder that holds several bundles isn't taken as one. A zip's single top folder doesn't count as a level."""
+    lower = [n.lower() for n in (strip_root(names) if zipped else names)]
     return any(n in PJ64_MARKERS or (n.startswith('config/') and n[7:] in PJ64_MARKERS) for n in lower)
 
 
@@ -238,58 +302,121 @@ def is_texture_folder(names):
     return texture_naming(names) is not None
 
 
-def expand(path, job, sources, notes):
+def file_head(path, n=64):
+    with open(path, 'rb') as f:
+        return f.read(n)
+
+
+def expand(path, job, sources, notes, depth=0):
     """Turn one picked path into Sources. Bundles and texture packs stay one item; other folders are walked."""
+    if is_link(path):
+        notes.append(dict(item=path, status='unsupported', why='a link or junction: pick the folder it points to'))
+        return
     if os.path.isdir(path):
-        names = folder_files(path)
+        names = folder_files(path, notes)
         if is_bundle(names) or is_texture_folder(names):
             sources.append(Source(path, 'folder', names=names, path=path))
             return
+        if depth >= MAX_DEPTH:
+            return
         for entry in sorted(os.listdir(path)):
-            expand(os.path.join(path, entry), job, sources, notes)
+            expand(os.path.join(path, entry), job, sources, notes, depth + 1)
         return
     if not os.path.isfile(path):
         notes.append(dict(item=path, status='failed', why='not found'))
         return
-    with open(path, 'rb') as f:
-        head = f.read(8)
-    lower = path.lower()
-    if head.startswith(b'PK\x03\x04') and not lower.endswith('.nrm'):
-        expand_zip(path, read_file(path), path, sources, notes)
+    head = file_head(path)
+    if head.startswith(b'PK\x03\x04') and not path.lower().endswith('.nrm'):
+        expand_zip(path, lambda p=path: open(p, 'rb'), path, sources, notes)
     elif head.startswith(b"7z\xbc\xaf\x27\x1c"):
         expand_7z(path, job, sources, notes)
     elif head.startswith(b'Rar!'):
         notes.append(dict(item=path, status='unsupported', why='RAR archive: extract it first, then import the folder'))
     else:
-        sources.append(Source(path, 'file', reader=lambda p=path: read_file(p), path=path))
+        sources.append(Source(path, 'file', reader=lambda p=path: read_file(p), path=path,
+                              size=os.path.getsize(path), head=head))
 
 
-def expand_zip(label, blob, origin, sources, notes, depth=0):
-    """Members are read in memory (nothing is extracted, so no zip-slip). A zip that is a bundle or texture pack is
-    one item; otherwise every ROM / patch / mod inside is its own item."""
+def member_problem(m):
+    """Why a zip member mustn't be inflated (too big, or a zip-bomb ratio), or None."""
+    if m.file_size > MAX_ITEM:
+        return '%d MB, more than the %d MB limit' % (m.file_size >> 20, MAX_ITEM >> 20)
+    if m.file_size > (16 << 20) and m.file_size > MAX_RATIO * max(m.compress_size, 1):
+        return 'compressed %d:1, refused as a possible zip bomb' % (m.file_size // max(m.compress_size, 1))
+    return None
+
+
+def read_member(opener, name):
+    with opener() as f, zipfile.ZipFile(f) as z:
+        return z.read(name)
+
+
+def expand_zip(label, opener, origin, sources, notes, depth=0, blob=None):
+    """Members are read on demand (nothing is extracted, so no zip-slip), each capped (member_problem). A zip that is
+    a bundle, texture pack or mod is one item; otherwise every ROM / patch / mod / zip inside is its own item.
+    opener() gives a fresh file object for the zip (the file on disk, or a nested zip's bytes)."""
+    fh = opener()
     try:
-        z = zipfile.ZipFile(io.BytesIO(blob))
+        expand_zip_members(label, fh, opener, origin, sources, notes, depth, blob)
+    finally:
+        fh.close()
+
+
+def expand_zip_members(label, fh, opener, origin, sources, notes, depth, blob):
+    try:
+        z = zipfile.ZipFile(fh)
         members = [i for i in z.infolist() if not i.is_dir()]
-    except zipfile.BadZipFile as e:
+    except (zipfile.BadZipFile, OSError, ValueError) as e:
         notes.append(dict(item=label, status='failed', why='bad zip: %s' % e))
         return
     names = [m.filename for m in members]
-    lower = {n.lower().rsplit('/', 1)[-1] for n in names}
-    if 'mod.json' in lower or 'aki-package.json' in lower or 'aki.json' in lower:
-        sources.append(Source(label, 'file', reader=lambda b=blob: b, path=origin))
+    top = {n.lower() for n in strip_root(names)}
+    whole = blob if blob is not None else None
+
+    def whole_reader():
+        if blob is not None:
+            return blob
+        return read_file(origin)
+    size = len(blob) if blob is not None else os.path.getsize(origin)
+    if top & {'mod.json', 'aki-package.json', 'aki.json'}:
+        sources.append(Source(label, 'file', reader=whole_reader, path=origin, size=size, head=b'PK\x03\x04'))
         return
-    if is_bundle(names) or is_texture_folder(names):
+    if is_bundle(names, zipped=True) or is_texture_folder(names):
         src = Source(label, 'folder', names=names, path=origin)
-        src.zip_blob = blob
+        if whole is None:
+            src.zip_path = origin
+        else:
+            src.zip_blob = whole
         sources.append(src)
         return
     for m in members:
         member_label = '%s!%s' % (label, m.filename)
         ext = os.path.splitext(m.filename.lower())[1]
-        if ext == '.zip' and depth < 2:
-            expand_zip(member_label, z.read(m), origin, sources, notes, depth + 1)
-        elif ext in ROM_EXTS + PATCH_EXTS + ('.nrm',) or m.file_size >= 0x100000:
-            sources.append(Source(member_label, 'file', reader=lambda z=z, m=m: z.read(m), path=origin))
+        why = member_problem(m)
+        try:
+            if ext == '.zip':
+                if depth >= 2:
+                    notes.append(dict(item=member_label, status='unsupported', why='zip nested too deep'))
+                elif why:
+                    notes.append(dict(item=member_label, status='unsupported', why=why))
+                else:
+                    inner = z.read(m)
+                    expand_zip(member_label, lambda b=inner: io.BytesIO(b), origin, sources, notes, depth + 1,
+                               blob=inner)
+                continue
+            with z.open(m) as f:
+                head = f.read(64)
+            if not (ext in ROM_EXTS + PATCH_EXTS + ('.nrm',) or looks_like_rom(head) or looks_like_patch(head)):
+                continue
+            if why:
+                notes.append(dict(item=member_label, status='unsupported', why=why))
+                continue
+            sources.append(Source(member_label, 'file', reader=lambda o=opener, n=m.filename: read_member(o, n),
+                                  path=origin,
+                                  size=m.file_size, head=head))
+        except Exception as e:  # a corrupt member fails alone
+            notes.append(dict(item=member_label, status='failed', why='%s: %s' % (type(e).__name__, e)))
+    z.close()
 
 
 def find_7zr(job):
@@ -299,29 +426,62 @@ def find_7zr(job):
     return None
 
 
+def sha1_file(path):
+    h = hashlib.sha1()
+    with open(path, 'rb') as f:
+        for chunk in iter(lambda: f.read(1 << 20), b''):
+            h.update(chunk)
+    return h.hexdigest().upper()
+
+
+def work_dir(job):
+    """--work, or one temp folder for the batch that run_job deletes at the end."""
+    if job.get('work'):
+        os.makedirs(job['work'], exist_ok=True)
+        return job['work']
+    if not job.get('_tmp'):
+        job['_tmp'] = tempfile.mkdtemp(prefix='aki-import-')
+    return job['_tmp']
+
+
 def expand_7z(path, job, sources, notes):
     exe = find_7zr(job)
     if not exe:
         notes.append(dict(item=path, status='unsupported', why='7z archive: 7zr.exe not found (bin\\7zr.exe or --sevenzip)'))
         return
-    work = job.get('work') or tempfile.mkdtemp(prefix='aki-import-')
-    out = os.path.join(work, '7z-%s' % hashlib.sha1(os.path.abspath(path).encode('utf-8')).hexdigest()[:12])
-    if not os.path.isdir(out):
-        os.makedirs(out, exist_ok=True)
-        r = subprocess.run([exe, 'x', '-y', '-bd', '-o' + out, path], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    # Keyed by content, so a changed archive is unpacked again; a .complete marker, so a broken unpack isn't reused.
+    out = os.path.join(work_dir(job), '7z-%s' % sha1_file(path)[:16])
+    marker = os.path.join(out, '.aki-complete')
+    if not os.path.isfile(marker):
+        if os.path.isdir(out):
+            shutil.rmtree(out, ignore_errors=True)
+        os.makedirs(out)
+        r = subprocess.run([exe, 'x', '-y', '-bd', '-snl-', '-o' + out, path], stdout=subprocess.PIPE,
+                           stderr=subprocess.STDOUT)
         if r.returncode != 0:
+            shutil.rmtree(out, ignore_errors=True)
             notes.append(dict(item=path, status='failed', why='7zr exit %d' % r.returncode))
             return
+        with open(marker, 'w') as f:
+            f.write(path)
     root = os.path.realpath(out)
     for dirpath, _, files in os.walk(out):
         for f in files:
             if not os.path.realpath(os.path.join(dirpath, f)).startswith(root + os.sep):
                 notes.append(dict(item=path, status='failed', why='7z member outside the unpack folder'))
                 return
-    before = len(sources)
-    expand(out, job, sources, notes)
-    for s in sources[before:]:
-        s.label = path + '!' + os.path.relpath(s.label, out).replace('\\', '/') if s.label != out else path
+    s0, n0 = len(sources), len(notes)
+    for entry in sorted(os.listdir(out)):
+        if entry != '.aki-complete':
+            expand(os.path.join(out, entry), job, sources, notes, 1)
+
+    def relabel(label):
+        rel = os.path.relpath(label, out).replace('\\', '/')
+        return path if rel == '.' else path + '!' + rel
+    for s in sources[s0:]:
+        s.label = relabel(s.label) if s.label.startswith(out) else s.label
+    for n in notes[n0:]:
+        n['item'] = relabel(n['item']) if n['item'].startswith(out) else n['item']
 
 
 # ------------------------------------------------------------------------------------ ROMs, catalog, ledger
@@ -342,7 +502,7 @@ class Roms:
 
     def add(self, path, expect=None, data=None):
         if data is None:
-            if not os.path.isfile(path) or os.path.getsize(path) > 128 * 1024 * 1024:
+            if not os.path.isfile(path) or os.path.getsize(path) > MAX_ITEM:
                 return None
             data = read_file(path)
         rom, _ = to_z64(data)
@@ -418,13 +578,18 @@ class Ledger:
 # ------------------------------------------------------------------------------------ classification
 
 def folder_key(src):
+    """A folder item's content hash: every file's name and bytes (or the zip's bytes)."""
     h = hashlib.sha1()
-    if getattr(src, 'zip_blob', None) is not None:
+    if src.zip_blob is not None:
         h.update(src.zip_blob)
+    elif src.zip_path is not None:
+        return 'F' + sha1_file(src.zip_path)
     else:
         for n in src.names:
-            h.update(n.encode('utf-8'))
-            h.update(str(os.path.getsize(os.path.join(src.path, n))).encode())
+            h.update(n.encode('utf-8') + b'\0')
+            with open(os.path.join(src.path, n), 'rb') as f:
+                for chunk in iter(lambda: f.read(1 << 20), b''):
+                    h.update(chunk)
     return 'F' + h.hexdigest().upper()
 
 
@@ -463,8 +628,10 @@ def classify_patch(data, fmt, res, roms, catalog, patchfmt):
     if fmt in ('ppf', 'rup') and patchfmt is None:
         return res.update(status='unsupported', why='%s patches are not read by the importer yet' % fmt)
     if patchfmt is None:
-        return res.update(status='failed', why='the patch engine (romhack/patchfmt.py) is not installed')
-    tried, needs = [], None
+        return res.update(status='failed', why='the patch engine (patchfmt.py) is not installed')
+    # Every base is tried: formats without a source check (IPS, APS) "apply" to anything, so the result whose header
+    # names the base's own game wins, else the first that applied.
+    tried, errors, needs, found = [], [], None, None
     for game, name, base in roms.candidates():
         try:
             target, info = patchfmt.apply(data, base)
@@ -472,25 +639,38 @@ def classify_patch(data, fmt, res, roms, catalog, patchfmt):
             tried.append(name)
             needs = needs or base_named_by(e)
             continue
-        out, order = to_z64(target)
+        except Exception as e:
+            errors.append('%s: %s: %s' % (name, type(e).__name__, e))
+            continue
+        out, _ = to_z64(target)
         if out is None:
-            return res.update(status='failed', why='the %s patch on %s does not give an N64 ROM' % (fmt, name))
-        res.update(base=name, patch_info=_jsonable(info))
-        sub = {}
-        classify_rom(out, 'z64', sub, roms, catalog)
-        for k in ('status', 'game', 'route', 'tier', 'catalog', 'why', 'id', 'name'):
-            if k in sub and sub[k] is not None:
-                res[k] = sub[k]
-        res['result_sha1'] = sub.get('sha1')
-        if catalog.get(sha1) and res.get('status') == 'ready':
-            e = catalog[sha1]
-            res.update(catalog=e.get('id'), tier=e.get('tier', 'verified'), id=e.get('id'), name=e.get('name'))
-        return res
-    if not roms.candidates():
-        return res.update(status='needs-rom', needs=needs or 'a stock ROM of the game it was made for',
-                          why='no stock ROMs were given (roms / rom_dirs)')
-    return res.update(status='needs-rom', needs=needs or 'the ROM it was made for',
-                      why='it does not apply to: %s' % ', '.join(tried))
+            errors.append('%s: the result is not an N64 ROM' % name)
+            continue
+        out_game, _ = game_for_code(rom_header(out)['code'])
+        if found is None or (out_game == game and found[3] != found[0]):
+            found = (game, name, (out, info), out_game)
+        if out_game == game:
+            break
+    if found is None:
+        if errors and not tried:
+            return res.update(status='failed', why='; '.join(errors))
+        if not roms.candidates():
+            return res.update(status='needs-rom', needs=needs or 'a stock ROM of the game it was made for',
+                              why='no stock ROMs were given (roms / rom_dirs)')
+        return res.update(status='needs-rom', needs=needs or 'the ROM it was made for',
+                          why='it does not apply to: %s' % ', '.join(tried + [e.split(':')[0] for e in errors]))
+    game, name, (out, info), _ = found
+    res.update(base=name, patch_info=_jsonable(info))
+    sub = {}
+    classify_rom(out, 'z64', sub, roms, catalog)
+    for k in ('status', 'game', 'route', 'tier', 'catalog', 'why', 'id', 'name'):
+        if k in sub and sub[k] is not None:
+            res[k] = sub[k]
+    res['result_sha1'] = sub.get('sha1')
+    if catalog.get(sha1) and res.get('status') == 'ready':
+        e = catalog[sha1]
+        res.update(catalog=e.get('id'), tier=e.get('tier', 'verified'), id=e.get('id'), name=e.get('name'))
+    return res
 
 
 def base_named_by(err):
@@ -520,7 +700,7 @@ def _jsonable(info):
 
 def classify_folder(src, res, roms):
     names = src.names
-    if is_bundle(names):
+    if is_bundle(names, zipped=src.zip_path is not None or src.zip_blob is not None):
         res.update(kind='pj64-bundle', status='ready', route='import-pj64',
                    parts=sorted({p for p in (part_of(n) for n in names) if p}))
         hint = [n for n in names if os.path.splitext(n.lower())[1] in ROM_EXTS + PATCH_EXTS]
@@ -558,23 +738,28 @@ def part_of(name):
 
 
 def classify_file(src, res, roms, catalog, patchfmt):
-    data = src.data()
-    lower = src.label.lower()
-    ext = os.path.splitext(lower)[1]
-    rom, order = to_z64(data)
-    if rom is not None:
+    """By the first bytes and the extension; the whole file is read only for ROMs, patches and mods."""
+    head = src.head
+    ext = os.path.splitext(src.label.lower())[1]
+    if looks_like_rom(head):
+        data = src.data()
+        rom, order = to_z64(data)
+        if rom is None:
+            return res.update(kind='rom', status='failed', why='a byte-swapped ROM whose length does not divide')
         return classify_rom(rom, order, res, roms, catalog)
-    if data.startswith(b'PK\x03\x04'):
+    if head.startswith(b'PK\x03\x04'):
+        data = src.data()
         try:
-            names = {n.lower().rsplit('/', 1)[-1] for n in zipfile.ZipFile(io.BytesIO(data)).namelist()}
+            names = {n.lower() for n in strip_root(zipfile.ZipFile(io.BytesIO(data)).namelist())}
         except zipfile.BadZipFile:
             names = set()
         if 'aki-package.json' in names or 'aki.json' in names:
             return res.update(kind='package', status='ready', route='install', sha1=hashlib.sha1(data).hexdigest().upper())
         if 'mod.json' in names:
             return res.update(kind='nrm', status='ready', route='install', sha1=hashlib.sha1(data).hexdigest().upper())
-    fmt = patch_format(data, patchfmt)
-    if fmt or ext in PATCH_EXTS:
+    if looks_like_patch(head) or ext in PATCH_EXTS:
+        data = src.data()
+        fmt = patch_format(data, patchfmt)
         if not fmt:
             return res.update(kind='patch', status='failed', why='%s file without a patch header' % ext)
         return classify_patch(data, fmt, res, roms, catalog, patchfmt)
@@ -594,12 +779,14 @@ def classify(src, roms, catalog, ledger, patchfmt, taken):
             key = folder_key(src)
             classify_folder(src, res, roms)
         else:
-            data = src.data()
-            rom, _ = to_z64(data)
-            key = hashlib.sha1(rom if rom is not None else data).hexdigest().upper()
             classify_file(src, res, roms, catalog, patchfmt)
+            key = res.get('sha1')   # ROMs (.z64 order), patches, mods; loose saves and unknown files have none
+    except TooBig as e:
+        return dict(item=src.label, status='unsupported', why=str(e)), None
     except Exception as e:  # one bad item never stops a batch
         return dict(item=src.label, status='failed', why='%s: %s' % (type(e).__name__, e)), None
+    finally:
+        src.release()
     res['key'] = key
     if ledger is not None and key in ledger.entries:
         prev = ledger.entries[key]
@@ -619,7 +806,8 @@ def classify(src, roms, catalog, ledger, patchfmt, taken):
 # ------------------------------------------------------------------------------------ batch
 
 def run_job(job, emit, patchfmt=None):
-    """One batch: expand every path, classify every item, emit one result dict per item, then a summary."""
+    """One batch: expand every path, classify every item, emit one result dict per item, then a summary. The ledger
+    is read for have-it; it is written only with job["record"] (the build step), and only for items made ready."""
     if patchfmt is None and not job.get('no_patchfmt'):
         patchfmt = load_patchfmt(job.get('patchfmt'))
     roms = Roms(job.get('roms'), job.get('rom_dirs'))
@@ -627,30 +815,40 @@ def run_job(job, emit, patchfmt=None):
     ledger = Ledger(job.get('ledger')) if job.get('ledger') else None
     taken = ledger.ids() if ledger else set()
     sources, notes = [], []
-    for p in job.get('paths', []):
-        expand(p, job, sources, notes)
-    # Stock ROMs among the inputs are bases for the patches next to them.
-    for s in sources:
-        if s.kind_hint == 'file' and not s.label.lower().endswith(PATCH_EXTS):
+    try:
+        for p in job.get('paths', []):
             try:
-                roms.add(s.label, data=s.data())
-            except OSError:
-                pass
-    counts, seen = {}, set()
-    for n in notes:
-        counts[n['status']] = counts.get(n['status'], 0) + 1
-        emit(dict(n, event='item'))
-    for s in sources:
-        res, key = classify(s, roms, catalog, ledger, patchfmt, taken)
-        if key and key in seen:
-            res = dict(item=s.label, status='have-it', key=key, why='same input as another item in this batch')
-        seen.add(key)
-        counts[res['status']] = counts.get(res['status'], 0) + 1
-        if ledger is not None and key and res['status'] not in ('have-it', 'failed', 'needs-rom'):
-            ledger.record(key, res)
-        emit(dict(res, event='item'))
-    if ledger is not None:
-        ledger.save()
+                expand(p, job, sources, notes)
+            except Exception as e:
+                notes.append(dict(item=p, status='failed', why='%s: %s' % (type(e).__name__, e)))
+        # Stock ROMs among the inputs are bases for the patches next to them (only those bytes are kept).
+        for s in sources:
+            if s.kind_hint == 'file' and looks_like_rom(s.head) and s.size <= MAX_ITEM:
+                try:
+                    roms.add(s.label, data=s.data())
+                except Exception:
+                    pass
+                finally:
+                    s.release()
+        counts, seen = {}, set()
+        for n in notes:
+            counts[n['status']] = counts.get(n['status'], 0) + 1
+            emit(dict(n, event='item'))
+        for s in sources:
+            res, key = classify(s, roms, catalog, ledger, patchfmt, taken)
+            if key and key in seen:
+                res = dict(item=s.label, status='have-it', key=key, why='same input as another item in this batch')
+            if key:
+                seen.add(key)
+            counts[res['status']] = counts.get(res['status'], 0) + 1
+            if ledger is not None and job.get('record') and key and res['status'] == 'ready':
+                ledger.record(key, res)
+            emit(dict(res, event='item'))
+        if ledger is not None and job.get('record'):
+            ledger.save()
+    finally:
+        if job.get('_tmp'):
+            shutil.rmtree(job['_tmp'], ignore_errors=True)
     summary = dict(event='done', counts=counts, engine=ENGINE_VERSION, patch_engine=patchfmt is not None)
     emit(summary)
     return summary
@@ -676,7 +874,7 @@ def cmd_plan(args):
             raise ImportError_('unknown game %r in --rom (games: %s)' % (g, ', '.join(GAMES)))
         roms[g] = p
     job = dict(paths=args.paths, roms=roms, rom_dirs=args.rom_dir or [], ledger=args.ledger, catalog=args.catalog,
-               sevenzip=args.sevenzip, work=args.work, patchfmt=args.patchfmt)
+               sevenzip=args.sevenzip, work=args.work, patchfmt=args.patchfmt, record=args.record)
     results = []
     run_job(job, results.append)
     if args.json:
@@ -705,6 +903,7 @@ def main(argv=None):
     p.add_argument('--rom', action='append', metavar='GAME=PATH', help='a port ROM (repeatable)')
     p.add_argument('--rom-dir', action='append', metavar='DIR', help='find stock ROMs in DIR (by SHA-1)')
     p.add_argument('--ledger', help='import ledger JSON (read, and updated)')
+    p.add_argument('--record', action='store_true', help='record the ready items in the ledger')
     p.add_argument('--catalog', help='recipe catalog JSON')
     p.add_argument('--sevenzip', help='7zr.exe')
     p.add_argument('--work', help='temp folder for unpacked 7z archives')

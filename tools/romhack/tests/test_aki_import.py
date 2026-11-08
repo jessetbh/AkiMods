@@ -258,7 +258,7 @@ class LedgerAndIds(Base):
         h1[0x2000], h2[0x2000] = 1, 2
         a = self.write('in/a/Hack.z64', bytes(h1))
         b = self.write('in/b/Hack.z64', bytes(h2))
-        items, _ = self.run_job([a, b], ledger=ledger)
+        items, _ = self.run_job([a, b], ledger=ledger, record=True)
         self.assertEqual(sorted(i['id'] for i in items), ['hack', 'hack-2'])
         items, done = self.run_job([a, b], ledger=ledger)
         self.assertEqual({i['status'] for i in items}, {'have-it'})
@@ -282,6 +282,152 @@ class LedgerAndIds(Base):
     def test_slug(self):
         self.assertEqual(ai.slug('  WWF: No Mercy+ (v2.1)!'), 'wwf-no-mercy-v2-1')
         self.assertEqual(ai.slug('***'), 'import')
+
+    def test_plan_does_not_record(self):
+        ledger = os.path.join(self.dir, 'ledger.json')
+        a = self.write('in/a.z64', fake_rom(salt=9))
+        self.run_job([a], ledger=ledger)
+        self.assertEqual(self.one([a], ledger=ledger)['status'], 'ready')
+
+
+# Review findings (hostile or odd input): each must fail alone, never stop the batch.
+class Hostile(Base):
+    def zip_bytes(self, files, method=zipfile.ZIP_STORED):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, 'w', method) as z:
+            for name, data in files.items():
+                z.writestr(name, data)
+        return buf.getvalue()
+
+    def test_odd_length_byte_swapped_files(self):
+        items, _ = self.run_job([self.write('in/a.v64', b'\x37\x80\x40\x12\x00'),
+                                 self.write('in/b.n64', b'\x40\x12\x37\x80\x00\x00'), self.stock_path])
+        by = {os.path.basename(i['item']): i['status'] for i in items}
+        self.assertEqual(by, {'a.v64': 'failed', 'b.n64': 'failed', 'nomercy.z64': 'stock'})
+
+    def test_corrupt_zip_member_fails_alone(self):
+        blob = bytearray(self.zip_bytes({'a.z64': fake_rom(salt=3), 'b.z64': fake_rom(salt=4)}))
+        i = blob.find(fake_rom(salt=3)[0x1000:0x1100])
+        blob[i + 10] ^= 0xFF   # CRC mismatch on read
+        items, _ = self.run_job([self.write('in/c.zip', bytes(blob))])
+        self.assertEqual(sorted(x['status'] for x in items), ['failed', 'ready'])
+
+    def test_size_caps(self):
+        old = ai.MAX_ITEM
+        ai.MAX_ITEM = 0x3000
+        try:
+            items, _ = self.run_job([self.write('in/big.z64', fake_rom(salt=2)),
+                                     self.write('in/big.zip', self.zip_bytes({'x.z64': fake_rom(salt=2)}))], roms={})
+        finally:
+            ai.MAX_ITEM = old
+        self.assertEqual([x['status'] for x in items], ['unsupported', 'unsupported'], items)
+        self.assertTrue(all('limit' in x['why'] for x in items))
+
+    def test_zip_bomb_ratio_is_refused(self):
+        bomb = self.zip_bytes({'x.z64': b'\x80\x37\x12\x40' + bytes(17 << 20)}, zipfile.ZIP_DEFLATED)
+        r = self.one([self.write('in/bomb.zip', bomb)])
+        self.assertEqual(r['status'], 'unsupported')
+        self.assertIn('zip bomb', r['why'])
+
+    def test_same_size_texture_packs_differ_by_content(self):
+        for pack, byte in (('p1', b'a'), ('p2', b'b')):
+            for i in range(5):
+                self.write('in/%s/%032x.png' % (pack, i), byte)
+        items, _ = self.run_job([os.path.join(self.dir, 'in', 'p1'), os.path.join(self.dir, 'in', 'p2')])
+        self.assertEqual([i['status'] for i in items], ['ready', 'ready'])
+
+    def test_patch_without_source_check_prefers_its_own_game(self):
+        wt = fake_rom(code='NWNE', title='WCW vs nWo World Tour', salt=7)
+        ai.GAMES['wt']['sha1'] = hashlib.sha1(wt).hexdigest().upper()
+        wt_path = self.write('roms/wcw.z64', wt)
+
+        def any_apply(patch, source):   # like IPS: no source check, changes one byte
+            out = bytearray(source)
+            out[0x2000] ^= 1
+            return bytes(out), {}
+        pf = types.SimpleNamespace(detect=lambda d: 'ips' if d.startswith(b'PATCH') else None, apply=any_apply,
+                                   PatchError=PatchError)
+        hack_is_nm = self.write('in/nm.ips', b'PATCH' + bytes(3) + b'EOF')
+        items, _ = self.run_job([hack_is_nm], roms={'wt': wt_path, 'nomercy': self.stock_path}, patchfmt=pf)
+        self.assertEqual(items[0]['status'], 'ready')
+        self.assertEqual(items[0]['base'], 'WCW vs. nWo World Tour')   # the first base: both games match themselves
+
+        def nm_header(patch, source):   # the result always carries No Mercy's header
+            out = bytearray(source)
+            out[0x3B:0x3F] = b'NW4E'
+            out[0x2000] ^= 1
+            return bytes(out), {}
+        pf.apply = nm_header
+        items, _ = self.run_job([hack_is_nm], roms={'wt': wt_path, 'nomercy': self.stock_path}, patchfmt=pf)
+        self.assertEqual((items[0]['game'], items[0]['base']), ('nomercy', 'WWF No Mercy'))
+
+    def test_non_patcherror_moves_to_next_base(self):
+        calls = []
+
+        def flaky(patch, source):
+            calls.append(1)
+            if len(calls) == 1:
+                raise MemoryError('first base')
+            return fake_apply(patch, source)
+        pf = types.SimpleNamespace(detect=fake_detect, apply=flaky, PatchError=PatchError)
+        rev0 = self.write('roms/nm10.z64', REV0)
+        r = self.one([self.write('in/p.bps', make_patch(REV0, [(0x2000, 1)]))], rom_dirs=[os.path.dirname(rev0)],
+                     roms={}, patchfmt=pf)
+        self.assertEqual((r['status'], r['base']), ('ready', 'WWF No Mercy (USA) 1.0'))
+
+    def test_bundle_zipped_under_one_root_folder(self):
+        r = self.one([self.write('in/b.zip', self.zip_bytes({'My Mod/Project64.exe': b'x',
+                                                             'My Mod/Config/Project64.cfg': b'x',
+                                                             'My Mod/Save/a.fla': b'x'}))])
+        self.assertEqual(r['kind'], 'pj64-bundle')
+
+    def test_mod_json_deep_in_a_zip_is_not_a_mod(self):
+        items, _ = self.run_job([self.write('in/m.zip', self.zip_bytes({'a/b/mod.json': b'{}',
+                                                                        'hack.z64': fake_rom(salt=6)}))])
+        self.assertEqual([i['kind'] for i in items], ['rom'])
+
+    def test_links_are_not_followed(self):
+        target = os.path.join(self.dir, 'in', 'real')
+        os.makedirs(target)
+        self.write('in/real/a.z64', fake_rom(salt=8))
+        link = os.path.join(self.dir, 'in', 'real', 'loop')
+        try:
+            os.symlink(target, link, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest('no symlink privilege')
+        items, _ = self.run_job([target])
+        self.assertEqual([i['status'] for i in items], ['ready'])
+
+    def test_bytes_are_released_after_each_item(self):
+        srcs = []
+        real = ai.classify
+
+        def spy(src, *a):
+            srcs.append(src)
+            return real(src, *a)
+        ai.classify = spy
+        try:
+            self.run_job([self.write('in/a.z64', fake_rom(salt=1)), self.stock_path])
+        finally:
+            ai.classify = real
+        self.assertTrue(srcs and all(s._data is None for s in srcs))
+
+    def test_7z_with_a_fake_7zr(self):
+        # A stand-in 7zr: copies the "archive"'s payload (after the 7z magic) to <out>/inner.z64.
+        script = self.write('tools/fake7z.py', (
+            'import sys, os\n'
+            'out = [a[2:] for a in sys.argv if a.startswith("-o")][0]\n'
+            'data = open(sys.argv[-1], "rb").read()[6:]\n'
+            'open(os.path.join(out, "inner.z64"), "wb").write(data)\n').encode())
+        exe = self.write('tools/fake7zr.cmd', ('@"%s" -I "%s" %%*\r\n' % (sys.executable, script)).encode())
+        arc = self.write('in/a.7z', b"7z\xbc\xaf\x27\x1c" + fake_rom(salt=11))
+        work = os.path.join(self.dir, 'work')
+        items, _ = self.run_job([arc], sevenzip=exe, work=work)
+        self.assertEqual(len(items), 1, items)
+        self.assertEqual((items[0]['status'], items[0]['item']), ('ready', arc + '!inner.z64'))
+        self.assertTrue(any(f.startswith('7z-') for f in os.listdir(work)))
+        items, _ = self.run_job([arc], sevenzip=exe)   # no --work: the temp unpack folder is removed
+        self.assertEqual(items[0]['status'], 'ready')
 
 
 class Worker(Base):
