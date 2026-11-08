@@ -571,18 +571,37 @@ def zipcrc(data):
     return zlib.crc32(data) & 0xFFFFFFFF
 
 
-def load_catalog(path):
-    """Recipes for tested conversions, keyed by input hash: {"entries": [{"id", "name", "game", "tier", "route",
-    "inputs": {"sha1": [...]}, ...}]} -> {SHA1: entry}."""
+DEFAULT_CATALOG = os.path.join(TOOLS, 'catalog.json')
+TIER_LABELS = {'verified': 'Verified', 'experimental': 'Experimental', 'unsupported': 'Unsupported',
+               'untested': 'Untested'}
+
+
+class Catalog(dict):
+    """The recipe catalog (catalog.json: the conversions the AKI team tested): {input SHA-1: entry}, plus
+    outputs {built ROM SHA-1: entry}, codes {codes.txt SHA-1: entry} and the tier texts."""
+
+    def __init__(self, cat=None):
+        super().__init__()
+        cat = cat or {}
+        self.outputs, self.codes = {}, {}
+        self.tiers = cat.get('tiers', {})
+        for e in cat.get('entries', []):
+            for h in e.get('inputs', {}).get('sha1', []):
+                self[h.upper()] = e
+            for h in e.get('outputs', {}).get('sha1', []):
+                self.outputs[h.upper()] = e
+            for h in e.get('outputs', {}).get('codes_sha1', []):
+                self.codes[h.upper()] = e
+
+
+def load_catalog(path=DEFAULT_CATALOG):
+    """Recipes for tested conversions: {"entries": [{"id", "name", "game", "tier", "converter", "known_issues",
+    "note", "inputs": {"sha1": [...]}, "outputs": {"sha1": [...], "codes_sha1": [...]}}]} -> Catalog. The job's
+    "catalog" names another file; "" or false turns it off; without the key, catalog.json next to this file."""
     if not path or not os.path.isfile(path):
-        return {}
+        return Catalog()
     with open(path, encoding='utf-8') as f:
-        cat = json.load(f)
-    out = {}
-    for e in cat.get('entries', []):
-        for h in e.get('inputs', {}).get('sha1', []):
-            out[h.upper()] = e
-    return out
+        return Catalog(json.load(f))
 
 
 class Ledger:
@@ -658,7 +677,7 @@ def classify_rom(rom, order, res, roms, catalog, base_game=None):
         return res.update(status='stock', game=other[0], why='%s, a stock ROM (a base for patches)' % other[1])
     entry = catalog.get(sha1)
     if entry:
-        return res.update(status='ready', game=entry.get('game'), route=entry.get('route', 'recipe'),
+        return res.update(status='ready', game=entry.get('game'), route=entry.get('route', 'survey'),
                           tier=entry.get('tier', 'verified'), catalog=entry.get('id'), name=entry.get('name'),
                           id=entry.get('id'))
     game, region = game_for_code(hdr['code'])
@@ -1078,9 +1097,31 @@ class Builder:
     def catalog_entry(self, res):
         return self.catalog.get((res.get('sha1') or '').upper()) or self.catalog.get((res.get('result_sha1') or '').upper())
 
-    def aki_tier(self, res):
-        e = self.catalog_entry(res)
-        return (e or {}).get('tier') or UNTESTED
+    def judge(self, res, game, files):
+        """The tier a built conversion shows (#172, #224): the catalog's, only when what was built is what the AKI
+        team tested (its patch makes the same ROM from the port ROM, or, without a patch, the same codes.txt);
+        otherwise Untested, with a note when the input is a known hack that built differently.
+        Returns (tier, catalog entry or None, note)."""
+        outputs = getattr(self.catalog, 'outputs', {})
+        codes = getattr(self.catalog, 'codes', {})
+        got = None
+        nrm = files.get('conversion/patch.nrm')
+        if nrm is not None and game in self.roms.by_game:
+            bps = zipfile.ZipFile(io.BytesIO(nrm)).read('patch.bps')
+            target = self.mod('make_patch_mod').bps_apply(self.roms.by_game[game][1], bps)
+            res['output_sha1'] = hashlib.sha1(target).hexdigest().upper()
+            got = outputs.get(res['output_sha1'])
+            del target
+        elif 'conversion/codes.txt' in files:
+            res['codes_sha1'] = hashlib.sha1(files['conversion/codes.txt']).hexdigest().upper()
+            got = codes.get(res['codes_sha1'])
+        if got is not None and got.get('game') in (None, game):
+            return got.get('tier') or UNTESTED, got, None
+        known = self.catalog_entry(res)
+        if known:
+            return UNTESTED, known, ('built differently from the build the AKI team tested as %s (a newer or older '
+                                     'converter?)' % TIER_LABELS.get(known.get('tier'), known.get('tier')))
+        return UNTESTED, None, None
 
     # -- hack ROMs and patches
 
@@ -1174,7 +1215,7 @@ class Builder:
                 'base_rom': {'sha1': GAMES[game]['sha1'].upper(), 'revision': PORT_TAGS[game]},
                 'description': entry.get('description') or '%s, converted by aki-import from your own files.' % name,
                 'components': {}, 'source': {'mode': 'byo', 'imported_from': imported_from},
-                'survey': {'aki_tier': self.aki_tier(res), 'catalog': entry.get('id'), 'engine': ENGINE_VERSION,
+                'survey': {'aki_tier': UNTESTED, 'catalog': entry.get('id'), 'engine': ENGINE_VERSION,
                            'input_sha1': res.get('sha1') or res.get('key'), 'result_sha1': res.get('result_sha1')}}
 
     def package_manifest(self, kind, game, pid, name, payload, base_sha1=None, requires=None):
@@ -1188,10 +1229,27 @@ class Builder:
         return m
 
     def write_conversion(self, res, game, cid, name, aki, files, requires=None):
+        tier, entry, note = self.judge(res, game, files)
+        survey = aki.setdefault('survey', {})
+        survey.update(aki_tier=tier, aki_tier_label=TIER_LABELS.get(tier, tier), catalog=(entry or {}).get('id'))
+        for k in ('output_sha1', 'codes_sha1'):
+            if res.get(k):
+                survey[k] = res[k]
+        if entry and tier != UNTESTED:
+            for k in ('known_issues', 'note'):
+                if entry.get(k):
+                    survey[k] = entry[k]
+            res.update(known_issues=entry.get('known_issues', []), note=entry.get('note'))
+        if note:
+            survey['tier_note'] = note
+            res['tier_note'] = note
         man = self.package_manifest('conversion', game, cid, name, {'folder': 'conversion/'}, GAMES[game]['sha1'],
                                     requires)
-        if aki['survey']['aki_tier'] == UNTESTED:
+        if tier == UNTESTED:
             man['short_description'] = 'Untested: built by aki-import, not tested by the AKI team; it may crash.'
+        else:
+            man['short_description'] = ('%s by the AKI team. %s' % (TIER_LABELS.get(tier, tier), (entry or {}).get(
+                'note') or '')).strip()[:250]
         files = dict(files)
         files['aki-package.json'] = json.dumps(man, indent=2).encode('utf-8')
         files['conversion/aki.json'] = json.dumps(aki, indent=2).encode('utf-8')
@@ -1200,7 +1258,7 @@ class Builder:
         path = zip_write(path, files)
         res.setdefault('packages', []).append(path)
         res.update(status='converted', package=path, game=game, id=cid, name=name, version=self.version,
-                   aki_tier=aki['survey']['aki_tier'])
+                   aki_tier=tier, aki_tier_label=TIER_LABELS.get(tier, tier))
 
     # -- texture packs
 
@@ -1474,7 +1532,7 @@ def run_job(job, emit, patchfmt=None):
     if patchfmt is None and not job.get('no_patchfmt'):
         patchfmt = load_patchfmt(job.get('patchfmt'))
     roms = Roms(job.get('roms'), job.get('rom_dirs'))
-    catalog = load_catalog(job.get('catalog'))
+    catalog = load_catalog(job.get('catalog', DEFAULT_CATALOG))
     builder = Builder(job, roms, catalog) if job.get('build') else None
     ledger = Ledger(job.get('ledger')) if job.get('ledger') else None
     taken = ledger.ids() if ledger else set()
@@ -1550,8 +1608,8 @@ def game_paths(specs, flag):
 
 def cmd_plan(args):
     job = dict(paths=args.paths, roms=game_paths(args.rom, '--rom'), rom_dirs=args.rom_dir or [], ledger=args.ledger,
-               catalog=args.catalog, sevenzip=args.sevenzip, work=args.work, patchfmt=args.patchfmt,
-               record=getattr(args, 'record', False))
+               catalog=DEFAULT_CATALOG if args.catalog is None else args.catalog, sevenzip=args.sevenzip,
+               work=args.work, patchfmt=args.patchfmt, record=getattr(args, 'record', False))
     if args.cmd == 'build':
         if args.game and args.game not in GAMES:
             raise ImportError_('unknown game %r in --game (games: %s)' % (args.game, ', '.join(GAMES)))
@@ -1589,7 +1647,7 @@ def main(argv=None):
         p.add_argument('--rom', action='append', metavar='GAME=PATH', help='a port ROM (repeatable)')
         p.add_argument('--rom-dir', action='append', metavar='DIR', help='find stock ROMs in DIR (by SHA-1)')
         p.add_argument('--ledger', help='import ledger JSON (read; build and --record update it)')
-        p.add_argument('--catalog', help='recipe catalog JSON')
+        p.add_argument('--catalog', help='recipe catalog JSON (default: catalog.json here; "" for none)')
         p.add_argument('--sevenzip', help='7zr.exe')
         p.add_argument('--work', help='temp folder for unpacked archives and build files')
         p.add_argument('--patchfmt', help='romhack/patchfmt.py to use')

@@ -214,18 +214,75 @@ class HackRoutes(BuildBase):
         self.assertEqual(by['somehack.xdelta']['status'], 'needs-rom')
         self.assertIn('WWF No Mercy ROM the port uses', by['somehack.xdelta']['needs'])
 
-    def test_catalog_tier_and_converter_override(self):
+    def catalog(self, entries):
+        return self.write('catalog.json', json.dumps({'entries': entries}).encode())
+
+    def test_catalog_tier_needs_the_tested_output(self):
         hack = bytearray(STOCK)
         hack[0x2000] ^= 3
         sha1 = hashlib.sha1(bytes(hack)).hexdigest().upper()
-        cat = self.write('catalog.json', json.dumps({'entries': [{'id': 'known-hack', 'name': 'Known Hack', 'game': 'nomercy',
-            'tier': 'verified', 'converter': 'derelink', 'inputs': {'sha1': [sha1]}}]}).encode())
+        # The stand-in derelink's patch makes exactly the hack ROM: that's the tested output here.
+        cat = self.catalog([{'id': 'known-hack', 'name': 'Known Hack', 'game': 'nomercy', 'tier': 'verified',
+                             'converter': 'derelink', 'known_issues': ['aki-roadmap#1'], 'note': 'Mind the gap.',
+                             'inputs': {'sha1': [sha1]}, 'outputs': {'sha1': [sha1]}}])
         r = self.build_one([self.write('in/k.z64', bytes(hack))], fakes={'derelink': fake_derelink()}, catalog=cat)
-        self.assertEqual((r['status'], r['id'], r['converter'], r['aki_tier']),
-                         ('converted', 'known-hack', 'derelink', 'verified'))
+        self.assertEqual((r['status'], r['id'], r['converter'], r['aki_tier'], r['aki_tier_label']),
+                         ('converted', 'known-hack', 'derelink', 'verified', 'Verified'))
         m, aki, _ = check_package(self, r['package'], 'conversion')
-        self.assertEqual(aki['survey']['catalog'], 'known-hack')
-        self.assertNotIn('short_description', m)
+        self.assertEqual((aki['survey']['catalog'], aki['survey']['output_sha1'], aki['survey']['known_issues']),
+                         ('known-hack', sha1, ['aki-roadmap#1']))
+        self.assertEqual(m['short_description'], 'Verified by the AKI team. Mind the gap.')
+
+    def test_known_input_built_differently_is_untested_with_a_note(self):
+        hack = bytearray(STOCK)
+        hack[0x2000] ^= 3
+        sha1 = hashlib.sha1(bytes(hack)).hexdigest().upper()
+        cat = self.catalog([{'id': 'known-hack', 'name': 'Known Hack', 'game': 'nomercy', 'tier': 'verified',
+                             'inputs': {'sha1': [sha1]}, 'outputs': {'sha1': ['0' * 40]}}])
+        r = self.build_one([self.write('in/k.z64', bytes(hack))], catalog=cat)
+        self.assertEqual((r['status'], r['id'], r['aki_tier']), ('converted', 'known-hack', 'untested'))
+        self.assertIn('built differently', r['tier_note'])
+        _, aki, _ = check_package(self, r['package'], 'conversion')
+        self.assertEqual(aki['survey']['aki_tier_label'], 'Untested')
+        self.assertNotIn('known_issues', aki['survey'])
+
+    def test_output_match_alone_gives_the_tier(self):
+        hack = bytearray(STOCK)
+        hack[0x2000] ^= 7
+        sha1 = hashlib.sha1(bytes(hack)).hexdigest().upper()
+        cat = self.catalog([{'id': 'other', 'name': 'Other', 'game': 'nomercy', 'tier': 'experimental',
+                             'outputs': {'sha1': [sha1]}}])
+        r = self.build_one([self.write('in/x.z64', bytes(hack))], catalog=cat)   # make_patch_mod: output = hack
+        self.assertEqual((r['aki_tier'], r['id']), ('experimental', 'x'))
+
+    def test_codes_only_conversion_matches_by_codes(self):
+        bundle = Pj64Bundles.bundle(self)
+        first = self.build_one([bundle])
+        codes_sha1 = first['codes_sha1']
+        cat = self.catalog([{'id': 'mymod', 'name': 'My Mod', 'game': 'nomercy', 'tier': 'verified',
+                             'outputs': {'codes_sha1': [codes_sha1]}}])
+        os.remove(first['package'])
+        r = self.build_one([bundle], catalog=cat)
+        self.assertEqual(r['aki_tier'], 'verified')
+
+    def test_shipped_catalog_loads_and_holds_hashes_only(self):
+        cat = ai.load_catalog()
+        self.assertTrue(len(cat.outputs) >= 30 and len(cat) >= 5)
+        raw = json.load(open(ai.DEFAULT_CATALOG, encoding='utf-8'))
+        self.assertEqual(set(raw['tiers']), {'verified', 'experimental', 'unsupported', 'untested'})
+        for e in raw['entries']:
+            self.assertRegex(e['id'], ID_RE)
+            self.assertIn(e['tier'], raw['tiers'])
+            self.assertIn(e['game'], ai.GAMES)
+            for hashes in list(e.get('inputs', {}).values()) + list(e['outputs'].values()):
+                for h in hashes:
+                    self.assertRegex(h, r'^[0-9A-F]{40}$')
+        self.assertLess(os.path.getsize(ai.DEFAULT_CATALOG), 64 << 10)
+
+    def test_catalog_off(self):
+        hack = bytearray(STOCK)
+        hack[0x2000] ^= 1
+        self.assertEqual(self.build_one([self.write('in/a.z64', bytes(hack))], catalog='')['aki_tier'], 'untested')
 
     def test_ledger_records_the_package_and_a_rerun_is_have_it(self):
         hack = bytearray(STOCK)
