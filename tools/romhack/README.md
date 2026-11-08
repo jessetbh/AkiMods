@@ -65,12 +65,14 @@ python -m unittest discover -s tools\romhack\tests
 
 `aki_import.py` is the converter's engine: it takes a pile of downloads (ROMs in any byte order,
 patch files, `.nrm` mods, AKI packages, Project64 bundles, texture packs, zips, 7z archives) and
-says what each item is, which game it is for and how it would be built. First slice: it
-classifies; building the conversions is the next step.
+says what each item is, which game it is for, and (`build`) builds it into a package the
+launcher installs.
 
 ```powershell
 python -I tools\romhack\aki_import.py plan C:\Downloads\wrestling --rom nomercy=nomercy.z64 `
     --rom-dir C:\ROMs --ledger import-ledger.json --json results.json
+python -I tools\romhack\aki_import.py build C:\Downloads\wrestling --rom nomercy=nomercy.z64 `
+    --out Converted --ledger Converted\import-ledger.json
 ```
 
 - **Status per item:** `ready` (with a `route`: `survey` for hack ROMs, which `aki-hack survey`
@@ -81,8 +83,8 @@ python -I tools\romhack\aki_import.py plan C:\Downloads\wrestling --rom nomercy=
   name, route and tier; any other hack is `untested` (#224, #172).
 - **Patches** are applied with `patchfmt.py` in this folder (`detect(patch)`,
   `apply(patch, source) -> (target, info)`, `PatchError`). Every given stock ROM is tried as the
-  base, port ROMs first; stock ROMs among the inputs count too. Without `patchfmt.py` patches are
-  still recognised but reported as failed.
+  base, port ROMs first; stock ROMs among the inputs count too. Until `patchfmt.py` lands,
+  `patchfmt_standin.py` stands in (BPS, IPS and UPS; xdelta, APS, PPF and .rup are refused by name).
 - **Ids and names** come from the catalog, else from the file or folder name, made unique
   against the ledger.
 - **The ledger** keys every input by content hash (a ROM in `.z64` order, a patch file, a
@@ -97,8 +99,40 @@ python -I tools\romhack\aki_import.py plan C:\Downloads\wrestling --rom nomercy=
   item.
 - **`worker`** is the launcher's entry point: one process per batch (process starts are
   expensive on some PCs, aki-roadmap#111). It reads one JSON job on stdin (`paths`, `roms` or
-  `rom_dirs`, `ledger`, `record`, `catalog`, `sevenzip`, `work`) and writes one JSON line per item, then a
-  `done` line with counts.
+  `rom_dirs`, `ledger`, `record`, `catalog`, `sevenzip`, `work`; for a build also `build`, `out`,
+  `game`, `version`, `authors`) and writes one JSON line per item, then a `done` line with counts.
+
+### Building (`build`)
+
+Every `ready` item becomes a #154 package (`aki-package.json`, the shape the launcher's package
+installer takes) in `<out>\<game>\<id>-<version>.zip`; the item's status becomes `converted`
+with `package`, `converter` and `aki_tier`:
+
+| Input | Converter | Package |
+|---|---|---|
+| hack ROM, or a patch applied to its base | `aki_hack.survey_rom` against the port's ROM: `patch-data` / `patch-code` -> `make_patch_mod`; `rev0-layout` / `relinked` / `restructured` -> `derelink` (also when make_patch_mod refuses); `different-base` refused | conversion: `conversion/aki.json` + `conversion/patch.nrm` (its mod id is the conversion id), + `codes.txt` when derelink writes a code watch table |
+| Project64 bundle (folder or zip) | `aki_conv` import-pj64 with the item's id and name; the game from the bundle's cheat sections or a ROM in it, else `game` | conversion (codes, saves, docs, patch) + a texture-pack package it requires |
+| texture pack (rt64, Rice, Jabo, `.hts`) | images copied, an `rt64.json` added for Rice/Jabo (`autoPath`), `.hts` exported to Rice PNGs | texture-pack (`payload.folder: textures/`) |
+
+- Conversions are built against the port's ROM, so a build needs it (`--rom`, `--rom-dir`, or
+  among the inputs): without it a hack is `needs-rom`.
+- A hack the catalog doesn't know is labelled **Untested** (`survey.aki_tier: "untested"` in
+  `aki.json`, and the package's `short_description` says so). A catalog entry can set `converter`.
+- `make_patch_mod` needs function tables to tell in-place hacks apart. Developers pass `--repo
+  GAME=<game repo>` (its `RecompiledFuncs`); without tables the survey can't tell, and derelink
+  (which has a layout for all six games) builds the hack.
+- The tools run in the one worker process; a hacked ROM is on disk only while derelink reads it.
+- `.nrm` mods and existing packages stay `ready` (`route: install`): the launcher installs them as
+  they are.
+
+### The converter's tools
+
+All of them live here (owner decision on #228: the player-facing converter is in AkiMods):
+`derelink.py` (+ `layouts/`, `mips.py`, `bps.py`; from the No Mercy repo's `tools/romhack`),
+`aki_hack.py` (survey), `aki_conv.py` + `aki_conv_bake.py` (import-pj64, pack-nrm, bake-codes,
+translate-codes) and `aki_save.py` (save conversion; from AkiTools). They find each other in this
+folder; `AKI_DEPOT` points the developer-only lookups (stock ROMs and RecompiledFuncs in game
+repos) at a depot.
 
 Stdlib only. It never writes ROM bytes; tests use synthetic images
 (`python -m unittest discover -s tools/romhack/tests`).

@@ -3,28 +3,44 @@
 Subcommands (python aki_import.py <cmd> -h):
   plan   PATH...   scan files, folders and archives; say what each item is, which game, and what would be done with
                    it (a table, or --json). Reads only; --ledger marks inputs imported before (have-it).
+  build  PATH... --out CONVERTED
+                   plan, then build every ready item into a #154 package (aki-package.json) under CONVERTED\\<game>\\
+                   <id>-<version>.zip, which the launcher's package installer installs: a conversion (hack ROMs,
+                   patches, Project64 bundles) or a texture-pack. Records what it built in --ledger.
   worker           the launcher's entry point: one process per batch (aki-roadmap#111: process starts leak pool on
                    this machine class). Reads one JSON job from stdin, writes one JSON line per item to stdout, then a
                    "done" line. Job: {"paths": [...], "roms": {"<game>": "<port ROM path>"} | "rom_dirs": [...],
-                   "ledger": "<path>", "record": false, "catalog": "<path>", "sevenzip": "<7zr.exe>", "work": "<temp folder>"}.
+                   "ledger": "<path>", "record": false, "catalog": "<path>", "sevenzip": "<7zr.exe>", "work": "<temp folder>",
+                   "build": false, "out": "<Converted folder>", "game": "<game for packs that don't say>",
+                   "version": "1.0.0", "authors": [...], "repos": {"<game>": "<game repo, developers>"}}.
 
 What an item can be (kind): rom, patch, nrm (a patch mod), package (aki-package.json / aki.json), pj64-bundle (a
 Project64 folder with the mod's cheats, save and textures), texture-pack (rt64 / rice / jabo / hts naming), save,
 codes, unknown. Archives (zip read in memory; 7z unpacked once by 7zr) are opened and their contents sorted.
 
 Result status per item:
-  ready        identified; `route` says which converter builds it (make_patch_mod / derelink after `aki-hack survey
-               --layout`, import-pj64, texture wrap, install). Unknown hacks are `tier: "untested"` (#224, #172).
+  ready        identified; `route` says which converter builds it (survey -> make_patch_mod / derelink, import-pj64,
+               texture wrap, install). Unknown hacks are `tier: "untested"` (#224, #172).
+  converted    (build) built: `package` (and `packages` when a bundle also made a texture package), `converter`,
+               `aki_tier` (the catalog's tier, else "untested"), `survey_tier` for hacks
   stock        the unmodified game: nothing to convert
   have-it      the ledger already has this exact input
-  needs-rom    a patch whose base ROM isn't among the ROMs given (`needs` names it when the patch says which)
+  needs-rom    a patch whose base ROM isn't among the ROMs given (`needs` names it when the patch says which); in a
+               build, also a hack whose port ROM wasn't given (conversions are built against it)
+  needs-game   (build) a texture pack or bundle that doesn't say its game: pass "game"
   unsupported  not one of the six AKI games, another region, a format we don't read yet (`why`)
   failed       something broke (`why`)
 
+Routes (build): a hack ROM or applied patch is surveyed (aki_hack.survey_rom against the port's ROM): in-place hacks
+(patch-data / patch-code) go to make_patch_mod, moved or reshaped code (rev0-layout / relinked / restructured) to
+derelink, and derelink also takes what make_patch_mod refuses; different-base is refused. A Project64 bundle goes
+through aki_conv import-pj64 with an automatic id and name. The tools run in this process.
+
 Patch files are applied by patchfmt.py next to this file (aki-roadmap#228: detect(patch) and
-apply(patch, source) -> (target, info), raising PatchError); without it patches are still recognised by their magic
-but reported as failed. Stdlib only; run with python -I. Writes nothing but --ledger / --json and, for 7z archives,
-files under --work. Never writes ROM bytes anywhere else.
+apply(patch, source) -> (target, info), raising PatchError); until Worker Ant's module lands, patchfmt_standin.py
+(BPS, IPS, UPS) stands in. Stdlib only; run with python -I. Writes nothing but --ledger / --json, files under --work
+(7z unpacks, build temp files, removed after each item) and, for build, the packages under --out. A hacked ROM is
+on disk only while derelink reads it; packages never hold ROM bytes beyond what a patch carries.
 """
 import argparse
 import hashlib
@@ -39,6 +55,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 import zipfile
 
 TOOLS = os.path.dirname(os.path.abspath(__file__))
@@ -87,18 +104,28 @@ class ImportError_(Exception):
 # ------------------------------------------------------------------------------------ helpers
 
 def load_patchfmt(path=None):
-    """Worker Ant's romhack/patchfmt.py (detect, apply, PatchError), or None when it isn't installed."""
+    """Worker Ant's romhack/patchfmt.py (detect, apply, PatchError); until it lands, patchfmt_standin.py next to this
+    file (BPS, IPS, UPS). None when neither is there."""
     candidates = [path] if path else []
     if os.environ.get('AKI_PATCHFMT'):
         candidates.append(os.environ['AKI_PATCHFMT'])
-    candidates.append(os.path.join(TOOLS, 'patchfmt.py'))
+    candidates += [os.path.join(TOOLS, 'patchfmt.py'), os.path.join(TOOLS, 'patchfmt_standin.py')]
     for c in candidates:
         if c and os.path.isfile(c):
-            spec = importlib.util.spec_from_file_location('patchfmt', c)
-            mod = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(mod)
-            return mod
+            return load_module(os.path.splitext(os.path.basename(c))[0], c)
     return None
+
+
+def load_module(name, path=None):
+    """A Python file as a module; by default the one called name.py next to this file (its folder goes on sys.path,
+    since derelink imports mips and bps)."""
+    path = path or os.path.join(TOOLS, name + '.py')
+    if TOOLS not in sys.path:
+        sys.path.insert(0, TOOLS)
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
 def to_z64(data):
@@ -571,7 +598,8 @@ class Ledger:
         return {e['id'] for e in self.entries.values() if e.get('id')}
 
     def record(self, key, result):
-        self.entries[key] = {k: result.get(k) for k in ('status', 'kind', 'game', 'id', 'name', 'route', 'tier', 'item')}
+        self.entries[key] = {k: result.get(k) for k in ('status', 'kind', 'game', 'id', 'name', 'route', 'tier', 'item',
+                                                         'package', 'packages', 'version', 'aki_tier', 'converter')}
         self.entries[key].update(engine=ENGINE_VERSION, time=time.strftime('%Y-%m-%dT%H:%M:%S'))
 
     def save(self):
@@ -630,7 +658,7 @@ def classify_rom(rom, order, res, roms, catalog):
     return res.update(status='ready', game=game, route='survey', tier='untested')
 
 
-def classify_patch(data, fmt, res, roms, catalog, patchfmt):
+def classify_patch(data, fmt, res, roms, catalog, patchfmt, keep=False):
     sha1 = hashlib.sha1(data).hexdigest().upper()
     res.update(kind='patch', format=fmt, sha1=sha1)
     if fmt in ('ppf', 'rup') and patchfmt is None:
@@ -675,6 +703,8 @@ def classify_patch(data, fmt, res, roms, catalog, patchfmt):
         if k in sub and sub[k] is not None:
             res[k] = sub[k]
     res['result_sha1'] = sub.get('sha1')
+    if keep and res.get('status') == 'ready':
+        res['_rom'] = out       # for the build step; never emitted
     if catalog.get(sha1) and res.get('status') == 'ready':
         e = catalog[sha1]
         res.update(catalog=e.get('id'), tier=e.get('tier', 'verified'), id=e.get('id'), name=e.get('name'))
@@ -745,7 +775,7 @@ def part_of(name):
     return None
 
 
-def classify_file(src, res, roms, catalog, patchfmt):
+def classify_file(src, res, roms, catalog, patchfmt, keep=False):
     """By the first bytes and the extension; the whole file is read only for ROMs, patches and mods."""
     head = src.head
     ext = os.path.splitext(src.label.lower())[1]
@@ -754,7 +784,10 @@ def classify_file(src, res, roms, catalog, patchfmt):
         rom, order = to_z64(data)
         if rom is None:
             return res.update(kind='rom', status='failed', why='a byte-swapped ROM whose length does not divide')
-        return classify_rom(rom, order, res, roms, catalog)
+        classify_rom(rom, order, res, roms, catalog)
+        if keep and res.get('status') == 'ready':
+            res['_rom'] = rom   # for the build step; never emitted
+        return res
     if head.startswith(b'PK\x03\x04'):
         data = src.data()
         try:
@@ -770,7 +803,7 @@ def classify_file(src, res, roms, catalog, patchfmt):
         fmt = patch_format(data, patchfmt)
         if not fmt:
             return res.update(kind='patch', status='failed', why='%s file without a patch header' % ext)
-        return classify_patch(data, fmt, res, roms, catalog, patchfmt)
+        return classify_patch(data, fmt, res, roms, catalog, patchfmt, keep)
     if ext in SAVE_EXTS:
         return res.update(kind='save', save=SAVE_EXTS[ext], status='unsupported',
                           why='a save on its own: import it with the conversion it belongs to')
@@ -780,14 +813,14 @@ def classify_file(src, res, roms, catalog, patchfmt):
     return res.update(kind='unknown', status='unsupported', why='not a ROM, patch, mod, bundle or texture pack')
 
 
-def classify(src, roms, catalog, ledger, patchfmt, taken):
+def classify(src, roms, catalog, ledger, patchfmt, taken, keep=False):
     res = {'item': src.label}
     try:
         if src.kind_hint == 'folder':
             key = folder_key(src)
             classify_folder(src, res, roms)
         else:
-            classify_file(src, res, roms, catalog, patchfmt)
+            classify_file(src, res, roms, catalog, patchfmt, keep)
             key = res.get('sha1')   # ROMs (.z64 order), patches, mods; loose saves and unknown files have none
     except TooBig as e:
         return dict(item=src.label, status='unsupported', why=str(e)), None
@@ -811,6 +844,535 @@ def classify(src, roms, catalog, ledger, patchfmt, taken):
     return res, key
 
 
+# ------------------------------------------------------------------------------------ build (routes that build)
+
+# The runtime's game ids (mod.json game_id, aki-package.json game_id) and the revision tag each port runs.
+GAME_IDS = {'wt': 'wcwnwoworldtour', 'revenge': 'wcwnworevenge', 'wm2k': 'wwfwm2k', 'vpw64': 'vpw64',
+            'nomercy': 'wwfnomercy', 'vpw2': 'vpw2'}
+PORT_TAGS = {'nomercy': 'nomercy-rev1', 'wt': 'wt-rev0', 'revenge': 'revenge-rev0', 'wm2k': 'wm2k-rev0',
+             'vpw64': 'vpw64-rev0', 'vpw2': 'vpw2-rev0'}
+# aki-hack survey tiers -> converter. patch-* run in place (make_patch_mod); moved or reshaped code goes to derelink.
+IN_PLACE_TIERS = ('patch-data', 'patch-code')
+DERELINK_TIERS = ('rev0-layout', 'relinked', 'restructured')
+REFUSED_TIERS = ('different-base',)
+UNTESTED = 'untested'      # the fourth tier (#224, #172): built, not tested by us
+MAX_EXTRACT = 4 << 30      # a zipped bundle unpacked for import-pj64 may take at most this much disk
+TEXTURE_EXTS = ('.png', '.dds')
+PACKAGE_ID = re.compile(r'^[a-z0-9_.-]{1,48}$')
+
+
+class BuildError(Exception):
+    """One item couldn't be built (the message says why); the batch goes on."""
+
+
+def package_id(cid):
+    """An id the launcher takes (a-z 0-9 _ . -, at most 48, no trailing '.')."""
+    cid = re.sub(r'[^a-z0-9_.-]+', '-', cid.lower()).strip('-.')[:48].rstrip('.')
+    return cid or 'import'
+
+
+def zip_write(path, files):
+    """files: {name in the zip: bytes or a path on disk}. Deterministic (sorted, fixed times), written to a temp file
+    and moved into place, so a half-written package never sits in Converted."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + '.tmp'
+    with zipfile.ZipFile(tmp, 'w', zipfile.ZIP_DEFLATED) as z:
+        for name in sorted(files):
+            info = zipfile.ZipInfo(name, date_time=(2000, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.external_attr = 0o644 << 16
+            data = files[name]
+            if isinstance(data, (bytes, bytearray)):
+                z.writestr(info, data)
+            else:
+                with open(data, 'rb') as f, z.open(info, 'w', force_zip64=True) as out:
+                    shutil.copyfileobj(f, out, 1 << 20)
+    os.replace(tmp, path)
+    return path
+
+
+def sha256_path(path):
+    h = hashlib.sha256()
+    with open(path, 'rb') as f:
+        for chunk in iter(lambda: f.read(1 << 20), b''):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def nrm_with_id(nrm, mod_id):
+    """The .nrm with mod.json's id set to mod_id (a #154 conversion's patch mod id is the conversion id)."""
+    src = zipfile.ZipFile(io.BytesIO(nrm))
+    mod = json.loads(src.read('mod.json'))
+    if mod.get('id') == mod_id:
+        return nrm
+    mod['id'] = mod_id
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
+        for info in src.infolist():
+            z.writestr(info.filename, json.dumps(mod, indent=4) if info.filename == 'mod.json' else src.read(info))
+    return buf.getvalue()
+
+
+class Builder:
+    """Builds ready items into #154 packages under <out>\\<game>\\ (aki-roadmap#228 phase 1, #154 one package format):
+      - a hack ROM (or a patch, applied): aki_hack.survey_rom decides the converter (make_patch_mod for in-place hacks,
+        derelink for moved or reshaped code; derelink also when make_patch_mod refuses) -> a conversion package
+      - a Project64 bundle: aki_conv import-pj64 with an automatic id and name -> a conversion package (+ a texture
+        package when the bundle has textures)
+      - a texture pack (rt64 / Rice / Jabo / .hts): -> a texture-pack package
+    Everything runs in this process. Hacked ROM bytes go to a temp file only for derelink, deleted right after; no
+    package holds ROM bytes beyond what the patch carries."""
+
+    def __init__(self, job, roms, catalog):
+        if not job.get('out'):
+            raise ImportError_('build needs "out" (the Converted folder)')
+        self.out = job['out']
+        self.job = job
+        self.roms = roms
+        self.catalog = catalog
+        self.version = job.get('version') or '1.0.0'
+        self.authors = job.get('authors') or ['unknown']
+        self.repos = job.get('repos') or {}        # game -> a game repo root (developers: its RecompiledFuncs)
+        self.game_hint = job.get('game')
+        self._mods = {}
+        self._tables = {}
+
+    def mod(self, name):
+        if name not in self._mods:
+            self._mods[name] = load_module(name)
+        return self._mods[name]
+
+    def tmp(self, name):
+        d = os.path.join(work_dir(self.job), 'build')
+        os.makedirs(d, exist_ok=True)
+        return os.path.join(d, name)
+
+    # -- what the converters need from the port
+
+    def port(self, game):
+        """(path or None, z64 bytes) of the port's ROM, or BuildError."""
+        got = self.roms.by_game.get(game)
+        if not got:
+            raise NeedsRom('the %s ROM the port uses (the conversion is built against it)' % GAMES[game]['title'])
+        return got
+
+    def port_file(self, game):
+        """A path holding the port's ROM in .z64 order (the given file, or a temp copy for a byte-swapped one)."""
+        path, rom = self.port(game)
+        if path and os.path.isfile(path) and file_head(path, 4) == ROM_MAGICS[0]:
+            return path
+        tmp = self.tmp('port-%s.z64' % game)
+        if not os.path.isfile(tmp):
+            with open(tmp, 'wb') as f:
+                f.write(rom)
+        return tmp
+
+    def tables(self, game):
+        """(sections, repaired names) for make_patch_mod / aki_hack, or (None, set()). From a game repo's
+        RecompiledFuncs (job "repos"); without one, survey can't tell in-place hacks apart and derelink builds them."""
+        if game not in self._tables:
+            mpm = self.mod('make_patch_mod')
+            sections, repaired = None, set()
+            repo = self.repos.get(game)
+            if repo:
+                inl = os.path.join(repo, 'RecompiledFuncs', 'recomp_overlays.inl')
+                if os.path.isfile(inl):
+                    sections = mpm.load_sections(inl)
+                    repaired = mpm.load_repaired(os.path.join(repo, 'RecompiledFuncs', 'repaired_functions.txt')) or set()
+            self._tables[game] = (sections, repaired)
+        return self._tables[game]
+
+    # -- one item
+
+    def build(self, src, res):
+        """Build one ready item; res gets status converted (package / packages, converter, aki_tier) or failed /
+        needs-rom / needs-game with why. Never raises."""
+        rom = res.pop('_rom', None)
+        try:
+            kind = res.get('kind')
+            if kind in ('rom', 'patch'):
+                self.build_hack(res, rom)
+            elif kind == 'pj64-bundle':
+                self.build_bundle(src, res)
+            elif kind == 'texture-pack':
+                self.build_textures(src, res)
+            else:
+                return res   # .nrm and packages: the launcher installs them as they are
+        except NeedsRom as e:
+            res.update(status='needs-rom', needs=str(e), why='needs %s' % e)
+        except NeedsGame as e:
+            res.update(status='needs-game', why=str(e))
+        except BuildError as e:
+            res.update(status='failed', why=str(e))
+        except Exception as e:  # one broken build never stops the batch
+            res.update(status='failed', why='%s: %s' % (type(e).__name__, e))
+        return res
+
+    def catalog_entry(self, res):
+        return self.catalog.get((res.get('sha1') or '').upper()) or self.catalog.get((res.get('result_sha1') or '').upper())
+
+    def aki_tier(self, res):
+        e = self.catalog_entry(res)
+        return (e or {}).get('tier') or UNTESTED
+
+    # -- hack ROMs and patches
+
+    def build_hack(self, res, rom):
+        if rom is None:
+            raise BuildError('the ROM bytes were not kept for the build')
+        game = res.get('game')
+        if game not in GAMES:
+            raise BuildError('no port for this game')
+        port_path, port_rom = self.port(game)
+        entry = self.catalog_entry(res) or {}
+        aki_hack = self.mod('aki_hack')
+        stock = aki_hack.Stock(roms={game: port_rom}, tables=self.tables)
+        survey = aki_hack.survey_rom(res['item'].split('!')[-1], rom, stock) or {}
+        tier = survey.get('tier', 'unknown')
+        res.update(survey_tier=tier, survey_reasons=survey.get('reasons', [])[:6])
+        if tier == 'stock':
+            res.update(status='stock', why='the stock ROM: nothing to convert')
+            return
+        if tier in REFUSED_TIERS or survey.get('game') not in (None, game):
+            raise BuildError('%s: %s' % (tier, '; '.join(survey.get('reasons', [])) or 'another release'))
+        converter = entry.get('converter')
+        if converter not in ('make_patch_mod', 'derelink'):
+            converter = 'make_patch_mod' if tier in IN_PLACE_TIERS else 'derelink'
+        cid = package_id(res['id'])
+        name = res.get('name') or cid
+        log, codes = [], None
+        nrm = None
+        if converter == 'make_patch_mod':
+            sections, repaired = self.tables(game)
+            try:
+                nrm, report = self.mod('make_patch_mod').make_mod(
+                    port_rom, rom, sections, repaired, GAME_IDS[game], cid, name, self.version, self.authors,
+                    log=log.append)
+                res['converter_report'] = report
+            except self.mod('make_patch_mod').PatchModError as e:
+                log.append('make_patch_mod: %s; trying derelink' % e)
+                res['fallback'] = 'make_patch_mod refused (%s); built with derelink' % e
+                converter = 'derelink'
+        if converter == 'derelink':
+            nrm, codes = self.derelink(game, rom, cid, name, log)
+        res['converter'] = converter
+        res['converter_log'] = log[-12:]
+        aki = self.conversion_manifest(res, game, cid, name, imported_from=res['kind'])
+        files = {'conversion/patch.nrm': nrm_with_id(nrm, cid)}
+        aki['components']['patch'] = {'file': 'patch.nrm', 'mod_id': cid}
+        if codes:
+            files['conversion/codes.txt'] = codes.encode('utf-8')
+            aki['components']['codes'] = {'file': 'codes.txt', 'format': 'aki-codes', 'rom': PORT_TAGS[game]}
+        aki['survey'].update(tier=tier, converter=converter)
+        self.write_conversion(res, game, cid, name, aki, files)
+
+    def derelink(self, game, rom, cid, name, log):
+        """(nrm bytes, codes.txt text or None) from derelink build against the port's ROM, in this process."""
+        dl = self.mod('derelink')
+        port_path = self.port_file(game)
+        if dl.find_layout(self.port(game)[1]) is None:
+            raise BuildError('derelink has no layout for this %s ROM' % GAMES[game]['title'])
+        folder = self.tmp('derelink-%s' % cid)
+        shutil.rmtree(folder, ignore_errors=True)
+        os.makedirs(folder)
+        hack_path = os.path.join(folder, 'hack.z64')
+        nrm_path = os.path.join(folder, 'patch.nrm')
+        try:
+            with open(hack_path, 'wb') as f:
+                f.write(rom)
+            ok, out = run_main(dl, ['build', '--base', port_path, '--hack', hack_path, '--id', cid, '--name', name,
+                                    '--version', self.version, '--out', nrm_path])
+            log += [l for l in out.splitlines() if l.strip()][-20:]
+            if not ok or not os.path.isfile(nrm_path):
+                raise BuildError('derelink: %s' % (out.strip().splitlines() or ['failed'])[-1])
+            with open(nrm_path, 'rb') as f:
+                nrm = f.read()
+            watch = os.path.join(folder, dl.CODE_WATCH_FILE)
+            codes = None
+            if os.path.isfile(watch):
+                with open(watch, encoding='utf-8') as f:
+                    codes = f.read()
+            return nrm, codes
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)   # the hacked ROM never stays on disk
+
+    # -- packages
+
+    def conversion_manifest(self, res, game, cid, name, imported_from):
+        entry = self.catalog_entry(res) or {}
+        return {'format': 'aki-conversion', 'format_version': 1, 'id': cid, 'name': name, 'version': self.version,
+                'authors': list(self.authors), 'game': game,
+                'base_rom': {'sha1': GAMES[game]['sha1'].upper(), 'revision': PORT_TAGS[game]},
+                'description': entry.get('description') or '%s, converted by aki-import from your own files.' % name,
+                'components': {}, 'source': {'mode': 'byo', 'imported_from': imported_from},
+                'survey': {'aki_tier': self.aki_tier(res), 'catalog': entry.get('id'), 'engine': ENGINE_VERSION,
+                           'input_sha1': res.get('sha1') or res.get('key'), 'result_sha1': res.get('result_sha1')}}
+
+    def package_manifest(self, kind, game, pid, name, payload, base_sha1=None, requires=None):
+        m = {'format': 1, 'kind': kind, 'id': pid, 'version': self.version, 'game_id': GAME_IDS[game],
+             'display_name': name, 'authors': list(self.authors), 'payload': payload,
+             'source': 'aki-import %s' % ENGINE_VERSION}
+        if base_sha1:
+            m['base_rom'] = {'sha1': [base_sha1.lower()]}
+        if requires:
+            m['requires'] = {'packages': requires}
+        return m
+
+    def write_conversion(self, res, game, cid, name, aki, files, requires=None):
+        man = self.package_manifest('conversion', game, cid, name, {'folder': 'conversion/'}, GAMES[game]['sha1'],
+                                    requires)
+        if aki['survey']['aki_tier'] == UNTESTED:
+            man['short_description'] = 'Untested: built by aki-import, not tested by the AKI team; it may crash.'
+        files = dict(files)
+        files['aki-package.json'] = json.dumps(man, indent=2).encode('utf-8')
+        files['conversion/aki.json'] = json.dumps(aki, indent=2).encode('utf-8')
+        path = zip_write(os.path.join(self.out, game, '%s-%s.zip' % (cid, self.version)), files)
+        res.setdefault('packages', []).append(path)
+        res.update(status='converted', package=path, game=game, id=cid, name=name, version=self.version,
+                   aki_tier=aki['survey']['aki_tier'])
+
+    # -- texture packs
+
+    def texture_game(self, res):
+        game = res.get('game') or self.game_hint
+        if game not in GAMES:
+            raise NeedsGame('which game this texture pack is for (pass "game")')
+        return game
+
+    def texture_files(self, src):
+        """{relative name: path or bytes reader} of the pack's images and rt64.json, and a cleanup list."""
+        if src.zip_path is None and src.zip_blob is None:
+            return {n: os.path.join(src.path, n) for n in src.names}
+        z = zipfile.ZipFile(src.zip_path if src.zip_path is not None else io.BytesIO(src.zip_blob))
+        out = {}
+        names = strip_root([i.filename for i in z.infolist() if not i.is_dir()])
+        for info, rel in zip([i for i in z.infolist() if not i.is_dir()], names):
+            if os.path.splitext(rel.lower())[1] in TEXTURE_EXTS + ('.json', '.hts', '.htc'):
+                if member_problem(info):
+                    continue
+                out[rel] = (z, info)
+        return out
+
+    def build_textures(self, src, res, name=None, pid=None):
+        game = self.texture_game(res)
+        files = self.texture_files(src)
+        naming = res.get('naming')
+        payload = {}
+        hts = [n for n in files if n.lower().endswith('.hts')]
+        export = None
+        if naming == 'hts' or (hts and not any(n.lower().endswith(TEXTURE_EXTS) for n in files)):
+            export = self.tmp('hts-%s' % package_id(res['id']))
+            shutil.rmtree(export, ignore_errors=True)
+            conv = self.mod('aki_conv')
+            rom_name = rom_header(self.roms.by_game[game][1])['name'] if game in self.roms.by_game else 'GAME'
+            count = 0
+            for n in hts:
+                path = self.materialise(files[n], os.path.join(export, '_in', os.path.basename(n)))
+                got, _ = conv.hts_to_rice_pngs(path, os.path.join(export, os.path.splitext(os.path.basename(n))[0]),
+                                               rom_name)
+                for p in got:
+                    payload[os.path.relpath(p, export).replace(os.sep, '/')] = p
+                    count += 1
+            if not count:
+                raise BuildError('the .hts cache has no RGBA8 textures to export')
+            naming = 'rice'
+        else:
+            for n, v in files.items():
+                low = n.lower()
+                if low.endswith(TEXTURE_EXTS) or os.path.basename(low) == 'rt64.json':
+                    payload[n] = v
+        try:
+            if not any(os.path.basename(n.lower()) == 'rt64.json' for n in payload):
+                payload['rt64.json'] = json.dumps({'configuration': {'autoPath': naming, 'configurationVersion': 3,
+                                                                     'hashVersion': 5}, 'textures': []},
+                                                  indent=2).encode('utf-8')
+            images = sum(n.lower().endswith(TEXTURE_EXTS) for n in payload)
+            name = name or res.get('name') or 'Textures'
+            pid = package_id(pid or res['id'])
+            man = self.package_manifest('texture-pack', game, pid, name, {'folder': 'textures/'})
+            out = {'aki-package.json': json.dumps(man, indent=2).encode('utf-8')}
+            for n, v in payload.items():
+                out['textures/' + n] = self.member_bytes(v)
+            path = zip_write(os.path.join(self.out, game, '%s-%s.zip' % (pid, self.version)), out)
+        finally:
+            if export:
+                shutil.rmtree(export, ignore_errors=True)
+        res.setdefault('packages', []).append(path)
+        res.update(status='converted', package=path, game=game, id=pid, version=self.version, images=images,
+                   converter='texture-pack', naming=naming)
+        return path
+
+    @staticmethod
+    def member_bytes(v):
+        if isinstance(v, tuple):      # (zip, info): read now, one member at a time
+            z, info = v
+            return z.read(info)
+        return v                      # a path (streamed by zip_write) or bytes
+
+    def materialise(self, v, path):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        if isinstance(v, str):
+            return v
+        with open(path, 'wb') as f:
+            f.write(self.member_bytes(v))
+        return path
+
+    # -- Project64 bundles
+
+    def bundle_folder(self, src):
+        """The bundle on disk: its folder, or a zipped bundle unpacked (safe names only, MAX_EXTRACT in all)."""
+        if src.zip_path is None and src.zip_blob is None:
+            return src.path, None
+        dest = self.tmp('bundle-%s' % hashlib.sha1(src.label.encode('utf-8')).hexdigest()[:12])
+        shutil.rmtree(dest, ignore_errors=True)
+        z = zipfile.ZipFile(src.zip_path if src.zip_path is not None else io.BytesIO(src.zip_blob))
+        members = [i for i in z.infolist() if not i.is_dir()]
+        names = strip_root([i.filename for i in members])
+        total = 0
+        for info, rel in zip(members, names):
+            rel = rel.replace('\\', '/')
+            parts = [p for p in rel.split('/') if p not in ('', '.')]
+            if not parts or '..' in parts or ':' in rel or rel.startswith('/'):
+                continue
+            why = member_problem(info)
+            if why:
+                continue
+            total += info.file_size
+            if total > MAX_EXTRACT:
+                shutil.rmtree(dest, ignore_errors=True)
+                raise BuildError('the bundle unpacks to more than %d GB' % (MAX_EXTRACT >> 30))
+            path = os.path.join(dest, *parts)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with z.open(info) as fin, open(path, 'wb') as fout:
+                shutil.copyfileobj(fin, fout, 1 << 20)
+        return dest, dest
+
+    def bundle_game(self, folder, conv):
+        """The game a bundle's cheats are for (their Project64 section), else a ROM header in it, else "game"."""
+        keys = {k: g for k, g in ((k, conv.GAME_OF_TAG.get(t)) for k, t in conv.CHT_SECTIONS.items()) if g}
+        for g, (_, rom) in self.roms.by_game.items():
+            keys[conv.cht_key(rom)] = g
+        found = set()
+        for d, _, fs in os.walk(folder):
+            for f in fs:
+                p = os.path.join(d, f)
+                low = f.lower()
+                if low.endswith(('.cht', '.ini')) and os.path.getsize(p) < (8 << 20):
+                    with open(p, encoding='latin-1') as fh:
+                        for key in conv.parse_cht(fh.read()):
+                            if key.upper() in keys:
+                                found.add(keys[key.upper()])
+                elif low.endswith(ROM_EXTS) and os.path.getsize(p) >= 0x1000:
+                    rom, _ = to_z64(file_head(p, 0x40))
+                    if rom is not None:
+                        g, region = game_for_code(rom_header(rom)['code'])
+                        if g and not region:
+                            found.add(g)
+        if len(found) == 1:
+            return found.pop()
+        if self.game_hint in GAMES:
+            return self.game_hint
+        raise NeedsGame('which game this Project64 bundle is for (%s; pass "game")' % (
+            'its cheats name ' + ', '.join(sorted(found)) if found else 'no cheats or ROM in it name a game'))
+
+    def build_bundle(self, src, res):
+        conv = self.mod('aki_conv')
+        folder, unpacked = self.bundle_folder(src)
+        try:
+            game = self.bundle_game(folder, conv)
+            entry = self.catalog_entry(res) or {}
+            cid = package_id(res['id'])
+            name = res.get('name') or cid
+            port_path = self.port_file(game) if game in self.roms.by_game else None
+            conv.PORT_CHT_KEYS[game] = conv.cht_key(self.roms.by_game[game][1]) if port_path else ''
+            out = self.tmp('pj64-%s' % cid)
+            shutil.rmtree(out, ignore_errors=True)
+            os.makedirs(out)
+            a = argparse.Namespace(
+                folder=folder, game=game, id=cid, name=entry.get('cheat_name') or name, team='aki-import',
+                version=self.version, author=list(self.authors), description=entry.get('description', ''),
+                credits=entry.get('credits', ''), permission=entry.get('permission', ''), url=entry.get('url', ''),
+                include=entry.get('include'), all_cheats=bool(entry.get('all_cheats')), map=None, textures=None,
+                base_rom=None, port_rom=port_path, derelink=conv.DERELINK, bake_exclude=list(entry.get('bake_exclude', [])),
+                out=out, patch_mod_id=cid)
+            ok, log = run_main(types.SimpleNamespace(main=lambda argv: conv.cmd_import_pj64(a)), [])
+            if not ok:
+                raise BuildError('import-pj64: %s' % (log.strip().splitlines() or ['failed'])[-1])
+            report = json.loads(log[log.index('{'):]) if '{' in log else {}
+            res.update(game=game, converter='import-pj64', parts=sorted(report.get('parts', {})))
+            self.repack_pj64(res, game, cid, name, out, report)
+        finally:
+            if unpacked:
+                shutil.rmtree(unpacked, ignore_errors=True)
+            shutil.rmtree(self.tmp('pj64-%s' % package_id(res.get('id') or 'x')), ignore_errors=True)
+
+    def repack_pj64(self, res, game, cid, name, out, report):
+        """import-pj64's Thunderstore-shaped zips -> #154 packages: a conversion (aki.json + its files under
+        conversion/) and, when the bundle had textures, a texture-pack package the conversion requires."""
+        conv_zip = report.get('package')
+        if not conv_zip or not os.path.isfile(conv_zip):
+            raise BuildError('import-pj64 wrote no package')
+        requires = None
+        tex_zips = [os.path.join(out, f) for f in os.listdir(out) if f.endswith('.zip') and
+                    os.path.join(out, f) != conv_zip]
+        with zipfile.ZipFile(conv_zip) as z:
+            aki = json.loads(z.read('aki.json'))
+            files = {}
+            for info in z.infolist():
+                if info.is_dir() or info.filename in ('aki.json', 'manifest.json'):
+                    continue
+                files['conversion/' + info.filename] = z.read(info)
+        tex = aki['components'].get('textures')
+        if tex and tex_zips:
+            tid = package_id(cid + '-textures')
+            sub = {'id': tid, 'name': name + ' textures', 'kind': 'texture-pack'}
+            with zipfile.ZipFile(tex_zips[0]) as tz:
+                ta = json.loads(tz.read('aki.json'))
+                folder = ta.get('folder', '').rstrip('/') + '/'
+                payload = {}
+                for info in tz.infolist():
+                    if not info.is_dir() and info.filename.startswith(folder):
+                        payload['textures/' + info.filename[len(folder):]] = tz.read(info)
+            man = self.package_manifest('texture-pack', game, tid, sub['name'], {'folder': 'textures/'})
+            payload['aki-package.json'] = json.dumps(man, indent=2).encode('utf-8')
+            path = zip_write(os.path.join(self.out, game, '%s-%s.zip' % (tid, self.version)), payload)
+            res.setdefault('packages', []).append(path)
+            aki['components']['textures'] = {'package': tid, 'version': self.version, 'naming': tex.get('naming'),
+                                             'optional': bool(tex.get('optional'))}
+            requires = [tid]
+        patch = aki['components'].get('patch')
+        if patch and 'conversion/' + patch.get('file', '') in files:
+            files['conversion/' + patch['file']] = nrm_with_id(files['conversion/' + patch['file']], cid)
+            patch['mod_id'] = cid
+        aki.update(id=cid, name=name, version=self.version)
+        aki.setdefault('survey', {}).update(self.conversion_manifest(res, game, cid, name, 'project64-bundle')['survey'])
+        aki['survey']['converter'] = 'import-pj64'
+        self.write_conversion(res, game, cid, name, aki, files, requires)
+
+
+class NeedsRom(Exception):
+    pass
+
+
+class NeedsGame(Exception):
+    pass
+
+
+def run_main(module, argv):
+    """A tool's main(argv) in this process (one process per batch, aki-roadmap#111): (ok, its printed output)."""
+    import contextlib
+    out = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(out):
+            module.main(argv)
+        return True, out.getvalue()
+    except SystemExit as e:
+        if e.code not in (None, 0):
+            out.write('\n%s\n' % e.code)
+            return False, out.getvalue()
+        return True, out.getvalue()
+
+
 # ------------------------------------------------------------------------------------ batch
 
 def run_job(job, emit, patchfmt=None):
@@ -820,6 +1382,7 @@ def run_job(job, emit, patchfmt=None):
         patchfmt = load_patchfmt(job.get('patchfmt'))
     roms = Roms(job.get('roms'), job.get('rom_dirs'))
     catalog = load_catalog(job.get('catalog'))
+    builder = Builder(job, roms, catalog) if job.get('build') else None
     ledger = Ledger(job.get('ledger')) if job.get('ledger') else None
     taken = ledger.ids() if ledger else set()
     sources, notes = [], []
@@ -843,21 +1406,27 @@ def run_job(job, emit, patchfmt=None):
             counts[n['status']] = counts.get(n['status'], 0) + 1
             emit(dict(n, event='item'))
         for s in sources:
-            res, key = classify(s, roms, catalog, ledger, patchfmt, taken)
+            res, key = classify(s, roms, catalog, ledger, patchfmt, taken, keep=builder is not None)
             if key and key in seen:
                 res = dict(item=s.label, status='have-it', key=key, why='same input as another item in this batch')
             if key:
                 seen.add(key)
+            if builder is not None and res.get('status') == 'ready':
+                builder.build(s, res)
+            res = {k: v for k, v in res.items() if not k.startswith('_')}
             counts[res['status']] = counts.get(res['status'], 0) + 1
-            if ledger is not None and job.get('record') and key and res['status'] == 'ready':
-                ledger.record(key, res)
+            record = job.get('record') or builder is not None
+            if ledger is not None and record and key and res['status'] in ('ready', 'converted'):
+                if builder is None or res['status'] == 'converted':
+                    ledger.record(key, res)
             emit(dict(res, event='item'))
-        if ledger is not None and job.get('record'):
+        if ledger is not None and (job.get('record') or builder is not None):
             ledger.save()
     finally:
         if job.get('_tmp'):
             shutil.rmtree(job['_tmp'], ignore_errors=True)
-    summary = dict(event='done', counts=counts, engine=ENGINE_VERSION, patch_engine=patchfmt is not None)
+    summary = dict(event='done', counts=counts, engine=ENGINE_VERSION, patch_engine=patchfmt is not None,
+                   patch_engine_name=getattr(patchfmt, '__name__', None))
     emit(summary)
     return summary
 
@@ -872,17 +1441,27 @@ def cmd_worker(args):
     return 0
 
 
-def cmd_plan(args):
-    roms = {}
-    for spec in args.rom or []:
+def game_paths(specs, flag):
+    out = {}
+    for spec in specs or []:
         if '=' not in spec:
-            raise ImportError_('--rom takes GAME=PATH (games: %s)' % ', '.join(GAMES))
+            raise ImportError_('%s takes GAME=PATH (games: %s)' % (flag, ', '.join(GAMES)))
         g, p = spec.split('=', 1)
         if g not in GAMES:
-            raise ImportError_('unknown game %r in --rom (games: %s)' % (g, ', '.join(GAMES)))
-        roms[g] = p
-    job = dict(paths=args.paths, roms=roms, rom_dirs=args.rom_dir or [], ledger=args.ledger, catalog=args.catalog,
-               sevenzip=args.sevenzip, work=args.work, patchfmt=args.patchfmt, record=args.record)
+            raise ImportError_('unknown game %r in %s (games: %s)' % (g, flag, ', '.join(GAMES)))
+        out[g] = p
+    return out
+
+
+def cmd_plan(args):
+    job = dict(paths=args.paths, roms=game_paths(args.rom, '--rom'), rom_dirs=args.rom_dir or [], ledger=args.ledger,
+               catalog=args.catalog, sevenzip=args.sevenzip, work=args.work, patchfmt=args.patchfmt,
+               record=getattr(args, 'record', False))
+    if args.cmd == 'build':
+        if args.game and args.game not in GAMES:
+            raise ImportError_('unknown game %r in --game (games: %s)' % (args.game, ', '.join(GAMES)))
+        job.update(build=True, out=args.out, repos=game_paths(args.repo, '--repo'), game=args.game,
+                   version=args.version, authors=args.author or None)
     results = []
     run_job(job, results.append)
     if args.json:
@@ -895,6 +1474,8 @@ def cmd_plan(args):
         detail = r.get('why') or r.get('route') or ''
         if r.get('needs'):
             detail = 'needs %s' % r['needs']
+        if r.get('package'):
+            detail = '%s via %s -> %s' % (r.get('aki_tier') or '', r.get('converter'), r['package'])
         print('%-11s %-8s %-18s %-8s %s  [%s]' % (r['status'], r.get('game') or '-', what, r.get('tier') or '',
                                                  detail, r['item']))
     done = results[-1]
@@ -906,18 +1487,28 @@ def cmd_plan(args):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     sub = ap.add_subparsers(dest='cmd', required=True)
-    p = sub.add_parser('plan', help='scan and classify, print what would be done')
-    p.add_argument('paths', nargs='+')
-    p.add_argument('--rom', action='append', metavar='GAME=PATH', help='a port ROM (repeatable)')
-    p.add_argument('--rom-dir', action='append', metavar='DIR', help='find stock ROMs in DIR (by SHA-1)')
-    p.add_argument('--ledger', help='import ledger JSON (read, and updated)')
-    p.add_argument('--record', action='store_true', help='record the ready items in the ledger')
-    p.add_argument('--catalog', help='recipe catalog JSON')
-    p.add_argument('--sevenzip', help='7zr.exe')
-    p.add_argument('--work', help='temp folder for unpacked 7z archives')
-    p.add_argument('--patchfmt', help='romhack/patchfmt.py to use')
-    p.add_argument('--json', help='write the results here')
-    p.set_defaults(func=cmd_plan)
+    for name in ('plan', 'build'):
+        p = sub.add_parser(name, help='scan and classify, print what would be done' if name == 'plan' else
+                           'scan, classify and build every ready item into a package under --out')
+        p.add_argument('paths', nargs='+')
+        p.add_argument('--rom', action='append', metavar='GAME=PATH', help='a port ROM (repeatable)')
+        p.add_argument('--rom-dir', action='append', metavar='DIR', help='find stock ROMs in DIR (by SHA-1)')
+        p.add_argument('--ledger', help='import ledger JSON (read; build and --record update it)')
+        p.add_argument('--catalog', help='recipe catalog JSON')
+        p.add_argument('--sevenzip', help='7zr.exe')
+        p.add_argument('--work', help='temp folder for unpacked archives and build files')
+        p.add_argument('--patchfmt', help='romhack/patchfmt.py to use')
+        p.add_argument('--json', help='write the results here')
+        if name == 'plan':
+            p.add_argument('--record', action='store_true', help='record the ready items in the ledger')
+        else:
+            p.add_argument('--out', required=True, help='the Converted folder: packages go to OUT\\<game>\\')
+            p.add_argument('--game', help='the game for texture packs and bundles that do not say')
+            p.add_argument('--version', default='1.0.0', help='package version (x.y.z)')
+            p.add_argument('--author', action='append', help='package author (repeatable)')
+            p.add_argument('--repo', action='append', metavar='GAME=PATH',
+                           help='(developers) a game repo whose RecompiledFuncs tell in-place hacks apart')
+        p.set_defaults(func=cmd_plan)
     w = sub.add_parser('worker', help='one batch: JSON job on stdin, JSON lines out')
     w.set_defaults(func=cmd_worker)
     args = ap.parse_args(argv)

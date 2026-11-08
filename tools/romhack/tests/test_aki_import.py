@@ -402,9 +402,9 @@ class Hostile(Base):
         srcs = []
         real = ai.classify
 
-        def spy(src, *a):
+        def spy(src, *a, **kw):
             srcs.append(src)
-            return real(src, *a)
+            return real(src, *a, **kw)
         ai.classify = spy
         try:
             self.run_job([self.write('in/a.z64', fake_rom(salt=1)), self.stock_path])

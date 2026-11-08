@@ -280,9 +280,92 @@ def escaping_branches(sections, hack, funcs):
     return out
 
 
+# ------------------------------------------------------------------------------------ build
+
+class PatchModError(Exception):
+    """The mod can't be written (the hack needs a full recompile, or the patch would carry too many literal bytes)."""
+
+
+def make_mod(base, hack, sections, repaired, game_id, mod_id, name, version='1.0.0', authors=(), description='',
+             minimum_recomp_version='0.1.0', force=False, max_target_read_mb=2.0, build=True, log=print):
+    """The report (printed through log) and, with build, the .nrm bytes. Returns (nrm bytes or None, report dict).
+    Raises PatchModError when it won't write the mod. Both ROMs are big-endian .z64 bytes."""
+    for label, rom in (('base', base), ('hack', hack)):
+        if rom[:4] != b'\x80\x37\x12\x40':
+            raise PatchModError('%s ROM is not big-endian .z64 (starts %s)' % (label, rom[:4].hex()))
+    funcs, loose = changed_functions(sections, base, hack)
+    code_bytes = sum(s[3] for s in sections)
+    diff = sum(1 for a, b in zip(base, hack) if a != b) + abs(len(base) - len(hack))
+    log('ROM: %d bytes -> %d bytes, %d bytes differ' % (len(base), len(hack), diff))
+    log('code: %d sections, %d bytes; %d changed function(s), %d changed byte(s) outside functions'
+        % (len(sections), code_bytes, len(funcs), loose))
+    repaired = set(repaired or ())
+    for section, func, vram, size, words in funcs:
+        log('  %-12s %-28s 0x%08X  %5d bytes, %d word(s) changed%s' % (section, func, vram, size, words,
+            '  [REPAIRED by the pipeline: recompiling it at load drops the repair]' if func in repaired else ''))
+    risky = [f for f in funcs if f[1] in repaired]
+    if risky:
+        log('WARNING: %d changed function(s) carry pipeline repairs or hand-edits; test them closely.' % len(risky))
+    escapes = escaping_branches(sections, hack, funcs)
+    for func, pc, target, kind in escapes[:20]:
+        log('  ESCAPES: %s %s at 0x%08X -> 0x%08X (not in the function or a known function start)' % (func, kind, pc, target))
+    if escapes:
+        log('BLOCKED: %d branch(es)/call(s) leave their function: the hack restructures code across'
+            ' function boundaries or calls code it added, so it needs a full recompile.' % len(escapes))
+    if escapes or loose:
+        log('-> needs a full recompile of the hacked ROM; a patch mod would not run it correctly.')
+    elif funcs:
+        log('-> changes code: needs a runtime that recompiles changed functions from the patch.')
+    else:
+        log('-> data-only: works with any runtime that supports ROM-patch mods.')
+    report = {'changed_functions': len(funcs), 'loose_bytes': loose, 'escapes': len(escapes),
+              'repaired_changed': sorted(f[1] for f in risky)}
+    if not build:
+        return None, report
+    if (escapes or loose) and not force:
+        raise PatchModError('the hack needs a full recompile (use --force to write it anyway)')
+
+    stats = {}
+    try:
+        patch = bps_encode(base, hack, max_target_read=int(max_target_read_mb * 1024 * 1024), stats=stats)
+    except TooMuchTargetRead as e:
+        raise PatchModError('%s. Bytes the stock ROM does not have go into the patch as they are,'
+                            ' so this mod could carry ROM data (or the hack is mostly new data). Check that --base is the'
+                            ' ROM the hack was made from; if the hack really adds that much of its own data, raise'
+                            ' --max-target-read. See %s' % (e, ISSUE))
+    assert bps_apply(base, patch) == hack, 'BPS round trip failed'
+    log('patch: %d bytes read in place, %d copied from elsewhere in the stock ROM, %d new (literal)'
+        % (stats['source_read'], stats['source_copy'], stats['target_read']))
+    report['patch'] = dict(stats, size=len(patch))
+    manifest = {
+        'game_id': game_id,
+        'id': mod_id,
+        'display_name': name,
+        'description': description or ('ROM hack patch: %s.' % name),
+        'short_description': 'ROM hack (patches your own ROM when the game starts).',
+        'version': version,
+        'authors': list(authors) or ['unknown'],
+        'minimum_recomp_version': minimum_recomp_version,
+    }
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
+        z.writestr('mod.json', json.dumps(manifest, indent=4))
+        z.writestr('patch.bps', patch)
+    return buf.getvalue(), report
+
+
+def load_repaired(path):
+    """Function names in repaired_functions.txt, or None when there's no such file."""
+    try:
+        with open(path, encoding='utf-8') as f:
+            return {l.strip() for l in f if l.strip() and not l.startswith('#')}
+    except FileNotFoundError:
+        return None
+
+
 # ------------------------------------------------------------------------------------ main
 
-def main():
+def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--base', required=True, help='stock ROM (.z64)')
     ap.add_argument('--hack', required=True, help='hacked ROM (.z64)')
@@ -300,77 +383,24 @@ def main():
     ap.add_argument('--force', action='store_true', help='write the mod even when the report says it needs a full recompile')
     ap.add_argument('--max-target-read', type=float, default=2.0, metavar='MB',
                     help='refuse when the patch would carry more than this many MB of literal bytes (default 2)')
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     base = open(args.base, 'rb').read()
     hack = open(args.hack, 'rb').read()
-    for label, rom in (('base', base), ('hack', hack)):
-        if rom[:4] != b'\x80\x37\x12\x40':
-            sys.exit('%s ROM is not big-endian .z64 (starts %s)' % (label, rom[:4].hex()))
-
     sections = load_sections(args.overlays)
-    funcs, loose = changed_functions(sections, base, hack)
-    code_bytes = sum(s[3] for s in sections)
-    diff = sum(1 for a, b in zip(base, hack) if a != b) + abs(len(base) - len(hack))
-    print('ROM: %d bytes -> %d bytes, %d bytes differ' % (len(base), len(hack), diff))
-    print('code: %d sections, %d bytes; %d changed function(s), %d changed byte(s) outside functions'
-          % (len(sections), code_bytes, len(funcs), loose))
-    repaired = set()
-    try:
-        repaired = {l.strip() for l in open(args.repaired, encoding='utf-8') if l.strip() and not l.startswith('#')}
-    except FileNotFoundError:
+    repaired = load_repaired(args.repaired)
+    if repaired is None:
         print('(no %s: run tools/romhack/list_repaired_functions.py to check for pipeline repairs)' % args.repaired)
-    for section, func, vram, size, words in funcs:
-        print('  %-12s %-28s 0x%08X  %5d bytes, %d word(s) changed%s' % (section, func, vram, size, words,
-              '  [REPAIRED by the pipeline: recompiling it at load drops the repair]' if func in repaired else ''))
-    risky = [f for f in funcs if f[1] in repaired]
-    if risky:
-        print('WARNING: %d changed function(s) carry pipeline repairs or hand-edits; test them closely.' % len(risky))
-    escapes = escaping_branches(sections, hack, funcs)
-    for func, pc, target, kind in escapes[:20]:
-        print('  ESCAPES: %s %s at 0x%08X -> 0x%08X (not in the function or a known function start)' % (func, kind, pc, target))
-    if escapes:
-        print('BLOCKED: %d branch(es)/call(s) leave their function: the hack restructures code across'
-              ' function boundaries or calls code it added, so it needs a full recompile.' % len(escapes))
-    if escapes or loose:
-        print('-> needs a full recompile of the hacked ROM; a patch mod would not run it correctly.')
-    elif funcs:
-        print('-> changes code: needs a runtime that recompiles changed functions from the patch.')
-    else:
-        print('-> data-only: works with any runtime that supports ROM-patch mods.')
-
-    if not args.out:
-        return
-    if (escapes or loose) and not args.force:
-        sys.exit('not writing %s: the hack needs a full recompile (use --force to write it anyway)' % args.out)
-
-    stats = {}
     try:
-        patch = bps_encode(base, hack, max_target_read=int(args.max_target_read * 1024 * 1024), stats=stats)
-    except TooMuchTargetRead as e:
-        sys.exit('not writing %s: %s. Bytes the stock ROM does not have go into the patch as they are,'
-                 ' so this mod could carry ROM data (or the hack is mostly new data). Check that --base is the'
-                 ' ROM the hack was made from; if the hack really adds that much of its own data, raise'
-                 ' --max-target-read. See %s' % (args.out, e, ISSUE))
-    assert bps_apply(base, patch) == hack, 'BPS round trip failed'
-    print('patch: %d bytes read in place, %d copied from elsewhere in the stock ROM, %d new (literal)'
-          % (stats['source_read'], stats['source_copy'], stats['target_read']))
-    manifest = {
-        'game_id': args.game_id,
-        'id': args.id,
-        'display_name': args.name,
-        'description': args.description or ('ROM hack patch: %s.' % args.name),
-        'short_description': 'ROM hack (patches your own ROM when the game starts).',
-        'version': args.version,
-        'authors': args.author or ['unknown'],
-        'minimum_recomp_version': args.minimum_recomp_version,
-    }
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
-        z.writestr('mod.json', json.dumps(manifest, indent=4))
-        z.writestr('patch.bps', patch)
-    open(args.out, 'wb').write(buf.getvalue())
-    print('wrote %s (patch %d bytes, mod %d bytes)' % (args.out, len(patch), len(buf.getvalue())))
+        nrm, _ = make_mod(base, hack, sections, repaired, args.game_id, args.id, args.name, args.version, args.author,
+                          args.description, args.minimum_recomp_version, args.force, args.max_target_read,
+                          build=bool(args.out))
+    except PatchModError as e:
+        sys.exit('not writing %s: %s' % (args.out, e) if args.out else str(e))
+    if nrm is None:
+        return
+    open(args.out, 'wb').write(nrm)
+    print('wrote %s (mod %d bytes)' % (args.out, len(nrm)))
 
 
 if __name__ == '__main__':
