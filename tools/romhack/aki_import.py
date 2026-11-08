@@ -190,7 +190,8 @@ def unique_id(base, taken):
     """base, or base-2, base-3 ... so it's not in taken (a set, updated)."""
     cid, n = base, 2
     while cid in taken:
-        cid = '%s-%d' % (base, n)
+        suffix = '-%d' % n
+        cid = base[:48 - len(suffix)].rstrip('-.') + suffix   # ids are at most 48: shorten before the suffix
         n += 1
     taken.add(cid)
     return cid
@@ -865,29 +866,46 @@ class BuildError(Exception):
     """One item couldn't be built (the message says why); the batch goes on."""
 
 
+DEVICE_NAMES = {'con', 'prn', 'aux', 'nul'} | {'com%d' % i for i in range(10)} | {'lpt%d' % i for i in range(10)}
+VERSION = re.compile(r'^\d+\.\d+\.\d+$')
+
+
 def package_id(cid):
-    """An id the launcher takes (a-z 0-9 _ . -, at most 48, no trailing '.')."""
-    cid = re.sub(r'[^a-z0-9_.-]+', '-', cid.lower()).strip('-.')[:48].rstrip('.')
-    return cid or 'import'
+    """An id the launcher's valid_id takes: a-z 0-9 _ . -, starting with a letter or digit, at most 48, no trailing
+    '.', not a Windows device name."""
+    cid = re.sub(r'[^a-z0-9_.-]+', '-', cid.lower())
+    cid = re.sub(r'^[^a-z0-9]+', '', cid)[:48].rstrip('.-_') or 'import'
+    if cid.split('.')[0] in DEVICE_NAMES:
+        cid = (cid[:44] + '-pkg')
+    return cid
 
 
 def zip_write(path, files):
     """files: {name in the zip: bytes or a path on disk}. Deterministic (sorted, fixed times), written to a temp file
-    and moved into place, so a half-written package never sits in Converted."""
+    and moved into place, so a half-written package never sits in Converted.
+    files: values may also be (zip, ZipInfo): that member is streamed, so a big pack is never held in memory."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + '.tmp'
-    with zipfile.ZipFile(tmp, 'w', zipfile.ZIP_DEFLATED) as z:
-        for name in sorted(files):
-            info = zipfile.ZipInfo(name, date_time=(2000, 1, 1, 0, 0, 0))
-            info.compress_type = zipfile.ZIP_DEFLATED
-            info.external_attr = 0o644 << 16
-            data = files[name]
-            if isinstance(data, (bytes, bytearray)):
-                z.writestr(info, data)
-            else:
-                with open(data, 'rb') as f, z.open(info, 'w', force_zip64=True) as out:
-                    shutil.copyfileobj(f, out, 1 << 20)
-    os.replace(tmp, path)
+    try:
+        with zipfile.ZipFile(tmp, 'w', zipfile.ZIP_DEFLATED) as z:
+            for name in sorted(files):
+                info = zipfile.ZipInfo(name, date_time=(2000, 1, 1, 0, 0, 0))
+                info.compress_type = zipfile.ZIP_DEFLATED
+                info.external_attr = 0o644 << 16
+                data = files[name]
+                if isinstance(data, (bytes, bytearray)):
+                    z.writestr(info, data)
+                    continue
+                src = data[0].open(data[1]) if isinstance(data, tuple) else open(data, 'rb')
+                with src, z.open(info, 'w', force_zip64=True) as out:
+                    shutil.copyfileobj(src, out, 1 << 20)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
     return path
 
 
@@ -931,11 +949,35 @@ class Builder:
         self.roms = roms
         self.catalog = catalog
         self.version = job.get('version') or '1.0.0'
+        if not VERSION.match(self.version):
+            raise ImportError_('version %r is not x.y.z (the launcher refuses other versions)' % self.version)
+        self.written = {}                           # (game, id) -> input key, for this batch
         self.authors = job.get('authors') or ['unknown']
         self.repos = job.get('repos') or {}        # game -> a game repo root (developers: its RecompiledFuncs)
         self.game_hint = job.get('game')
         self._mods = {}
         self._tables = {}
+
+    def cleanup(self):
+        """The batch's build temp folder (a byte-swapped port ROM's .z64 copy among others) goes at the end."""
+        shutil.rmtree(os.path.join(work_dir(self.job), 'build'), ignore_errors=True)
+
+    def target(self, game, pid, res):
+        """Converted\\<game>\\<id>-<version>.zip for this item: an id another item of this batch wrote, or a package
+        on disk built from another input, gets a -2, -3 ... suffix instead of being overwritten."""
+        key = res.get('key') or res.get('sha1')
+        base, n = pid, 2
+        while True:
+            path = os.path.join(self.out, game, '%s-%s.zip' % (pid, self.version))
+            owner = self.written.get((game, pid))
+            if owner is None and os.path.isfile(path):
+                owner = package_input(path) or '?'
+            if owner is None or owner == key:
+                self.written[(game, pid)] = key
+                return pid, path
+            suffix = '-%d' % n
+            pid = base[:48 - len(suffix)].rstrip('-.') + suffix
+            n += 1
 
     def mod(self, name):
         if name not in self._mods:
@@ -988,6 +1030,7 @@ class Builder:
         """Build one ready item; res gets status converted (package / packages, converter, aki_tier) or failed /
         needs-rom / needs-game with why. Never raises."""
         rom = res.pop('_rom', None)
+        self._key = res.get('key') or res.get('sha1')
         try:
             kind = res.get('kind')
             if kind in ('rom', 'patch'):
@@ -1038,7 +1081,9 @@ class Builder:
         converter = entry.get('converter')
         if converter not in ('make_patch_mod', 'derelink'):
             converter = 'make_patch_mod' if tier in IN_PLACE_TIERS else 'derelink'
-        cid = package_id(res['id'])
+        if converter == 'make_patch_mod' and self.tables(game)[0] is None:
+            converter = 'derelink'      # make_patch_mod needs function tables; derelink has a layout per game
+        cid, _ = self.target(game, package_id(res['id']), res)
         name = res.get('name') or cid
         log, codes = [], None
         nrm = None
@@ -1111,7 +1156,7 @@ class Builder:
     def package_manifest(self, kind, game, pid, name, payload, base_sha1=None, requires=None):
         m = {'format': 1, 'kind': kind, 'id': pid, 'version': self.version, 'game_id': GAME_IDS[game],
              'display_name': name, 'authors': list(self.authors), 'payload': payload,
-             'source': 'aki-import %s' % ENGINE_VERSION}
+             'source': 'aki-import %s' % ENGINE_VERSION, 'source_key': self._key}
         if base_sha1:
             m['base_rom'] = {'sha1': [base_sha1.lower()]}
         if requires:
@@ -1126,7 +1171,9 @@ class Builder:
         files = dict(files)
         files['aki-package.json'] = json.dumps(man, indent=2).encode('utf-8')
         files['conversion/aki.json'] = json.dumps(aki, indent=2).encode('utf-8')
-        path = zip_write(os.path.join(self.out, game, '%s-%s.zip' % (cid, self.version)), files)
+        cid2, path = self.target(game, cid, res)
+        assert cid2 == cid, 'the id was chosen before the package was made'
+        path = zip_write(path, files)
         res.setdefault('packages', []).append(path)
         res.update(status='converted', package=path, game=game, id=cid, name=name, version=self.version,
                    aki_tier=aki['survey']['aki_tier'])
@@ -1145,8 +1192,11 @@ class Builder:
             return {n: os.path.join(src.path, n) for n in src.names}
         z = zipfile.ZipFile(src.zip_path if src.zip_path is not None else io.BytesIO(src.zip_blob))
         out = {}
-        names = strip_root([i.filename for i in z.infolist() if not i.is_dir()])
-        for info, rel in zip([i for i in z.infolist() if not i.is_dir()], names):
+        members = [i for i in z.infolist() if not i.is_dir()]
+        names = strip_root([i.filename.replace('\\', '/') for i in members])
+        for info, rel in zip(members, names):
+            if '..' in rel.split('/') or rel.startswith('/') or ':' in rel:
+                continue
             if os.path.splitext(rel.lower())[1] in TEXTURE_EXTS + ('.json', '.hts', '.htc'):
                 if member_problem(info):
                     continue
@@ -1178,22 +1228,25 @@ class Builder:
             naming = 'rice'
         else:
             for n, v in files.items():
+                n = n.replace('\\', '/')
                 low = n.lower()
-                if low.endswith(TEXTURE_EXTS) or os.path.basename(low) == 'rt64.json':
+                if low == 'rt64.json':
+                    payload['rt64.json'] = v      # the launcher looks for exactly textures/rt64.json
+                elif low.endswith(TEXTURE_EXTS):
                     payload[n] = v
         try:
-            if not any(os.path.basename(n.lower()) == 'rt64.json' for n in payload):
+            if 'rt64.json' not in payload:
                 payload['rt64.json'] = json.dumps({'configuration': {'autoPath': naming, 'configurationVersion': 3,
                                                                      'hashVersion': 5}, 'textures': []},
                                                   indent=2).encode('utf-8')
             images = sum(n.lower().endswith(TEXTURE_EXTS) for n in payload)
             name = name or res.get('name') or 'Textures'
-            pid = package_id(pid or res['id'])
+            pid, path = self.target(game, package_id(pid or res['id']), res)
             man = self.package_manifest('texture-pack', game, pid, name, {'folder': 'textures/'})
             out = {'aki-package.json': json.dumps(man, indent=2).encode('utf-8')}
             for n, v in payload.items():
-                out['textures/' + n] = self.member_bytes(v)
-            path = zip_write(os.path.join(self.out, game, '%s-%s.zip' % (pid, self.version)), out)
+                out['textures/' + n] = v      # paths and zip members are streamed by zip_write
+            path = zip_write(path, out)
         finally:
             if export:
                 shutil.rmtree(export, ignore_errors=True)
@@ -1281,7 +1334,7 @@ class Builder:
         try:
             game = self.bundle_game(folder, conv)
             entry = self.catalog_entry(res) or {}
-            cid = package_id(res['id'])
+            cid, _ = self.target(game, package_id(res['id']), res)
             name = res.get('name') or cid
             port_path = self.port_file(game) if game in self.roms.by_game else None
             conv.PORT_CHT_KEYS[game] = conv.cht_key(self.roms.by_game[game][1]) if port_path else ''
@@ -1297,8 +1350,13 @@ class Builder:
                 out=out, patch_mod_id=cid)
             ok, log = run_main(types.SimpleNamespace(main=lambda argv: conv.cmd_import_pj64(a)), [])
             if not ok:
-                raise BuildError('import-pj64: %s' % (log.strip().splitlines() or ['failed'])[-1])
-            report = json.loads(log[log.index('{'):]) if '{' in log else {}
+                last = (log.strip().splitlines() or ['failed'])[-1]
+                if 'pass --port-rom' in last:
+                    raise NeedsRom('the %s ROM the port uses (the bundle has a ROM or patch to build)' %
+                                   GAMES[game]['title'])
+                raise BuildError('import-pj64: %s' % last)
+            at = log.rfind('\n{\n')
+            report = json.loads(log[at + 1:] if at >= 0 else log[log.index('{'):]) if '{' in log else {}
             res.update(game=game, converter='import-pj64', parts=sorted(report.get('parts', {})))
             self.repack_pj64(res, game, cid, name, out, report)
         finally:
@@ -1324,18 +1382,17 @@ class Builder:
                 files['conversion/' + info.filename] = z.read(info)
         tex = aki['components'].get('textures')
         if tex and tex_zips:
-            tid = package_id(cid + '-textures')
-            sub = {'id': tid, 'name': name + ' textures', 'kind': 'texture-pack'}
+            tid, path = self.target(game, package_id(cid + '-textures'), res)
             with zipfile.ZipFile(tex_zips[0]) as tz:
                 ta = json.loads(tz.read('aki.json'))
                 folder = ta.get('folder', '').rstrip('/') + '/'
                 payload = {}
                 for info in tz.infolist():
                     if not info.is_dir() and info.filename.startswith(folder):
-                        payload['textures/' + info.filename[len(folder):]] = tz.read(info)
-            man = self.package_manifest('texture-pack', game, tid, sub['name'], {'folder': 'textures/'})
-            payload['aki-package.json'] = json.dumps(man, indent=2).encode('utf-8')
-            path = zip_write(os.path.join(self.out, game, '%s-%s.zip' % (tid, self.version)), payload)
+                        payload['textures/' + info.filename[len(folder):]] = (tz, info)   # streamed
+                man = self.package_manifest('texture-pack', game, tid, name + ' textures', {'folder': 'textures/'})
+                payload['aki-package.json'] = json.dumps(man, indent=2).encode('utf-8')
+                path = zip_write(path, payload)
             res.setdefault('packages', []).append(path)
             aki['components']['textures'] = {'package': tid, 'version': self.version, 'naming': tex.get('naming'),
                                              'optional': bool(tex.get('optional'))}
@@ -1348,6 +1405,18 @@ class Builder:
         aki.setdefault('survey', {}).update(self.conversion_manifest(res, game, cid, name, 'project64-bundle')['survey'])
         aki['survey']['converter'] = 'import-pj64'
         self.write_conversion(res, game, cid, name, aki, files, requires)
+
+
+def package_input(path):
+    """The input key a package in Converted was built from (its conversion's survey.input_sha1), or None."""
+    try:
+        with zipfile.ZipFile(path) as z:
+            names = set(z.namelist())
+            if 'conversion/aki.json' in names:
+                return json.loads(z.read('conversion/aki.json')).get('survey', {}).get('input_sha1')
+            return json.loads(z.read('aki-package.json')).get('source_key')
+    except Exception:
+        return None
 
 
 class NeedsRom(Exception):
@@ -1423,6 +1492,8 @@ def run_job(job, emit, patchfmt=None):
         if ledger is not None and (job.get('record') or builder is not None):
             ledger.save()
     finally:
+        if builder is not None:
+            builder.cleanup()
         if job.get('_tmp'):
             shutil.rmtree(job['_tmp'], ignore_errors=True)
     summary = dict(event='done', counts=counts, engine=ENGINE_VERSION, patch_engine=patchfmt is not None,

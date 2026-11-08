@@ -106,9 +106,13 @@ def _bps(patch, source):
                 tgt_rel += off
                 if tgt_rel < 0 or tgt_rel >= len(out):
                     raise PatchError('BPS TargetCopy outside the output')
-                for _ in range(length):
-                    out.append(out[tgt_rel])
-                    tgt_rel += 1
+                # Byte by byte from earlier output, so a copy may overlap what it writes (a repeating run):
+                # the bytes from tgt_rel to the end, repeated, are the same thing in slices.
+                run = bytes(out[tgt_rel:tgt_rel + length])
+                if len(run) < length:
+                    run = (run * (length // len(run) + 1))[:length]
+                out += run
+                tgt_rel += length
     if len(out) != tgt_size or _crc(out) != tgt_crc:
         raise PatchError('BPS result does not match its checksum')
     return bytes(out)

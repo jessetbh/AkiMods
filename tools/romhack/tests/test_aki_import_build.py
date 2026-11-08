@@ -135,8 +135,7 @@ class HackRoutes(BuildBase):
         import make_patch_mod as mpm
         patch = zipfile.ZipFile(io.BytesIO(nrm)).read('patch.bps')
         self.assertEqual(mpm.bps_apply(STOCK, patch), bytes(hack))   # the patch rebuilds the hack from the stock ROM
-        self.assertFalse(os.listdir(os.path.join(self.dir, 'work', 'build')) if os.path.isdir(
-            os.path.join(self.dir, 'work', 'build')) else [])
+        self.assertFalse(os.path.exists(os.path.join(self.dir, 'work', 'build')))
 
     def test_patch_file_builds_from_the_applied_rom(self):
         r = self.build_one([self.write('in/hack.bps', t.make_patch(STOCK, [(0x2100, 7)]))])
@@ -322,8 +321,7 @@ class Pj64Bundles(BuildBase):
                     z.write(p, 'My Mod/' + os.path.relpath(p, folder).replace(os.sep, '/'))
         r = self.build_one([self.write('in/My Mod.zip', buf.getvalue())])
         self.assertEqual((r['status'], r['game']), ('converted', 'nomercy'), r)
-        build = os.path.join(self.dir, 'work', 'build')
-        self.assertFalse([d for d in os.listdir(build) if d.startswith(('bundle-', 'pj64-'))])
+        self.assertFalse(os.path.exists(os.path.join(self.dir, 'work', 'build')))   # unpacked bundle removed
 
     def test_bundle_for_no_known_game_needs_one(self):
         self.write('in/Mystery/Project64.cht', b'[12345678-9ABCDEF0-C:45]\nName=Something\n')
@@ -331,6 +329,81 @@ class Pj64Bundles(BuildBase):
             self.write('in/Mystery/Textures/X#%08X#0#2_all.png' % i, png(i))
         r = self.build_one([os.path.join(self.dir, 'in', 'Mystery')])
         self.assertEqual(r['status'], 'needs-game')
+
+
+class ReviewFixes(BuildBase):
+    def test_long_names_get_distinct_ids_and_packages(self):
+        name = 'A' * 60
+        paths = []
+        for i in range(2):
+            hack = bytearray(STOCK)
+            hack[0x2000 + i] ^= 1
+            paths.append(self.write('in/%d/%s.z64' % (i, name), bytes(hack)))
+        items, _ = self.build(paths)
+        ids = [i['id'] for i in items]
+        self.assertEqual(len(set(ids)), 2, ids)
+        self.assertTrue(all(len(i) <= 48 for i in ids))
+        self.assertEqual(len({i['package'] for i in items}), 2)
+
+    def test_existing_package_from_another_input_is_not_overwritten(self):
+        a, b = bytearray(STOCK), bytearray(STOCK)
+        a[0x2000] ^= 1
+        b[0x2000] ^= 2
+        first = self.build_one([self.write('in/1/Hack.z64', bytes(a))])
+        second = self.build_one([self.write('in/2/Hack.z64', bytes(b))])     # another batch, no ledger
+        self.assertNotEqual(first['package'], second['package'])
+        self.assertEqual(second['id'], 'hack-2')
+        again = self.build_one([self.write('in/3/Hack.z64', bytes(a))])      # the same input: rebuilt in place
+        self.assertEqual(again['package'], first['package'])
+
+    def test_package_ids_follow_the_launcher_rules(self):
+        self.assertEqual(ai.package_id('_hack'), 'hack')
+        self.assertEqual(ai.package_id('con'), 'con-pkg')
+        self.assertEqual(ai.package_id('nul.thing'), 'nul.thing-pkg')
+        self.assertEqual(ai.package_id('...'), 'import')
+        self.assertRegex(ai.package_id('x' * 80 + '.'), ID_RE)
+
+    def test_bad_version_is_refused(self):
+        with self.assertRaises(ai.ImportError_):
+            self.build([], version='1.0')
+
+    def test_catalog_make_patch_mod_without_tables_uses_derelink(self):
+        hack = bytearray(STOCK)
+        hack[0x2000] ^= 5
+        sha1 = hashlib.sha1(bytes(hack)).hexdigest().upper()
+        cat = self.write('catalog.json', json.dumps({'entries': [{'id': 'k', 'name': 'K', 'game': 'nomercy',
+            'tier': 'verified', 'converter': 'make_patch_mod', 'inputs': {'sha1': [sha1]}}]}).encode())
+        r = self.build_one([self.write('in/k.z64', bytes(hack))], fakes={'derelink': fake_derelink()}, catalog=cat,
+                           repos={})
+        self.assertEqual((r['status'], r['converter']), ('converted', 'derelink'))
+
+    def test_byte_swapped_port_rom_copy_is_removed(self):
+        port = self.write('roms/nm.v64', t.v64(STOCK))
+        hack = bytearray(STOCK)
+        hack[0x2000] ^= 1
+        r = self.build_one([self.write('in/x.z64', bytes(hack))], roms={'nomercy': port},
+                           fakes={'derelink': fake_derelink()}, repos={})
+        self.assertEqual(r['status'], 'converted')
+        self.assertFalse(os.path.exists(os.path.join(self.dir, 'work', 'build')))
+
+    def test_texture_zip_with_backslashes_and_an_uppercase_rt64_json(self):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, 'w') as z:
+            z.writestr('RT64.JSON', '{"configuration": {"autoPath": "rt64"}, "textures": []}')
+            for i in range(5):
+                z.writestr('sub\\%016x.png' % i, png(i))
+        r = self.build_one([self.write('in/p.zip', buf.getvalue())], game='nomercy')
+        self.assertEqual(r['status'], 'converted', r)
+        with zipfile.ZipFile(r['package']) as z:
+            names = z.namelist()
+        self.assertIn('textures/rt64.json', names)
+        self.assertFalse([n for n in names if '\\' in n])
+
+    def test_failed_zip_write_leaves_no_tmp(self):
+        path = os.path.join(self.out, 'nomercy', 'x-1.0.0.zip')
+        with self.assertRaises(OSError):
+            ai.zip_write(path, {'a.bin': os.path.join(self.dir, 'missing.bin')})
+        self.assertEqual(os.listdir(os.path.dirname(path)), [])
 
 
 class Standin(unittest.TestCase):
@@ -373,6 +446,47 @@ class Standin(unittest.TestCase):
         with self.assertRaises(self.pf.PatchError) as e:
             self.pf.apply(b'\xd6\xc3\xc4\x00rest', bytes(16))
         self.assertIn('xdelta', str(e.exception))
+
+    def test_hostile_bps(self):
+        import make_patch_mod as mpm
+        src = t.fake_rom()
+        dst = bytearray(src)
+        dst[0x2000:0x2010] = b'ABCD' * 4
+        patch = bytearray(mpm.bps_encode(src, bytes(dst)))
+        for bad in (bytes(patch[:10]), bytes(patch[:-1]) + bytes([patch[-1] ^ 1]), b'BPS1' + b'\x00' * 3):
+            with self.assertRaises(self.pf.PatchError):
+                self.pf.apply(bad, src)
+
+    def bps(self, src, actions, tgt_size):
+        """A hand-made BPS: actions are (kind, length, extra bytes)."""
+        num = lambda n: t.ai.load_module('make_patch_mod').bps_number(n)
+        body = bytearray(b'BPS1' + num(len(src)) + num(tgt_size) + num(0))
+        for kind, length, extra in actions:
+            body += num(((length - 1) << 2) | kind) + extra
+        return body
+
+    def finish(self, body, src, target):
+        import zlib
+        body += (zlib.crc32(src) & 0xFFFFFFFF).to_bytes(4, 'little') + (zlib.crc32(target) & 0xFFFFFFFF).to_bytes(4, 'little')
+        body += (zlib.crc32(bytes(body)) & 0xFFFFFFFF).to_bytes(4, 'little')
+        return bytes(body)
+
+    def test_bps_overlapping_target_copy_repeats(self):
+        num = lambda n: t.ai.load_module('make_patch_mod').bps_number(n)
+        src = bytes(4)
+        target = b'AB' + b'AB' * 50             # TargetRead "AB", then TargetCopy from 0 for 100 bytes
+        body = self.bps(src, [(1, 2, b'AB'), (3, 100, num(0))], len(target))
+        self.assertEqual(self.pf.apply(self.finish(body, src, target), src)[0], target)
+
+    def test_bps_copies_outside_are_refused(self):
+        num = lambda n: t.ai.load_module('make_patch_mod').bps_number(n)
+        src = bytes(8)
+        body = self.bps(src, [(2, 4, num(100 << 1))], 4)      # SourceCopy from offset 100 of an 8-byte ROM
+        with self.assertRaises(self.pf.PatchError):
+            self.pf.apply(self.finish(body, src, bytes(4)), src)
+        body = self.bps(src, [(3, 4, num(0))], 4)             # TargetCopy before any output
+        with self.assertRaises(self.pf.PatchError):
+            self.pf.apply(self.finish(body, src, bytes(4)), src)
 
     def test_importer_uses_it_without_patchfmt(self):
         self.assertIn(ai.load_patchfmt().__name__, ('patchfmt', 'patchfmt_standin'))

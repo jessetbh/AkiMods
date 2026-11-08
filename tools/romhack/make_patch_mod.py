@@ -392,7 +392,7 @@ def main(argv=None):
     if repaired is None:
         print('(no %s: run tools/romhack/list_repaired_functions.py to check for pipeline repairs)' % args.repaired)
     try:
-        nrm, _ = make_mod(base, hack, sections, repaired, args.game_id, args.id, args.name, args.version, args.author,
+        nrm, report = make_mod(base, hack, sections, repaired, args.game_id, args.id, args.name, args.version, args.author,
                           args.description, args.minimum_recomp_version, args.force, args.max_target_read,
                           build=bool(args.out))
     except PatchModError as e:
@@ -400,7 +400,7 @@ def main(argv=None):
     if nrm is None:
         return
     open(args.out, 'wb').write(nrm)
-    print('wrote %s (mod %d bytes)' % (args.out, len(nrm)))
+    print('wrote %s (patch %d bytes, mod %d bytes)' % (args.out, report['patch']['size'], len(nrm)))
 
 
 if __name__ == '__main__':
