@@ -404,6 +404,8 @@ class ReviewFixes(BuildBase):
         with self.assertRaises(OSError):
             ai.zip_write(path, {'a.bin': os.path.join(self.dir, 'missing.bin')})
         self.assertEqual(os.listdir(os.path.dirname(path)), [])
+
+
 class RenamedHeaders(BuildBase):
     def renamed(self):
         hack = bytearray(STOCK)
