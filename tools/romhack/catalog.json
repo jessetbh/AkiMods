@@ -79,6 +79,20 @@
    "version": "2026.6.16",
    "tier": "experimental",
    "converter": "import-pj64",
+   "inputs": {
+    "sha1": [
+     "8AC33845E349B539FE456EA5E0B6821629F479C3"
+    ]
+   },
+   "bake_exclude": [
+    "Wrestler Info Icon\\Mapping"
+   ],
+   "codes_fixups": [
+    "legends_portrait_guards",
+    "legends_block_guards",
+    "legends_fb_relocate",
+    "legends_unpark"
+   ],
    "known_issues": [
     "The in-match pause screen draws noise",
     "Some codes made for the original release do not work",
