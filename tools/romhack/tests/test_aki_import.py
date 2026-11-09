@@ -459,9 +459,10 @@ class Hostile(Base):
             self.write('in/Downloads/Tex/WWF NO MERCY#%08X#0#2_all.png' % i, b'x')
         items, _ = self.run_job([os.path.join(self.dir, 'in', 'Downloads')])
         kinds = sorted(i.get('kind') or '' for i in items)
+        self.assertEqual(len(items), 4, items)
         self.assertIn('pj64-bundle', kinds)
         self.assertIn('rom', kinds)
-        self.assertTrue(len(items) >= 3, items)
+        self.assertIn('patch', kinds)
         self.assertIsNone(ai.bundle_root(['Hack.z64', 'Project64/Project64.exe'], zipped=True))
 
     def test_two_wrapped_bundles_are_not_one(self):

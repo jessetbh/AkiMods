@@ -351,7 +351,8 @@ def bundle_root(names, zipped=False):
     if len(subs) != 1:
         return None
     sub = subs.pop()
-    own = ROM_EXTS + PATCH_EXTS + IMAGE_EXTS + tuple(SAVE_EXTS) + ('.zip', '.7z', '.rar', '.nrm', '.rtz', '.hts', '.htc')
+    own = (ROM_EXTS + PATCH_EXTS + IMAGE_EXTS + tuple(SAVE_EXTS) +
+           ('.jpg', '.jpeg', '.zip', '.7z', '.rar', '.nrm', '.rtz', '.hts', '.htc'))
     if any(os.path.splitext(n)[1] in own for n in lower if not n.startswith(sub + '/')):
         return None
     # The original spelling of that folder (names are matched lower-case).
