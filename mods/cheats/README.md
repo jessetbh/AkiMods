@@ -75,23 +75,35 @@ that governs them.
 
 ## Codes files (full conversions)
 
-A conversion package (AKI Launcher, `conversion.json`) can carry a codes file: `components.codes.file`. When the
-game runs with `AKI_CONVERSION=<id>`, it reads `<app folder>/conversions/<id>/<file>` and hands the text to this mod
-(host export `aki_conversion_codes`), which applies it every frame, on top of the toggles and the Codes box. Only
-games built with `AKI_HOST_CONVERSION` (`mod.psd1` defines; No Mercy so far) import that export, because a mod
-that imports a function the game lacks doesn't load. The result goes to the game's log as one
-`[conversion] codes: N active, ...` line (`aki_conversion_log`).
+A conversion (AKI Launcher; its manifest is `aki.json`) can carry a codes file: `components.codes.file`. When the
+game runs with `AKI_CONVERSION=<id>`, it reads `<app folder>/conversions/<id>/<file>`. A file for the port's own
+revision the game runs itself (host export `aki_conversion_apply`, called by this mod every frame). Any other file
+it hands to this mod as text (host export `aki_conversion_codes`), which applies it every frame, on top of the
+toggles and the Codes box. This mod is built with `-DAKI_HOST_CONVERSION` for all six games (`mod.psd1`,
+`PerGame.<game>.Defines`), the define that makes it import those exports; a mod that imports a function the game
+lacks doesn't load, so a game without them would need the define removed. The result goes to the game's log as one
+line: `[conversion] codes: N active (native table: ...)` written by the game for a file it runs itself, or
+`[conversion] codes: N active, ...` from this mod (`aki_conversion_log`).
 
 Format: UTF-8 text (a BOM is fine), LF or CRLF, one code per line.
 
 ```
-# rom: nomercy-rev0              the revision tag (optional; the first "# rom:" line counts)
-# anything after # // or ;       comments
-[Unlock everything]              a cheat's name (or any line that isn't a code)
-50000B02 0000                    a code: 8 hex digits, a separator (space, tab, ':' or '-'), 4 hex digits
-810BEE40:FFFF  # note            ... optionally followed by a note or comment
-8109940AFFFF                     ... or 12 digits run together
+# rom: nomercy-rev0
+# Unlocks for the Rev 0 cartridge
+[Unlock everything]
+50000B02 0000
+810BEE40:FFFF  # note
+8109940AFFFF
 ```
+
+| Line | Meaning |
+|---|---|
+| `# rom: nomercy-rev0` | The revision tag (optional; the first `# rom:` line counts). Nothing may follow the tag on that line, not even a comment. |
+| `# Unlocks for ...` | A comment: a line starting with `#`, `//` or `;`. |
+| `[Unlock everything]` | A cheat's name (or any line that isn't a code). |
+| `50000B02 0000` | A code: 8 hex digits, a separator (space, tab, `:` or `-`), 4 hex digits. |
+| `810BEE40:FFFF  # note` | A code followed by a note or comment. |
+| `8109940AFFFF` | A code as 12 digits run together. |
 
 - **Tag**: `<game>` or `<game>-rev<N>` with the AkiMods game key (`nomercy`, `wm2k`, ...). Another game, an
   unknown revision (`nomercy-unknown`, `nomercy-rev2`), or anything unparsable after the key: the whole file is
@@ -103,7 +115,8 @@ Format: UTF-8 text (a BOM is fine), LF or CRLF, one code per line.
   dropped together with the conditional/repeater that governs it and the code it governs, and counted in the log.
 - A line starting with 8 hex digits that isn't a valid code (`8109940A FFF`) is counted as malformed in the log;
   other text lines are names.
-- Up to 4096 codes in all; the file may be up to 1 MB.
+- Files this mod runs: up to 4096 codes in all (with the toggles and the Codes box); the file may be up to 1 MB.
+  Files the game runs itself have no such limit.
 
 Project64 cheat files (`.cht`, both the 1.6/2.x `Cheat0="Name",...` layout and the 3.x `$Name` layout) convert with
 `tools/cht2codes.py`: the section header's CRC pair becomes the `# rom:` tag (kept as a `# source:` comment too),
