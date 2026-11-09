@@ -9,6 +9,7 @@ import io
 import json
 import os
 import re
+import shutil
 import sys
 import types
 import unittest
@@ -521,6 +522,45 @@ class Rev0Codes(BuildBase):
         self.assertEqual(r['codes_translation']['map'], 'maps/nomercy-rev0.json')
         self.assertIn('81050058 0933', self.codes(r)[0])
         self.assertEqual(dl.calls, [])
+
+    def test_a_versioned_bundle_folder_finds_the_cheat_folder(self):
+        # Showdown 64 V6.0.4\Config\Project64.cht keeps its cheats under "Showdown 64\..." (real bundle, 2026-11-08).
+        root = 'in/Show Mod V6.0.4'
+        self.write(root + '/Project64.cht', '\n'.join([
+            '[%s]' % REV0_KEY, 'Name=WWF No Mercy',
+            'Cheat0="Show Mod' + BS + 'Arena",810500E8 0933', 'Cheat1="Optional' + BS + 'Other",810500E8 0001', ''
+        ]).encode('latin-1'))
+        self.write('more/nm10.z64', t.REV0)
+        r = self.build_one([os.path.join(self.dir, *root.split('/'))], fakes={'derelink': fake_derelink()},
+                           rom_dirs=[os.path.join(self.dir, 'more')])
+        self.assertEqual(r['status'], 'converted', r)
+        self.assertTrue(r['codes'].startswith('codes translated from Rev 0 (1 of 1 lines'), r['codes'])
+        codes = self.codes(r)[0]
+        self.assertIn('[Show Mod' + BS + 'Arena]', codes)
+        self.assertNotIn('Optional', codes)
+
+    def test_no_matching_cheat_folder_says_so(self):
+        root = 'in/Quiet Mod'
+        self.write(root + '/Project64.cht', '\n'.join([
+            '[%s]' % REV0_KEY, 'Name=WWF No Mercy', 'Cheat0="Elsewhere' + BS + 'Arena",810500E8 0933', ''
+        ]).encode('latin-1'))
+        for i in range(6):                                                  # something else to import
+            self.write(root + '/Textures/WWF NO MERCY#%08X#0#2_all.png' % i, png(i))
+        r = self.build_one([os.path.join(self.dir, *root.split('/'))], fakes={'derelink': fake_derelink()})
+        self.assertEqual(r['status'], 'converted', r)
+        self.assertEqual(r['codes'], "no codes taken: no cheat folder is named like the mod ('Quiet Mod'); "
+                                     "its folders: Elsewhere")
+        # Cheats alone, none taken: the failure says why.
+        shutil.rmtree(os.path.join(self.dir, 'in', 'Quiet Mod', 'Textures'))
+        r = self.build_one([os.path.join(self.dir, *root.split('/'))], fakes={'derelink': fake_derelink()})
+        self.assertEqual(r['status'], 'failed', r)
+        self.assertIn("(no cheat folder is named like the mod ('Quiet Mod'); its folders: Elsewhere)", r['why'])
+
+    def test_without_version(self):
+        for name, bare in (('Showdown 64 V6.0.4', 'Showdown 64'), ('AEW 64 (v1.2)', 'AEW 64'), ('Mod 1.0.5', 'Mod'),
+                           ('TNA No Mercy 2015', 'TNA No Mercy 2015'), ('Showdown 64', 'Showdown 64'),
+                           ('Revolution', 'Revolution'), ('ABCv3', 'ABCv3')):
+            self.assertEqual(ai.without_version(name), bare)
 
     def test_the_shipped_rev0_map_holds_address_ranges_only(self):
         # maps/nomercy-rev0.json ships with the launcher: [lo, hi, shift, kind] ranges, nothing from the ROM itself.
