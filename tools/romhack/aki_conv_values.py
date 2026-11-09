@@ -21,6 +21,13 @@ would need different upper halves (`lui_conflicts`), a lui whose register is ste
 moved (`stepped_bases`): the loop reads through the register with its own offsets, so the new address would have to fit
 in the lui alone. Move what it points at with --move-writes instead. A low half written on a game load or store is not
 rewritten: the value alone can't tell an address from a plain number (`half_immediates`).
+
+A list can also rewrite only a game `lui`'s upper half and rely on the game's own low half after it (Legends' Body
+Shapes: `lui a2,0x803F` over the game's `lui a2,0x8005`, then the game's `lw a2,-0x74E8(a2)`). When the revisions'
+low halves differ (Rev 1's is -0x7588), the pointer lands somewhere else. Each such lui is listed (`lui_only`); with
+the old revision's ROM (`old`), the ones whose game low halves differ are listed in `lui_game_lows`, and with `fix`
+the low halves are written too (the old revision's, through the map with the upper half), behind the lui's conditions
+(aki-roadmap#205). Main text only: an overlay's old ROM place isn't known here.
 """
 import collections
 import re
@@ -123,6 +130,16 @@ class Mapper:
     def __init__(self, ranges, overlays=None):
         self.ranges, self.overlays = ranges, overlays or {}
 
+    def unmap(self, addr):
+        """Port address -> the old revision's, through the plain map only (main code), or None."""
+        if not 0x80000000 <= addr < 0x80000000 + RAM_END:
+            return None
+        off = addr & 0xFFFFFF
+        for lo, hi, d in self.ranges:
+            if lo + d <= off < hi + d:
+                return 0x80000000 | (off - d)
+        return None
+
     def map(self, addr, ctx=None):
         if not 0x80000000 <= addr < 0x80000000 + RAM_END:
             return None
@@ -208,6 +225,51 @@ class Layout:
         return sorted(names) or None, live
 
 
+class OldRom:
+    """The old revision's main code, for the game's own low halves after a lui-only rewrite. `sections` like Layout's;
+    only those without a slot (main) are read."""
+
+    def __init__(self, rom, sections=({'name': 'main', 'rom': 0x1000, 'text': 0x80000400, 'data': 0x80040000},)):
+        self.rom, self.secs = rom, [s for s in sections if s.get('slot') is None]
+
+    def word(self, addr):
+        for s in self.secs:
+            if s['text'] <= addr < s['data']:
+                off = s['rom'] + (addr - s['text'])
+                return int.from_bytes(self.rom[off:off + 4], 'big') if off + 4 <= len(self.rom) else None
+        return None
+
+
+def game_lows(layout, sec, lui_pc, lui_word, written, limit=16):
+    """The game's own low halves that read through a lui's register after it, in the port's ROM: pcs of loads, stores
+    and addiu/ori with that base whose low half the list doesn't write. Follows addu into another register (a table
+    index), stops where the register is overwritten and after the first jump or branch (its delay slot included)."""
+    regs, uses, pc, ending = {_rt(lui_word)}, [], lui_pc + 4, False
+    for _ in range(limit):
+        if not sec['text'] <= pc < sec['data']:
+            break
+        w = layout.rom_word(sec, pc)
+        if w is None:
+            break
+        if pc in written and pc + 2 in written:
+            w = (written[pc][0][2] << 16) | written[pc + 2][0][2]
+        op = w >> 26
+        if (op in LOADS_STORES or op in (ADDIU, ADDI, ORI)) and _rs(w) in regs and pc + 2 not in written:
+            uses.append(pc)
+        if op == 0 and (w & 0x3F) in (0x20, 0x21) and (_rs(w) in regs) != (_rt(w) in regs):
+            regs.add(_rd(w))
+        else:
+            d = gpr_written(w)
+            if d in regs:
+                regs.discard(d)
+        if not regs or ending:
+            break
+        if jump_target(w) is not None or branch_target(w, pc) is not None or (op == 0 and (w & 0x3F) in (8, 9)):
+            ending = True
+        pc += 4
+    return uses
+
+
 def parse(text):
     """-> (lines, writes): writes are (line index, address, value, group, conditions) for 16-bit writes, in list order.
     The conditions are the D1 (equal) conditions right before the write."""
@@ -239,11 +301,14 @@ def set_value(lines, index, value):
     lines[index] = '%s%s %04X%s' % (m[1].upper(), m[2].upper(), value, m[4])
 
 
-def translate_values(text, mapper, layout):
-    """(new text, report). Addresses in `text` are already the port's; instruction values are still the old revision's."""
+def translate_values(text, mapper, layout, old=None, fix=False):
+    """(new text, report). Addresses in `text` are already the port's; instruction values are still the old revision's.
+    `old`: an OldRom of the list's revision, to find lui-only rewrites whose game low halves differ; `fix` writes them."""
     lines, writes = parse(text)
     report = {'jumps': 0, 'low_halves': 0, 'hilo_pairs': 0, 'unmapped': [], 'lui_conflicts': [], 'half_immediates': 0,
-              'cave_words': 0, 'unreached_jumps': 0, 'hooks_into_caves': 0, 'pointers': 0, 'stepped_bases': []}
+              'cave_words': 0, 'unreached_jumps': 0, 'hooks_into_caves': 0, 'pointers': 0, 'stepped_bases': [],
+              'lui_only': [], 'lui_game_lows': [], 'lui_lows_written': 0}
+    inserts = collections.defaultdict(list)    # line index -> lines to add after it
     # Every written value, by address: a word in a cave can come from any group ("Part 1", "Part 2").
     at = collections.defaultdict(list)
     for w in writes:
@@ -310,6 +375,47 @@ def translate_values(text, mapper, layout):
             for pc, lo in los.items():
                 change_half(run[pc + 2], lo)
 
+    def lui_only(entry, sec, lui_pc, port_lui):
+        uses = game_lows(layout, sec, lui_pc, port_lui, at)
+        if not uses:
+            return
+        report['lui_only'].append('%08X' % lui_pc)
+        if old is None:
+            return
+        olds = {}
+        for pc in uses:
+            opc = mapper.unmap(pc)
+            ow = old.word(opc) if opc is not None else None
+            pw = layout.rom_word(sec, pc)
+            if ow is None or ow >> 16 != pw >> 16:
+                report['unmapped'].append('game low at %08X (lui %08X): no matching old instruction' % (pc, lui_pc))
+                return
+            olds[pc] = ow & 0xFFFF
+        news = {}
+        for pc, lo in olds.items():
+            n = mapper.map(((entry[2] << 16) + _sx(lo)) & 0xFFFFFFFF)
+            if n is None:
+                report['unmapped'].append('lui %08X with the game low at %08X' % (lui_pc, pc))
+                return
+            news[pc] = n
+        # Only where the target, through the map, needs another low half than the port's game has.
+        need = {pc: n for pc, n in news.items() if n & 0xFFFF != layout.rom_word(sec, pc) & 0xFFFF}
+        if not need:
+            return
+        report['lui_game_lows'].extend("%08X: %04X here, %04X in the list's revision (lui %08X)"
+                                       % (pc, layout.rom_word(sec, pc) & 0xFFFF, olds[pc], lui_pc) for pc in need)
+        if not fix:
+            return
+        his = {((n + 0x8000) >> 16) & 0xFFFF for n in news.values()}
+        if len(his) != 1:
+            report['lui_conflicts'].append('%08X' % lui_pc)
+            return
+        change_half(entry, his.pop())
+        conds = ['D1%06X %04X' % (ca & 0xFFFFFF, cv) for ca, cv in entry[4]]
+        for pc, n in sorted(need.items()):
+            inserts[entry[0]] += conds + ['81%06X %04X' % ((pc + 2) & 0xFFFFFF, n & 0xFFFF)]
+            report['lui_lows_written'] += 1
+
     # 1. Game instructions: runs of whole words in text, and low halves of game jumps.
     for (group, conds), run in stock_runs.items():
         hilo, prev, ctx = HiLo(), None, None
@@ -342,6 +448,9 @@ def translate_values(text, mapper, layout):
                             report['unmapped'].append('low half at %08X = %04X' % (a, run[a][2]))
                     elif any(b is not None and (b >> 26 in LOADS_STORES or b >> 26 in (ADDIU, ORI, LUI)) for b in bases.values()):
                         report['half_immediates'] += 1
+                        main = [s for s in secs if s.get('slot') is None]
+                        if main and bases.get(main[0]['name']) is not None and bases[main[0]['name']] >> 26 == LUI:
+                            lui_only(run[a], main[0], a & ~3, bases[main[0]['name']])
                 continue
             if a + 2 not in run:
                 continue
@@ -441,10 +550,13 @@ def translate_values(text, mapper, layout):
 
     for index, value in changes.items():
         set_value(lines, index, value)
+    for index in sorted(inserts, reverse=True):
+        lines[index + 1:index + 1] = inserts[index]
     report['values_changed'] = len(changes)
     report['unmapped'] = sorted(set(report['unmapped']))
     report['lui_conflicts'] = sorted(set(report['lui_conflicts']))
     report['stepped_bases'] = sorted(set(report['stepped_bases']))
+    report['lui_only'] = sorted(set(report['lui_only']))
     return '\n'.join(lines), report
 
 

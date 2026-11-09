@@ -1311,6 +1311,15 @@ def parse_map_ranges(specs):
     return out
 
 
+def old_rom_of(a):
+    """An OldRom from --old-rom (the revision the list was written for), or None."""
+    path = getattr(a, 'old_rom', None)
+    if not path:
+        return None
+    with open(path, 'rb') as f:
+        return aki_conv_values.OldRom(f.read())
+
+
 def translate_values_in(text, a, overrides=()):
     """(text, report) after translate-code-values on a list whose addresses are already translated: the map is
     a.map (a derelink map), the layout found for a.port_rom. When that can't run, the text comes back unchanged and
@@ -1330,7 +1339,7 @@ def translate_values_in(text, a, overrides=()):
         return text, {'off': 'already translated'}
     new, report = aki_conv_values.translate_values(
         text, aki_conv_values.Mapper(list(overrides) + map_from_derelink(m), overlay_ranges(m)),
-        aki_conv_values.Layout(layout, port_rom))
+        aki_conv_values.Layout(layout, port_rom), old=old_rom_of(a), fix=bool(getattr(a, 'fix_lui_lows', False)))
     new, tagged = re.subn(r'(?m)^(# rom: *\S+)(\r?)$', lambda g: g.group(1) + g.group(2) + '\n' + aki_conv_values.HEADER
                           + g.group(2), new, count=1)
     if not tagged:
@@ -1364,7 +1373,8 @@ def cmd_translate_values(a):
     # First match wins, so a --map-range goes ahead of the map.
     ranges = parse_map_ranges(a.map_range)
     new, report = aki_conv_values.translate_values(text, aki_conv_values.Mapper(ranges + map_from_derelink(m), overlay_ranges(m)),
-                                                   aki_conv_values.Layout(layout, port_rom))
+                                                   aki_conv_values.Layout(layout, port_rom), old=old_rom_of(a),
+                                                   fix=a.fix_lui_lows)
     report['writes_moved'] = moved
     new, tagged = re.subn(r'(?m)^(# rom: *\S+)(\r?)$', lambda g: g.group(1) + g.group(2) + '\n' + aki_conv_values.HEADER + g.group(2),
                           new, count=1)
@@ -1467,6 +1477,10 @@ def main():
                         'addresses were translated with an older map; the values have to follow what its addresses did')
     p.add_argument('--move-writes', action='append', default=[],
                    help='LO,HI,DELTA: first move these write addresses, for a table a stepped_bases lui has to reach')
+    p.add_argument('--old-rom', help='the ROM of the revision the list was written for: lists lui-only rewrites whose '
+                                     'game low halves differ there (lui_game_lows, aki-roadmap#205)')
+    p.add_argument('--fix-lui-lows', action='store_true',
+                   help="with --old-rom: write those low halves too (the old revision's, through the map)")
     p.add_argument('--out', help='default: rewrite the list in place')
     p.add_argument('--dry-run', action='store_true')
     p.set_defaults(func=cmd_translate_values)
