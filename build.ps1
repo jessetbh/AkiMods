@@ -3,8 +3,9 @@
 #   .\build.ps1 cheats             one mod, all its games
 #   .\build.ps1 cheats nomercy     one mod, one game
 #   .\build.ps1 camera nomercy -Define CAMERA_DEBUG    extra -D flags (debug builds)
+#   .uild.ps1 -ModsDir examples\starter-nomercy -Mod patch nomercy   a mod folder outside mods\ (the starter kit)
 # Output: build\<mod>\<game>\<mod id>.nrm
-param([string]$Mod = 'all', [string]$Game = 'all', [string[]]$Define = @())
+param([string]$Mod = 'all', [string]$Game = 'all', [string[]]$Define = @(), [string]$ModsDir = '')
 # Native tools print warnings on stderr; failures are caught via $LASTEXITCODE below.
 $ErrorActionPreference = 'Continue'
 
@@ -12,8 +13,10 @@ $root = $PSScriptRoot
 # The game repos (for their symbol files): next to this repo, or wherever AKI_GAMES_DIR points.
 $depot = if ($env:AKI_GAMES_DIR) { $env:AKI_GAMES_DIR } else { Split-Path $root -Parent }
 $games = Import-PowerShellDataFile "$root\common\games.psd1"
+# Where the mod folders are: mods\ by default; -ModsDir for one elsewhere (relative to this repo or absolute).
+$modsRoot = if (-not $ModsDir) { "$root\mods" } elseif ([IO.Path]::IsPathRooted($ModsDir)) { $ModsDir } else { Join-Path $root $ModsDir }
 
-$modNames = @(Get-ChildItem "$root\mods" -Directory | Where-Object { Test-Path "$($_.FullName)\mod.psd1" } | ForEach-Object Name)
+$modNames = @(Get-ChildItem $modsRoot -Directory | Where-Object { Test-Path "$($_.FullName)\mod.psd1" } | ForEach-Object Name)
 if ($Mod -ne 'all' -and $Mod -notin $modNames) { throw "Unknown mod '$Mod' (known: $($modNames -join ', '), all)" }
 if ($Game -ne 'all' -and -not $games.ContainsKey($Game)) { throw "Unknown game '$Game' (known: $($games.Keys -join ', '), all)" }
 $selectedMods = if ($Mod -eq 'all') { $modNames } else { @($Mod) }
@@ -30,7 +33,7 @@ $baseFlags = @('-target', 'mips-freestanding-none', '-mcpu=mips2', '-mabi=32', '
     '-I', "$root\common\include")
 
 foreach ($m in $selectedMods) {
-    $modDir = "$root\mods\$m"
+    $modDir = Join-Path $modsRoot $m
     $cfg = Import-PowerShellDataFile "$modDir\mod.psd1"
     $modGames = if ($cfg.Games -eq 'all') { @($games.Keys) } else { @($cfg.Games) }
     $targetGames = if ($Game -eq 'all') { $modGames } elseif ($Game -in $modGames) { @($Game) } else { @() }
