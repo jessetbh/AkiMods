@@ -87,6 +87,7 @@ JABO_NAME = re.compile(r'^[0-9A-Fa-f]{32}\.(png|dds|bmp)$')
 RT64_NAME = re.compile(r'^[0-9A-Fa-f]{16}\.(png|dds)$')
 PJ64_MARKERS = ('project64.cht', 'project64.rdb', 'project64.cfg', 'project64.exe')
 MIN_PACK_IMAGES = 5
+HTS_SUFFIX = '_HIRESTEXTURES.hts'
 MAX_ITEM = 128 << 20      # the biggest file read whole (N64 ROMs are 64 MB at most)
 MAX_RATIO = 100           # a zip member inflating more than this (past 16 MB) is refused as a possible zip bomb
 MAX_DEPTH = 8             # folders walked at most this deep
@@ -237,7 +238,9 @@ def texture_naming(names):
     if 'rt64.json' in lower:
         return 'rt64', len(base), None
     if any(b.endswith(('.hts', '.htc')) for b in lower):
-        return 'hts', sum(b.endswith(('.hts', '.htc')) for b in lower), None
+        # GLideN64 names its texture storage after the ROM's internal name: "WWF No Mercy_HIRESTEXTURES.hts".
+        hint = {b[:-len(HTS_SUFFIX)] for b in base if b.lower().endswith(HTS_SUFFIX.lower()) and len(b) > len(HTS_SUFFIX)}
+        return 'hts', sum(b.endswith(('.hts', '.htc')) for b in lower), (hint.pop() if len(hint) == 1 else None)
     rice = [RICE_NAME.match(b) for b in base]
     rice = [m for m in rice if m]
     jabo = sum(bool(JABO_NAME.match(b)) for b in base)
@@ -333,6 +336,31 @@ def is_bundle(names, zipped=False):
     return any(n in PJ64_MARKERS or (n.startswith('config/') and n[7:] in PJ64_MARKERS) for n in lower)
 
 
+def save_stem(name):
+    """'Save/WWF No Mercy_Cont_1.mpk' -> 'wwf no mercy': Project64 names saves after the ROM's internal name."""
+    base = os.path.splitext(name.replace('\\', '/').rsplit('/', 1)[-1])[0].lower()
+    return base.split('_cont_')[0]
+
+
+def save_bundle_rom(names, zipped=False):
+    """The ROM name a textures + save mod is for (N64Modderz64's WWF No Mercy MOD: a GLideN64 .hts and a Project64
+    Save folder, no Project64.cfg or cheats; aki-roadmap#172), else None. Strict, so a folder of unrelated items isn't
+    taken as one: a texture pack that names its ROM, a save named after the same ROM, and nothing else to convert
+    (no ROMs, patches, mods or archives; a Project64 savestate .pj.zip is fine)."""
+    names = strip_root(names) if zipped else names
+    lower = [n.lower() for n in names]
+    if any(os.path.splitext(n)[1] in ROM_EXTS + PATCH_EXTS + ('.7z', '.rar', '.nrm') or
+           (n.endswith('.zip') and not n.endswith('.pj.zip')) for n in lower):
+        return None
+    got = texture_naming([n for n in names if os.path.splitext(n.lower())[1] not in SAVE_EXTS])
+    if not got or not got[2] or not got[2].strip():
+        return None
+    rom = got[2].strip().lower()
+    if not any(os.path.splitext(n)[1] in SAVE_EXTS and save_stem(n) == rom for n in lower):
+        return None
+    return got[2].strip()
+
+
 def is_texture_folder(names):
     """Texture-named images and no ROMs, patches or archives beside them (those make it a folder of items)."""
     if any(os.path.splitext(n.lower())[1] in ROM_EXTS + PATCH_EXTS + ('.zip', '.7z', '.rar', '.nrm') for n in names):
@@ -352,7 +380,7 @@ def expand(path, job, sources, notes, depth=0):
         return
     if os.path.isdir(path):
         names = folder_files(path, notes)
-        if is_bundle(names) or is_texture_folder(names):
+        if is_bundle(names) or save_bundle_rom(names) or is_texture_folder(names):
             sources.append(Source(path, 'folder', names=names, path=path))
             return
         if depth >= MAX_DEPTH:
@@ -427,7 +455,7 @@ def expand_zip_members(label, fh, opener, origin, sources, notes, depth, blob):
     if top & {'mod.json', 'aki-package.json', 'aki.json'}:
         sources.append(Source(label, 'file', reader=whole_reader, path=origin, size=size, head=b'PK\x03\x04'))
         return
-    if is_bundle(names, zipped=True) or is_texture_folder(names):
+    if is_bundle(names, zipped=True) or save_bundle_rom(names, zipped=True) or is_texture_folder(names):
         src = Source(label, 'folder', names=names, path=origin)
         if whole is None:
             src.zip_path = origin
@@ -603,13 +631,15 @@ class Catalog(dict):
     def __init__(self, cat=None):
         super().__init__()
         cat = cat or {}
-        self.outputs, self.codes = {}, {}
+        self.outputs, self.codes, self.contents = {}, {}, {}
         self.tiers = cat.get('tiers', {})
         for e in cat.get('entries', []):
             for h in e.get('inputs', {}).get('sha1', []):
                 self[h.upper()] = e
             for h in e.get('outputs', {}).get('sha1', []):
                 self.outputs[h.upper()] = e
+            for h in e.get('outputs', {}).get('content_sha1', []):
+                self.contents[h.upper()] = e
             for h in e.get('outputs', {}).get('codes_sha1', []):
                 # The same codes.txt in several tested packs (No Mercy Plus V3, V3 SC, POE) says nothing alone.
                 self.codes[h.upper()] = None if h.upper() in self.codes else e
@@ -617,7 +647,7 @@ class Catalog(dict):
 
 def load_catalog(path=DEFAULT_CATALOG):
     """Recipes for tested conversions: {"entries": [{"id", "name", "game", "tier", "converter", "known_issues",
-    "note", "inputs": {"sha1": [...]}, "outputs": {"sha1": [...], "codes_sha1": [...]}}]} -> Catalog. The job's
+    "note", "inputs": {"sha1": [...]}, "outputs": {"sha1": [...], "codes_sha1": [...], "content_sha1": [...]}}]} -> Catalog. The job's
     "catalog" names another file; "" or false turns it off; without the key, catalog.json next to this file."""
     if not path or not os.path.isfile(path):
         return Catalog()
@@ -809,9 +839,22 @@ def _jsonable(info):
 
 def classify_folder(src, res, roms):
     names = src.names
-    if is_bundle(names, zipped=src.zip_path is not None or src.zip_blob is not None):
+    zipped = src.zip_path is not None or src.zip_blob is not None
+    saves_for = None if is_bundle(names, zipped) else save_bundle_rom(names, zipped)
+    if saves_for or is_bundle(names, zipped):
         res.update(kind='pj64-bundle', status='ready', route='import-pj64',
                    parts=sorted({p for p in (part_of(n) for n in names) if p}))
+        if saves_for:
+            # Textures + a save, no cheats (aki-roadmap#172): import-pj64 builds it; the game is the ROM both name.
+            res.update(bundle='textures-save', rom_name=saves_for)
+            tops = {n.split('/', 1)[0] for n in names}
+            if not zipped and len(tops) == 1 and all('/' in n for n in names):
+                res['name'] = display_name(tops.pop())   # the extracted archive's own folder, not the one picked
+            game = roms.header_names().get(saves_for.lower())
+            if game:
+                res['game'] = game
+            if any(n.lower().endswith(('.hts', '.htc')) for n in names):
+                res['parts'] = sorted(set(res['parts']) | {'textures'})
         hint = [n for n in names if os.path.splitext(n.lower())[1] in ROM_EXTS + PATCH_EXTS]
         if hint:
             res['contains'] = hint[:8]
@@ -1162,10 +1205,14 @@ class Builder:
         Returns (tier, catalog entry or None, note)."""
         outputs = getattr(self.catalog, 'outputs', {})
         codes = getattr(self.catalog, 'codes', {})
+        contents = getattr(self.catalog, 'contents', {})
         got = None
         nrm = files.get('conversion/patch.nrm')
         if 'conversion/codes.txt' in files:
             res['codes_sha1'] = hashlib.sha1(files['conversion/codes.txt']).hexdigest().upper()
+        content = self.content_sha1(files)
+        if content:
+            res['content_sha1'] = content
         if nrm is not None:
             # A patch decides; one that can't be checked (no port ROM) leaves the pack Untested.
             if outputs and game in self.roms.by_game:
@@ -1182,6 +1229,15 @@ class Builder:
             got = codes.get(res['codes_sha1'])
             if got is not None and got.get('outputs', {}).get('sha1'):
                 got = None      # the tested pack had a patch too: codes alone aren't that build
+        elif content:
+            # Textures and saves only (aki-roadmap#172): the same saves and texture images as the tested pack.
+            got = contents.get(content)
+            if got is not None and (got.get('outputs', {}).get('sha1') or got.get('outputs', {}).get('codes_sha1')):
+                got = None      # the tested pack had a patch or codes too
+        # An entry that names its saves and textures matches only with those, whatever else matched.
+        want = (got or {}).get('outputs', {}).get('content_sha1')
+        if got is not None and want and content not in [h.upper() for h in want]:
+            got = None
         if got is not None and got.get('game') in (None, game):
             return got.get('tier') or UNTESTED, got, None
         known = self.catalog_entry(res)
@@ -1189,6 +1245,30 @@ class Builder:
             return UNTESTED, known, ('built differently from the build the AKI team tested as %s (a newer or older '
                                      'converter?)' % TIER_LABELS.get(known.get('tier'), known.get('tier')))
         return UNTESTED, None, None
+
+    @classmethod
+    def content_sha1(cls, files):
+        """A conversion's saves and texture images as one SHA-1 (aki-roadmap#172: a textures + save mod has no patch or
+        codes to match by): SHA-1 of the sorted lines "<path> NUL <file SHA-1> LF" for conversion/saves/* and the
+        images under conversion/textures/ (not rt64.json, which the importer writes). None when there are neither."""
+        lines = []
+        for n in sorted(files):
+            low = n.lower()
+            if not (low.startswith('conversion/saves/') or
+                    (low.startswith('conversion/textures/') and low.endswith(TEXTURE_EXTS))):
+                continue
+            v = files[n]
+            h = hashlib.sha1()
+            if isinstance(v, str):
+                with open(v, 'rb') as f:
+                    for chunk in iter(lambda: f.read(1 << 20), b''):
+                        h.update(chunk)
+            else:
+                h.update(cls.member_bytes(v))
+            lines.append(n + '\0' + h.hexdigest().upper() + '\n')
+        if not lines:
+            return None
+        return hashlib.sha1(''.join(lines).encode('utf-8')).hexdigest().upper()
 
     # -- hack ROMs and patches
 
@@ -1303,7 +1383,7 @@ class Builder:
         tier, entry, note = self.judge(res, game, files)
         survey = aki.setdefault('survey', {})
         survey.update(aki_tier=tier, aki_tier_label=TIER_LABELS.get(tier, tier), catalog=(entry or {}).get('id'))
-        for k in ('output_sha1', 'codes_sha1'):
+        for k in ('output_sha1', 'codes_sha1', 'content_sha1'):
             if res.get(k):
                 survey[k] = res[k]
         if entry and tier != UNTESTED:
@@ -1453,8 +1533,9 @@ class Builder:
                 shutil.copyfileobj(fin, fout, 1 << 20)
         return dest, dest
 
-    def bundle_game(self, folder, conv):
-        """The game a bundle's cheats are for (their Project64 section), else a ROM header in it, else "game"."""
+    def bundle_game(self, folder, conv, named=None):
+        """The game a bundle's cheats are for (their Project64 section), else a ROM header in it, else the game its
+        textures and save name (named, aki-roadmap#172), else "game"."""
         keys = {k: g for k, g in ((k, conv.GAME_OF_TAG.get(t)) for k, t in conv.CHT_SECTIONS.items()) if g}
         for g, (_, rom) in self.roms.by_game.items():
             keys[conv.cht_key(rom)] = g
@@ -1476,6 +1557,8 @@ class Builder:
                             found.add(g)
         if len(found) == 1:
             return found.pop()
+        if not found and named in GAMES:
+            return named
         if self.game_hint in GAMES:
             return self.game_hint
         raise NeedsGame('which game this Project64 bundle is for (%s; pass "game")' % (
@@ -1629,7 +1712,7 @@ class Builder:
         conv = self.mod('aki_conv')
         folder, unpacked = self.bundle_folder(src)
         try:
-            game = self.bundle_game(folder, conv)
+            game = self.bundle_game(folder, conv, res.get('game'))
             entry = self.catalog_entry(res) or {}
             cid, _ = self.target(game, package_id(res['id']), res)
             name = res.get('name') or cid
