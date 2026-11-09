@@ -232,7 +232,10 @@ Which line wins, in order:
 
 Limits and rules:
 - Pack ids are lower case, as in the folder name.
-- At most 32 lines count, the file can be at most 16 KB, and a match loads at most 8 packs.
+- At most 256 lines count and the file can be at most 32 KB (a conversion's aki.json `slots` count the same way).
+- Any number of packs can take turns in one match: a pack loads when its wrestler comes in, and when the model memory
+  (about 3.5 MB) is full, the pack shown longest ago that no wrestler on screen uses is unloaded. Only the packs of
+  the wrestlers on screen at once (at most 4) have to fit together.
 - A line the mod can't read is skipped, and the log says why (`models.txt line N: ...`).
 
 ## 7. `validate`: errors and their fixes

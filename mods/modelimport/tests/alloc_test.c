@@ -19,6 +19,14 @@ int main(void) {
     CHECK(mi_first_fit(u, 4, lo, hi, 0x80000) == lo + 0x100000);
     CHECK(mi_first_fit(u, 4, lo, hi, 0x80001) == lo + 0x280000);
 
+    // Best fit (aki-roadmap#247): the hole when it holds the pack (the big end gap stays whole), else the end gap.
+    CHECK(mi_best_fit(u, 4, lo, hi, 0x80000) == lo + 0x100000);
+    CHECK(mi_best_fit(u, 4, lo, hi, 0x80001) == lo + 0x280000);
+    CHECK(mi_best_fit(u, 4, lo, hi, hi - lo) == 0);
+    CHECK(mi_best_fit(0, 0, lo, hi, 0x1000) == lo);
+    MiRange two[2] = { { lo + 0x10000, 0x10000 }, { lo + 0x30000, hi - lo - 0x30000 } };   // equal holes: the lower
+    CHECK(mi_best_fit(two, 2, lo, hi, 0x8000) == lo);
+
     // Gaps start 16-aligned after an odd-sized block, and an aligned start inside a block is not a gap.
     MiRange odd[1] = { { lo, 0x1001 } };
     CHECK(mi_first_fit(odd, 1, lo, hi, 16) == lo + 0x1010);

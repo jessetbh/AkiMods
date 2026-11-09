@@ -63,6 +63,21 @@ static inline unsigned int mi_first_fit(const MiRange* used, int n, unsigned int
     return best;
 }
 
+// The smallest gap of [lo, hi) that holds bytes (best fit): its start, or 0. Packs go here once their size is known
+// (aki-roadmap#247): the largest gaps stay whole for the biggest packs. With the largest-gap placement alone, the packs
+// on screen ended up spread over the window often enough that a big pack found no gap for a whole intro scene (churn
+// test: 8 of 146567 intro appearances waited longer than the frames in flight; best fit 2).
+static inline unsigned int mi_best_fit(const MiRange* used, int n, unsigned int lo, unsigned int hi, unsigned int bytes) {
+    unsigned int best = 0, best_size = 0, end;
+    for (int i = -1; i < n; i++) {
+        if (i >= 0 && !used[i].size) continue;
+        unsigned int c = mi_gap_at(used, n, lo, hi, i < 0 ? lo : used[i].base + used[i].size, &end);
+        if (c && end - c >= bytes && (!best || end - c < best_size || (end - c == best_size && c < best)))
+            best = c, best_size = end - c;
+    }
+    return best;
+}
+
 // The pack to unload for room: loaded, shown by no slot, not keep, drawn out, the least recently drawn; -1 if none.
 static inline int mi_pick_evict(const int* loaded, const int* shown, const unsigned int* last_use, int n, int keep,
     unsigned int now) {

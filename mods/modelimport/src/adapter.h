@@ -8,18 +8,10 @@
 #include "aki_mod.h"
 #include "gbi.h"
 
-// The scratch (MI_SCRATCH, 256 KB below 8 MB): the per-slot lists (2 parities x MI_MAX_SLOTS), models.txt after them,
-// then the adapter's depth-clear lists at MI_CLEAR_OFFSET. F3DEX 1.x needs more room per list: a forced matrix is four
-// commands, not two (aki-roadmap#163).
-#ifdef MI_F3DEX1
-#define MI_LIST_BYTES 0xC00                        // per slot and parity: render state + up to 5 commands per entry
-#define MI_CLEAR_OFFSET 0xC000u
-#else
-#define MI_LIST_BYTES 0x800                        // per slot and parity: render state + 3 commands per entry
-#define MI_CLEAR_OFFSET 0x8000u
-#endif
+// The scratch (MI_SCRATCH, 256 KB below 8 MB): the per-slot lists, the adapter's depth-clear lists, then models.txt
+// (scratch_layout.h).
+#include "scratch_layout.h"
 
-#define MI_MAX_SLOTS 4
 #define MI_MAX_PARTS 32
 
 #define RAM8(a) (*(volatile u8*)(a))
