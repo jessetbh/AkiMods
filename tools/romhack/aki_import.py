@@ -503,9 +503,18 @@ def expand_zip_members(label, fh, opener, origin, sources, notes, depth, blob):
 
 
 def find_7zr(job):
-    for c in (job.get('sevenzip'), os.path.join(TOOLS, 'bin', '7zr.exe'), shutil.which('7zr'), shutil.which('7z')):
+    """--sevenzip, else a 7zr.exe beside the tools, else 7-Zip on PATH or in its install folder (aki-roadmap#266: the
+    launcher ships no 7zr.exe, so a player's own 7-Zip install is the usual one)."""
+    if job.get('sevenzip'):                  # given: that one only (as unpack.find_7z)
+        return job['sevenzip'] if os.path.isfile(job['sevenzip']) else None
+    for c in (os.path.join(TOOLS, 'bin', '7zr.exe'), shutil.which('7zr'), shutil.which('7z'), shutil.which('7za')):
         if c and os.path.isfile(c):
             return c
+    for env in ('ProgramW6432', 'ProgramFiles', 'ProgramFiles(x86)'):
+        base = os.environ.get(env)
+        exe = base and os.path.join(base, '7-Zip', '7z.exe')
+        if exe and os.path.isfile(exe):
+            return exe
     return None
 
 
@@ -530,7 +539,10 @@ def work_dir(job):
 def expand_7z(path, job, sources, notes):
     exe = find_7zr(job)
     if not exe:
-        notes.append(dict(item=path, status='unsupported', why='7z archive: 7zr.exe not found (bin\\7zr.exe or --sevenzip)'))
+        why = ('--sevenzip %s not found' % job['sevenzip'] if job.get('sevenzip') else
+               'a 7z archive, and 7-Zip is needed to open it: install 7-Zip (free, from 7-zip.org) and import it again, '
+               'or extract it yourself and import the folder')
+        notes.append(dict(item=path, status='unsupported', why=why))
         return
     # Keyed by content, so a changed archive is unpacked again; a .complete marker, so a broken unpack isn't reused.
     out = os.path.join(work_dir(job), '7z-%s' % sha1_file(path)[:16])
@@ -686,6 +698,8 @@ class Ledger:
         if not self.path:
             return
         tmp = self.path + '.tmp'
+        folder = os.path.dirname(os.path.abspath(self.path))
+        os.makedirs(folder, exist_ok=True)   # aki-roadmap#270: --ledger inside an --out that nothing created yet
         with open(tmp, 'w', encoding='utf-8') as f:
             json.dump({'format': 'aki-import-ledger', 'version': 1, 'entries': self.entries}, f, indent=1, sort_keys=True)
         os.replace(tmp, self.path)
