@@ -294,7 +294,18 @@ class HackRoutes(BuildBase):
         cat = self.catalog([{'id': 'other', 'name': 'Other', 'game': 'nomercy', 'tier': 'experimental',
                              'outputs': {'sha1': [sha1]}}])
         r = self.build_one([self.write('in/x.z64', bytes(hack))], catalog=cat)   # make_patch_mod: output = hack
-        self.assertEqual((r['aki_tier'], r['id']), ('experimental', 'x'))
+        # aki-roadmap#268: the entry's id and name, as an input SHA-1 match gives, and a tier that agrees with aki_tier.
+        self.assertEqual((r['aki_tier'], r['tier'], r['catalog'], r['id'], r['name']),
+                         ('experimental', 'experimental', 'other', 'other', 'Other'))
+        m, aki, _ = check_package(self, r['package'], 'conversion')     # the patch's mod id follows the new id
+        self.assertEqual((m['id'], m['display_name'], aki['name'], os.path.basename(r['package'])),
+                         ('other', 'Other', 'Other', 'other-1.0.0.zip'))
+        # An id the ledger holds (another conversion called "other") stays unique.
+        ledger = self.write('ledger.json', json.dumps({'entries': {'K': {'id': 'other'}}}).encode())
+        shutil.rmtree(self.out)
+        r = self.build_one([self.write('in/x.z64', bytes(hack))], catalog=cat, ledger=ledger)
+        self.assertEqual((r['id'], r['aki_tier']), ('other-2', 'experimental'))
+        check_package(self, r['package'], 'conversion')
 
     def test_codes_only_conversion_matches_by_codes(self):
         bundle = Pj64Bundles.bundle(self)

@@ -90,7 +90,10 @@ python -I tools\romhack\aki_import.py build C:\Downloads\wrestling --rom nomercy
   base, port ROMs first; stock ROMs among the inputs count too. `.rup` and PPF files are refused
   by name (a Project64 bundle's `.rup` is applied by import-pj64).
 - **Ids and names** come from the catalog, else from the file or folder name, made unique
-  against the ledger.
+  against the ledger. A build the catalog matches by what it built (its output, codes or content
+  hash; entries without `inputs.sha1` such as nmp_v21, starrcade, wmx64) takes the entry's id and
+  name too, with a `-2` suffix when the ledger or batch already holds that id (#268). After a
+  build, `tier` is the built package's tier (the same as `aki_tier`).
 - **The ledger** keys every input by content hash (a ROM in `.z64` order, a patch file, a
   folder's files), so a rerun reports `have-it` instead of building again. `plan` only reads it;
   `--record` (worker: `"record": true`) adds the items made ready.

@@ -1161,6 +1161,7 @@ class Builder:
         if not VERSION.match(self.version):
             raise ImportError_('version %r is not x.y.z (the launcher refuses other versions)' % self.version)
         self.written = {}                           # (game, id) -> input key, for this batch
+        self.taken = set()                          # ids the ledger and this batch hold (run_job shares its set)
         self.authors = job.get('authors') or ['unknown']
         self.repos = job.get('repos') or {}        # game -> a game repo root (developers: its RecompiledFuncs)
         self.game_hint = job.get('game')
@@ -1319,17 +1320,26 @@ class Builder:
         return UNTESTED, None, None
 
     def catalog_identity(self, res, game, cid, name, aki, files, entry):
-        """(id, name, files) for a build the catalog matched by its saves and textures alone (aki-roadmap#172): the
-        entry's id and name instead of the ones taken from the archive's folder ("WWF MOD - Public Master V1.0" ->
-        "WWF No Mercy MOD (n64modderz)"). Builds with a patch or codes keep theirs: the catalog named those already
-        from the input's hash, and a patch carries its id inside."""
+        """(id, name, files) for a build the catalog matched by what it built, not by the input's SHA-1: the entry's
+        id and name instead of the ones taken from the file or folder name. aki-roadmap#172: a textures + save mod by
+        its saves and textures ("WWF MOD - Public Master V1.0" -> "WWF No Mercy MOD (n64modderz)"); aki-roadmap#268:
+        a hack by its output alone (nmp_v21, starrcade and wmx64 have no inputs.sha1, so the id was
+        "wcw-nwo-revenge-starrcade-edition-usa-v1-01"). An input the catalog named already keeps that id. An id the
+        ledger or this batch holds gets a -2 suffix (unique_id); the patch's mod id follows the new id."""
         new_id, new_name = entry.get('id'), entry.get('name')
-        if not (new_id or new_name) or not entry.get('outputs', {}).get('content_sha1'):
-            return cid, name, files
-        if 'conversion/patch.nrm' in files or 'conversion/codes.txt' in files:
+        if not (new_id or new_name) or res.get('catalog') == new_id:
             return cid, name, files
         if new_id and package_id(new_id) != cid:
-            cid, _ = self.target(game, package_id(new_id), res)
+            taken = self.taken
+            taken.discard(cid)
+            want = package_id(new_id)
+            cid, _ = self.target(game, unique_id(want, taken), res)
+            taken.add(cid)
+            patch = aki.get('components', {}).get('patch')
+            if patch and isinstance(files.get('conversion/' + patch.get('file', '')), bytes):
+                files = dict(files)
+                files['conversion/' + patch['file']] = nrm_with_id(files['conversion/' + patch['file']], cid)
+                patch['mod_id'] = cid
         if new_name and new_name != name:
             files = dict(files)
             readme = files.get('conversion/README.md')
@@ -1482,6 +1492,11 @@ class Builder:
             cid, name, files = self.catalog_identity(res, game, cid, name, aki, files, entry)
         survey = aki.setdefault('survey', {})
         survey.update(aki_tier=tier, aki_tier_label=TIER_LABELS.get(tier, tier), catalog=(entry or {}).get('id'))
+        # The result's tier is what was built (aki-roadmap#268: it said untested next to aki_tier verified for a hack
+        # matched by its output alone, the classify step's guess).
+        res['tier'] = tier
+        if entry and tier != UNTESTED:
+            res['catalog'] = entry.get('id')
         for k in ('output_sha1', 'codes_sha1', 'content_sha1'):
             if res.get(k):
                 survey[k] = res[k]
@@ -1952,6 +1967,8 @@ def run_job(job, emit, patchfmt=None):
     builder = Builder(job, roms, catalog) if job.get('build') else None
     ledger = Ledger(job.get('ledger')) if job.get('ledger') else None
     taken = ledger.ids() if ledger else set()
+    if builder is not None:
+        builder.taken = taken
     sources, notes = [], []
     try:
         for p in job.get('paths', []):
