@@ -849,6 +849,72 @@ class Rev0Codes(BuildBase):
         self.assertNotIn('codes_translation', r)
 
 
+class ImportPolish(BuildBase):
+    """aki-roadmap#268: one conversion per hack in a batch, plan agreeing with build."""
+
+    def hack(self, offset, val=7):
+        rom = bytearray(STOCK)
+        rom[offset] ^= val
+        return bytes(rom)
+
+    def zip_of(self, rel, files):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, 'w') as z:
+            for name, data in files.items():
+                z.writestr(name, data)
+        return self.write(rel, buf.getvalue())
+
+    def test_same_output_twice_builds_one_conversion(self):
+        # Badd Blood: the hack ROM and its patch (applied to the stock ROM) build the same ROM.
+        rom = self.write('in/Hack.z64', self.hack(0x2000))
+        patch = self.write('in/hack.xdelta', t.make_patch(STOCK, [(0x2000, self.hack(0x2000)[0x2000])]))
+        ledger = os.path.join(self.dir, 'ledger.json')
+        items, _ = self.build([rom, patch], ledger=ledger)
+        by = {os.path.basename(i['item']): i for i in items}
+        self.assertEqual(by['Hack.z64']['status'], 'converted')
+        self.assertEqual((by['hack.xdelta']['status'], by['hack.xdelta']['duplicate_of'], by['hack.xdelta']['id']),
+                         ('have-it', rom, 'hack'))
+        self.assertEqual(os.listdir(os.path.join(self.out, 'nomercy')), ['hack-1.0.0.zip'])
+        items, _ = self.build([patch], ledger=ledger)        # the ledger knows the second input too
+        self.assertEqual(items[0]['status'], 'have-it')
+
+    def catalog_for(self, rom, **entry):
+        sha1 = hashlib.sha1(rom).hexdigest().upper()
+        e = dict(id='deluxe', name='Deluxe v1.1', game='nomercy', tier='experimental',
+                 inputs={'sha1': [sha1]}, outputs={'sha1': [sha1]}, **entry)
+        return self.write('catalog.json', json.dumps({'entries': [e]}).encode())
+
+    def test_sibling_patch_of_a_catalog_hack_is_an_alternative(self):
+        # VPW64 Deluxe v1.1: two xdeltas of one hack in one zip; the catalog knows one build.
+        known, other = self.hack(0x2000), self.hack(0x2004)
+        z = self.zip_of('in/deluxe.zip', {
+            'Deluxe_Emulator.xdelta': t.make_patch(STOCK, [(0x2004, other[0x2004])]),   # first in the zip
+            'Deluxe_Summercart.xdelta': t.make_patch(STOCK, [(0x2000, known[0x2000])])})
+        items, _ = self.build([z], catalog=self.catalog_for(known))
+        by = {i['item'].split('!')[-1]: i for i in items}
+        self.assertEqual((by['Deluxe_Summercart.xdelta']['status'], by['Deluxe_Summercart.xdelta']['id'],
+                          by['Deluxe_Summercart.xdelta']['aki_tier']), ('converted', 'deluxe', 'experimental'))
+        alt = by['Deluxe_Emulator.xdelta']
+        self.assertEqual((alt['status'], alt['alternative_of']), ('have-it', z + '!Deluxe_Summercart.xdelta'))
+        self.assertIn('another build of Deluxe v1.1', alt['why'])
+        self.assertEqual(os.listdir(os.path.join(self.out, 'nomercy')), ['deluxe-1.0.0.zip'])
+        # Alone (not in that zip) it builds, Untested.
+        r = self.build_one([self.write('in/Deluxe_Emulator.xdelta', t.make_patch(STOCK, [(0x2004, other[0x2004])]))],
+                           catalog=self.catalog_for(known))
+        self.assertEqual((r['status'], r['aki_tier']), ('converted', 'untested'))
+        # Without a catalog match in the zip, both build.
+        shutil.rmtree(self.out)
+        items, _ = self.build([z], catalog='')
+        self.assertEqual(sorted(i['status'] for i in items), ['converted', 'converted'])
+
+    def test_plan_says_needs_rom_as_build_does(self):
+        rom = self.write('in/Hack.z64', self.hack(0x2000))
+        plan = self.one([rom], roms={})
+        build = self.build_one([rom], roms={})
+        self.assertEqual((plan['status'], plan['needs']), (build['status'], build['needs']))
+        self.assertEqual(plan['needs'], 'the WWF No Mercy ROM the port uses (the conversion is built against it)')
+
+
 class ReviewFixes(BuildBase):
     def test_long_names_get_distinct_ids_and_packages(self):
         name = 'A' * 60

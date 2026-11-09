@@ -545,14 +545,15 @@ class Hostile(Base):
 
 class Worker(Base):
     def test_worker_is_one_process_streaming_json_lines(self):
-        job = {'paths': [self.stock_path, self.write('in/x.z64', fake_rom(code='NZLE'))], 'no_patchfmt': True}
+        job = {'paths': [self.stock_path, self.write('in/x.z64', fake_rom(code='NZLE', title='ZELDA'))], 'no_patchfmt': True}
         r = subprocess.run([sys.executable, '-I', os.path.join(ROOT, 'aki_import.py'), 'worker'],
                            input=json.dumps(job).encode(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
         self.assertEqual(r.returncode, 0, r.stderr.decode())
         lines = [json.loads(l) for l in r.stdout.decode().splitlines()]
         self.assertEqual([l['event'] for l in lines], ['item', 'item', 'done'])
-        # The real SHA-1 table: a synthetic "No Mercy" is a hack of it, the other header isn't an AKI game.
-        self.assertEqual(sorted(l['status'] for l in lines[:2]), ['ready', 'unsupported'])
+        # The real SHA-1 table: a synthetic "No Mercy" is a hack of it (needs-rom: the port's ROM isn't given,
+        # aki-roadmap#268), the other header isn't an AKI game.
+        self.assertEqual(sorted(l['status'] for l in lines[:2]), ['needs-rom', 'unsupported'])
 
 
 class SourceHygiene(unittest.TestCase):

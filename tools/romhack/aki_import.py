@@ -24,9 +24,10 @@ Result status per item:
   converted    (build) built: `package` (and `packages` when a bundle also made a texture package), `converter`,
                `aki_tier` (the catalog's tier, else "untested"), `survey_tier` for hacks
   stock        the unmodified game: nothing to convert
-  have-it      the ledger already has this exact input
-  needs-rom    a patch whose base ROM isn't among the ROMs given (`needs` names it when the patch says which); in a
-               build, also a hack whose port ROM wasn't given (conversions are built against it)
+  have-it      the ledger already has this exact input; or the batch builds the same ROM from another item
+               (`duplicate_of`), or a sibling patch in its archive is the catalog's build of it (`alternative_of`)
+  needs-rom    a patch whose base ROM isn't among the ROMs given (`needs` names it when the patch says which);
+               also a hack whose port ROM wasn't given (conversions are built against it)
   needs-game   (build) a texture pack or bundle that doesn't say its game: pass "game"
   unsupported  not one of the six AKI games, another region, a format we don't read yet (`why`)
   failed       something broke (`why`)
@@ -1206,7 +1207,7 @@ class Builder:
         """(path or None, z64 bytes) of the port's ROM, or BuildError."""
         got = self.roms.by_game.get(game)
         if not got:
-            raise NeedsRom('the %s ROM the port uses (the conversion is built against it)' % GAMES[game]['title'])
+            raise NeedsRom(port_rom_needed(game))
         return got
 
     def port_file(self, game):
@@ -1936,6 +1937,21 @@ class NeedsRom(Exception):
     pass
 
 
+def port_rom_needed(game):
+    """What a hack of `game` needs when the port's ROM wasn't given (plan and build say the same, aki-roadmap#268)."""
+    return 'the %s ROM the port uses (the conversion is built against it)' % GAMES[game]['title']
+
+
+def archive_of(src):
+    """The archive a member came from ('a.zip!x.bps' -> 'a.zip'), or None for a file on disk."""
+    return src.label.rsplit('!', 1)[0] if '!' in src.label else None
+
+
+def is_patch_source(src):
+    return src.kind_hint == 'file' and (looks_like_patch(src.head) or
+                                        os.path.splitext(src.label.lower())[1] in PATCH_EXTS)
+
+
 class NeedsGame(Exception):
     pass
 
@@ -1986,24 +2002,74 @@ def run_job(job, emit, patchfmt=None):
                 finally:
                     s.release()
         counts, seen = {}, set()
+        outputs = {}        # hack ROM SHA-1 -> the result of the item that built (or would build) it
+        matched = {}        # (archive, base, game) -> the result of a catalog-named patch from that archive
+        record = job.get('record') or builder is not None
         for n in notes:
             counts[n['status']] = counts.get(n['status'], 0) + 1
             emit(dict(n, event='item'))
+
+        def finish(s, res, key):
+            out = res.get('result_sha1') or (res.get('sha1') if res.get('kind') == 'rom' else None)
+            first = outputs.get(out) if out and res.get('status') == 'ready' else None
+            if first is not None:
+                # aki-roadmap#268: the same hack twice (Badd Blood's ROM and its xdelta + base) is one conversion.
+                res = dict(item=s.label, status='have-it', key=key, kind=res.get('kind'), game=first.get('game'),
+                           id=first.get('id'), name=first.get('name'), duplicate_of=first['item'],
+                           why='the same conversion as %s in this batch (it builds the same ROM)' % first['item'])
+                if ledger is not None and record and key:
+                    ledger.record(key, dict(first, item=s.label))     # a rerun of this input is have-it too
+            if res.get('status') == 'ready' and res.get('kind') in ('rom', 'patch') and \
+                    res.get('game') in GAMES and res['game'] not in roms.by_game:
+                # Conversions are built against the port's ROM: plan says so as build does (aki-roadmap#268).
+                need = port_rom_needed(res['game'])
+                res.update(status='needs-rom', needs=need, why='needs %s' % need)
+            if builder is not None and res.get('status') == 'ready':
+                builder.build(s, res)
+            res = {k: v for k, v in res.items() if not k.startswith('_')}
+            if out and first is None and res['status'] in ('ready', 'converted'):
+                outputs[out] = res
+            if res.get('kind') == 'patch' and res.get('catalog') and res['status'] in ('ready', 'converted'):
+                matched.setdefault((archive_of(s), res.get('base'), res.get('game')), res)
+            counts[res['status']] = counts.get(res['status'], 0) + 1
+            if ledger is not None and record and key and res['status'] in ('ready', 'converted'):
+                if builder is None or res['status'] == 'converted':
+                    ledger.record(key, res)
+            emit(dict(res, event='item'))
+
+        # aki-roadmap#268: a zip of several patches for one hack (VPW64 Deluxe: Summercart and Emulator_over64MB
+        # xdeltas, both on the VPW2 stock). A patch the catalog doesn't know, from an archive holding other patches,
+        # waits until the others are done; when a sibling on the same base matched the catalog, it is that hack's
+        # other build and is skipped, else it is classified again and built as usual.
+        patches = {}
+        for s in sources:
+            if archive_of(s) and is_patch_source(s):
+                patches[archive_of(s)] = patches.get(archive_of(s), 0) + 1
+        deferred = []
         for s in sources:
             res, key = classify(s, roms, catalog, ledger, patchfmt, taken, keep=builder is not None)
             if key and key in seen:
                 res = dict(item=s.label, status='have-it', key=key, why='same input as another item in this batch')
             if key:
                 seen.add(key)
-            if builder is not None and res.get('status') == 'ready':
-                builder.build(s, res)
-            res = {k: v for k, v in res.items() if not k.startswith('_')}
-            counts[res['status']] = counts.get(res['status'], 0) + 1
-            record = job.get('record') or builder is not None
-            if ledger is not None and record and key and res['status'] in ('ready', 'converted'):
-                if builder is None or res['status'] == 'converted':
-                    ledger.record(key, res)
-            emit(dict(res, event='item'))
+            if res.get('status') == 'ready' and res.get('kind') == 'patch' and not res.get('catalog') and \
+                    patches.get(archive_of(s), 0) > 1:
+                taken.discard(res.get('id'))      # its id is chosen again if it is built
+                deferred.append((s, {k: v for k, v in res.items() if not k.startswith('_')}))
+                continue
+            finish(s, res, key)
+        for s, res in deferred:
+            sibling = matched.get((archive_of(s), res.get('base'), res.get('game')))
+            if sibling is not None:
+                label = sibling.get('name') or sibling.get('id')
+                res = dict(item=s.label, status='have-it', key=res.get('key'), kind='patch', game=res.get('game'),
+                           base=res.get('base'), name=res.get('name'), alternative_of=sibling['item'],
+                           why='another build of %s: skipped; import it alone to build it' % label)
+                counts[res['status']] = counts.get(res['status'], 0) + 1
+                emit(dict(res, event='item'))
+                continue
+            res, key = classify(s, roms, catalog, ledger, patchfmt, taken, keep=builder is not None)
+            finish(s, res, key)
         if ledger is not None and (job.get('record') or builder is not None):
             ledger.save()
     finally:

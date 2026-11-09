@@ -77,8 +77,16 @@ python -I tools\romhack\aki_import.py build C:\Downloads\wrestling --rom nomercy
 
 - **Status per item:** `ready` (with a `route`: `survey` for hack ROMs, which `aki-hack survey`
   sends to make_patch_mod or derelink; `import-pj64`; `wrap-rice` / `wrap-jabo` / `hts-export` /
-  `install`), `stock`, `have-it`, `needs-rom` (`needs` names the base when the patch says which),
-  `unsupported` (`why`), `failed` (`why`).
+  `install`), `stock`, `have-it`, `needs-rom` (`needs` names the base when the patch says which;
+  also a hack whose port ROM wasn't given, in `plan` as in `build`), `needs-game` (`build`: a
+  texture pack or bundle that doesn't say its game; pass `--game`), `unsupported` (`why`),
+  `failed` (`why`).
+- **One conversion per hack in a batch** (#268): an item that builds the same ROM as an earlier
+  one (a hack ROM and its patch) is `have-it` with `duplicate_of`, and the ledger records its input
+  too. In an archive holding several patches, a patch the catalog doesn't know whose sibling (same
+  base) matched a catalog entry is that hack's other build (VPW64 Deluxe's Emulator_over64MB
+  xdelta beside the Summercart one): `have-it` with `alternative_of`, not built; imported alone
+  it builds as usual.
 - **Tiers:** a hack that matches the recipe catalog (`--catalog`, by SHA-1) gets that entry's id,
   name, route and tier; any other hack is `untested` (#224, #172). A built package keeps the tier
   only when it is the tested build: its patch makes the entry's `outputs.sha1`, else its
