@@ -284,6 +284,23 @@ class Containers(Base):
         items, _ = self.run_job([rar, sz], sevenzip=os.path.join(self.dir, 'missing.exe'))
         self.assertEqual({i['status'] for i in items}, {'unsupported'})
 
+    def test_rar_says_how_to_extract_it(self):
+        # aki-roadmap#172: N64Modderz64's WWF No Mercy MOD ships as a .rar; the player is told what to do.
+        rar = self.write('in/WWF MOD - Public Master V1.0.rar', b'Rar!\x1a\x07\x01\x00' + bytes(32))
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, 'w') as z:
+            z.writestr('inner.rar', b'Rar!\x1a\x07\x00' + bytes(32))
+            z.writestr('readme.txt', b'hello')
+        outer = self.write('in/wrapped.zip', buf.getvalue())
+        items, _ = self.run_job([rar, outer])
+        rars = [i for i in items if i.get('kind') == 'archive']
+        self.assertEqual(len(rars), 2, items)
+        self.assertEqual(len(items), 2, items)          # readme.txt makes no item
+        for i in rars:
+            self.assertEqual(i['status'], 'unsupported')
+            self.assertIn('7-Zip', i['why'])
+            self.assertIn('import the folder', i['why'])
+
     def test_loose_save_and_cheats(self):
         items, _ = self.run_job([self.write('in/a.fla', bytes(16)), self.write('in/b.cht', b'[x]')])
         self.assertEqual(sorted(i['kind'] for i in items), ['codes', 'save'])

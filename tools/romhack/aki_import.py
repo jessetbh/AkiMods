@@ -16,7 +16,7 @@ Subcommands (python aki_import.py <cmd> -h):
 
 What an item can be (kind): rom, patch, nrm (a patch mod), package (aki-package.json / aki.json), pj64-bundle (a
 Project64 folder with the mod's cheats, save and textures), texture-pack (rt64 / rice / jabo / hts naming), save,
-codes, unknown. Archives (zip read in memory; 7z unpacked once by 7zr) are opened and their contents sorted.
+codes, archive (a RAR: extract it first), unknown. Archives (zip read in memory; 7z unpacked once by 7zr) are opened and their contents sorted.
 
 Result status per item:
   ready        identified; `route` says which converter builds it (survey -> make_patch_mod / derelink, import-pj64,
@@ -405,10 +405,16 @@ def expand(path, job, sources, notes, depth=0):
     elif head.startswith(b"7z\xbc\xaf\x27\x1c"):
         expand_7z(path, job, sources, notes)
     elif head.startswith(b'Rar!'):
-        notes.append(dict(item=path, status='unsupported', why='RAR archive: extract it first, then import the folder'))
+        notes.append(dict(item=path, kind='archive', status='unsupported', why=RAR_WHY))
     else:
         sources.append(Source(path, 'file', reader=lambda p=path: read_file(p), path=path,
                               size=os.path.getsize(path), head=head))
+
+
+# RAR can't be read here (7zr has no RAR codec): say what to do instead, for a .rar picked or inside a zip
+# (aki-roadmap#172; a 7z's members are extracted to a folder and walked, so a RAR in one is a picked file).
+RAR_WHY = ("a RAR archive, which the importer can't open yet. Extract it first with 7-Zip (free, from 7-zip.org: "
+           "right-click it, 7-Zip, Extract to), then import the folder it made")
 
 
 def member_problem(m):
@@ -480,6 +486,9 @@ def expand_zip_members(label, fh, opener, origin, sources, notes, depth, blob):
                 continue
             with z.open(m) as f:
                 head = f.read(64)
+            if ext == '.rar' or head.startswith(b'Rar!'):
+                notes.append(dict(item=member_label, kind='archive', status='unsupported', why=RAR_WHY))
+                continue
             if not (ext in ROM_EXTS + PATCH_EXTS + ('.nrm',) or looks_like_rom(head) or looks_like_patch(head)):
                 continue
             if why:
