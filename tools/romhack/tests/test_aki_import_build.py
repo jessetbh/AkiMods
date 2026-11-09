@@ -437,6 +437,12 @@ class Rev0Codes(BuildBase):
     """aki-roadmap#228: a bundle's codes for No Mercy Rev 0 are translated to the port's Rev 1 through the derelink
     map (a shipped one, else made from a stock Rev 0 ROM), with the hand-made packs' --map-range."""
 
+    def setUp(self):
+        super().setUp()
+        # The real maps/nomercy-rev0.json ships: these tests start without one, as a batch without it would.
+        saved, ai.MAPS_DIR = ai.MAPS_DIR, os.path.join(self.dir, 'no-maps')
+        self.addCleanup(setattr, ai, 'MAPS_DIR', saved)
+
     def bundle(self, root='in/My Mod', rom=None):
         mod = root.rsplit('/', 1)[-1].replace(' ', '')     # the cheats' folder is the mod's name
         self.write(root + '/Project64.cht', '\n'.join([
@@ -515,6 +521,20 @@ class Rev0Codes(BuildBase):
         self.assertEqual(r['codes_translation']['map'], 'maps/nomercy-rev0.json')
         self.assertIn('81050058 0933', self.codes(r)[0])
         self.assertEqual(dl.calls, [])
+
+    def test_the_shipped_rev0_map_holds_address_ranges_only(self):
+        # maps/nomercy-rev0.json ships with the launcher: [lo, hi, shift, kind] ranges, nothing from the ROM itself.
+        path = os.path.join(os.path.dirname(ai.__file__), 'maps', 'nomercy-rev0.json')
+        raw = json.load(open(path))
+        self.assertEqual(set(raw), {'main', 'overlays', 'identity'})
+        ranges = raw['main'] + [r for v in raw['overlays'].values() for r in v]
+        self.assertGreater(len(ranges), 1000)
+        for lo, hi, shift, kind in ranges:
+            self.assertTrue(0x80000000 <= lo < hi <= 0x80800000 and -0x400000 < shift < 0x400000, (lo, hi, shift))
+            self.assertIn(kind, ('text', 'entry', 'data', 'heap', 'save'))
+        for lo, hi in raw['identity']:
+            self.assertTrue(0x80000000 <= lo < hi <= 0x80800000)
+        self.assertLess(os.path.getsize(path), 512 << 10)
 
     def test_the_map_is_made_once_per_batch(self):
         self.write('more/nm10.z64', t.REV0)
