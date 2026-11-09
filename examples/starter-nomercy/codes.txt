@@ -1,0 +1,31 @@
+# AKI Starter Kit: codes file (CC0 1.0).
+#
+# A codes file is GameShark-style codes that the game applies every frame while the conversion runs (the cheats
+# mod's engine; full grammar: mods\cheats\README.md, "Codes files"). aki.json names it as components.codes.
+#
+# Lines:
+#   "# rom: <revision>"  the ROM revision the addresses are for (the first one counts). The port runs No Mercy
+#                        Rev 1; codes published for Rev 0 must be translated first (tools\romhack\aki_conv.py).
+#   "[Group\Name]"       a name for the codes under it: a note for people (the engine ignores it).
+#   "# default: on"      also a note for people: every code in the file runs, all the time (no off switch).
+#   "#" anything else    a comment.
+#   XXXXXXXX YYYY        one code: type + address, then the value.
+# Code types used here:
+#   80 aaaaaa 00vv  write byte vv to 0x80aaaaaa         81 aaaaaa vvvv  write halfword vvvv
+#   D3 aaaaaa vvvv  run the next code only if the halfword at 0x80aaaaaa is NOT vvvv
+# rom: nomercy-rev1
+
+[Starter Kit\Championship money stays full]
+# default: on
+# A per-frame write: the Championship mode money (u16 at 0x80097EDA) is set to FFFF every frame. (The kit unlocks
+# everything through its seed save instead, so you can see both ways of changing the game: a code runs every
+# frame while the conversion runs; the save edit is applied once and then belongs to the player's save.)
+81097EDA FFFF
+
+[Starter Kit\Player 1 full spirit in matches]
+# default: on
+# A conditional: the match frame counter (u16 at 0x801532C0) reads FFFF outside a match, and the wrestler slots
+# only hold wrestlers during one. So: only while a match runs (counter != FFFF), set wrestler slot 0's spirit
+# (u8 at 0x801599C0 + 0x7F) to 100, the top of the meter. Slot n is at 0x801599C0 + n * 0x358.
+D31532C0 FFFF
+80159A3F 0064

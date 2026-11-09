@@ -1,0 +1,759 @@
+{
+ "format": "aki-import-catalog",
+ "version": 1,
+ "about": "Conversions the AKI team tested (aki-roadmap#172, #228): hashes and notes only, no ROM or hack data. inputs.sha1: the hack ROM (.z64 order) a player imports, or its patch file (a patch whose base ROM is missing then names its game); outputs.sha1: the ROM the tested package's patch makes from the port ROM; outputs.codes_sha1: its codes.txt; outputs.content_sha1: its saves and texture images, for packs with no patch or codes (the entry then also names the built conversion). A player-built package gets the tier only when its output matches; otherwise it is Untested.",
+ "tiers": {
+  "verified": "Verified: plays through a match like the original on an emulator.",
+  "experimental": "Experimental: runs, with known problems.",
+  "unsupported": "Unsupported: known not to work.",
+  "untested": "Untested: built by aki-import, not tested by the AKI team; it may crash."
+ },
+ "entries": [
+  {
+   "id": "aew64",
+   "name": "AEW 64",
+   "game": "nomercy",
+   "version": "1.2.0",
+   "tier": "verified",
+   "converter": "import-pj64",
+   "known_issues": [
+    "The attract demo never starts",
+    "Codes that change the game's code while it runs do nothing"
+   ],
+   "note": "No attract demo: press Start.",
+   "outputs": {
+    "sha1": [
+     "315C519CFE6F7B3497D5D04A92A353F0C465AE78"
+    ],
+    "codes_sha1": [
+     "77D870B725560DE34E17DFB16658C9C0557730DF"
+    ]
+   }
+  },
+  {
+   "id": "btbw",
+   "name": "ECW Born to be Wired (open beta)",
+   "game": "nomercy",
+   "version": "0.2.28",
+   "tier": "experimental",
+   "converter": "derelink",
+   "known_issues": [
+    "Rare freeze when the attract demo loads",
+    "Model packs do not load"
+   ],
+   "note": "The attract demo can freeze. Model packs do not load.",
+   "inputs": {
+    "sha1": [
+     "877622A56AD9664262CA17D4D694513A95E24EB2"
+    ]
+   },
+   "outputs": {
+    "sha1": [
+     "1764DBE1787A1EEC47A200C06EA3C68E45742333"
+    ],
+    "codes_sha1": [
+     "6F107A6B780F00675691EF99914A436F0D116E6D"
+    ]
+   }
+  },
+  {
+   "id": "forever_indy",
+   "name": "Forever Indy",
+   "game": "nomercy",
+   "version": "1.0.0",
+   "tier": "verified",
+   "converter": "import-pj64",
+   "known_issues": [
+    "The attract demo can pick a different venue and teams than the original"
+   ],
+   "outputs": {
+    "codes_sha1": [
+     "7EA4277673D1241A451DEFE083B90012416F8356"
+    ]
+   }
+  },
+  {
+   "id": "legends_c64",
+   "name": "WWF Legends: Challenge 64",
+   "game": "nomercy",
+   "version": "2026.6.16",
+   "tier": "experimental",
+   "converter": "import-pj64",
+   "inputs": {
+    "sha1": [
+     "8AC33845E349B539FE456EA5E0B6821629F479C3"
+    ]
+   },
+   "bake_exclude": [
+    "Wrestler Info Icon\\Mapping"
+   ],
+   "codes_fixups": [
+    "legends_portrait_guards",
+    "legends_block_guards",
+    "legends_fb_relocate",
+    "legends_unpark"
+   ],
+   "known_issues": [
+    "The in-match pause screen draws noise",
+    "Some codes made for the original release do not work",
+    "Codes that change the game's code while it runs do nothing",
+    "Can crash in the menus after a while"
+   ],
+   "note": "The pause screen draws noise. Ropes, body shapes and extra attires do not apply. Can crash on a save in a certain state.",
+   "outputs": {
+    "sha1": [
+     "63BB51FB10C96F8DBC15485740A330B9CDC18374",
+     "4525C92D069BEB709514F98BED9D6FE150622FFE"
+    ],
+    "codes_sha1": [
+     "9C32DDE6E48ED87859BAD28A057AA156E4C5E64D",
+     "A2E83248CC1DC5A07DABBB68BA481C61C8003D7E"
+    ]
+   }
+  },
+  {
+   "id": "lucha_underground",
+   "name": "Lucha Underground",
+   "game": "nomercy",
+   "version": "1.0.0",
+   "tier": "verified",
+   "converter": "import-pj64",
+   "known_issues": [
+    "Move codes are not checked against the original",
+    "Codes that change the game's code while it runs do nothing",
+    "The attract demo can pick a different venue and teams than the original"
+   ],
+   "note": "Menu art needs runtime code writes.",
+   "outputs": {
+    "sha1": [
+     "9B80D00D0723B5E2406A0D5821263B10678E258A"
+    ],
+    "codes_sha1": [
+     "1DAA31BCF274AE972AA3EC1C3C43B07CA6A51AFA"
+    ]
+   }
+  },
+  {
+   "id": "n64modderz_mod",
+   "name": "WWF No Mercy MOD (n64modderz)",
+   "game": "nomercy",
+   "version": "1.0.0",
+   "tier": "verified",
+   "converter": "import-pj64",
+   "tier_proposed": true,
+   "note": "Textures and a save only.",
+   "outputs": {
+    "content_sha1": [
+     "C54E75A9C0B225513F1A2551DFE655028C502C5D"
+    ]
+   }
+  },
+  {
+   "id": "njpw2017",
+   "name": "NJPW 2017",
+   "game": "nomercy",
+   "version": "1.0.1",
+   "tier": "verified",
+   "converter": "import-pj64",
+   "known_issues": [
+    "The attract demo can pick a different venue and teams than the original"
+   ],
+   "outputs": {
+    "sha1": [
+     "F74629A647C44C240836E06ACE49A0078A4DD9A7"
+    ],
+    "codes_sha1": [
+     "A823E52368468D68B6E5C2FECAB15E59754E0016"
+    ]
+   }
+  },
+  {
+   "id": "nmp_v21",
+   "name": "WWF No Mercy Plus v2.1",
+   "game": "nomercy",
+   "version": "2.1.0",
+   "tier": "verified",
+   "converter": "derelink",
+   "known_issues": [
+    "Model packs do not load",
+    "The attract demo can pick a different venue and teams than the original"
+   ],
+   "note": "Pillarboxed menus are correct. Model packs do not load.",
+   "outputs": {
+    "sha1": [
+     "6F212424DD0AF262C7D616BC5CC526D68E919A40"
+    ],
+    "codes_sha1": [
+     "BF320BA8BFB5087A41219F7578A66DF80F4BC13C"
+    ]
+   }
+  },
+  {
+   "id": "nmp_v3",
+   "name": "WWF No Mercy Plus V3",
+   "game": "nomercy",
+   "version": "3.0.0",
+   "tier": "verified",
+   "converter": "derelink",
+   "known_issues": [
+    "Model packs do not load",
+    "The attract demo can pick a different venue and teams than the original"
+   ],
+   "note": "Model packs do not load.",
+   "inputs": {
+    "sha1": [
+     "F0AB0CD10A967134F28D4A0B0197F9B1FD1579A4"
+    ]
+   },
+   "outputs": {
+    "sha1": [
+     "4D6C499D20DFCF54B593E71C05546075678278F8"
+    ],
+    "codes_sha1": [
+     "25FA52AAFDEC8FE24494D29BAC482E1938AFE4CD"
+    ]
+   }
+  },
+  {
+   "id": "nmp_v3_sc",
+   "name": "WWF No Mercy Plus V3 Open Beta (SC)",
+   "game": "nomercy",
+   "version": "3.0.1",
+   "tier": "verified",
+   "converter": "derelink",
+   "known_issues": [
+    "Model packs do not load",
+    "The attract demo can pick a different venue and teams than the original"
+   ],
+   "note": "Model packs do not load.",
+   "inputs": {
+    "sha1": [
+     "F6885CC298A78AEDB2389B1AD60E069F1BB13E3D"
+    ]
+   },
+   "outputs": {
+    "sha1": [
+     "64264DC78F0CA9693F98526E0FB043263A64CF56"
+    ],
+    "codes_sha1": [
+     "25FA52AAFDEC8FE24494D29BAC482E1938AFE4CD"
+    ]
+   }
+  },
+  {
+   "id": "nomercy_unlocked",
+   "name": "WWF No Mercy (Unlocked)",
+   "game": "nomercy",
+   "version": "1.1.0",
+   "tier": "verified",
+   "converter": "make_patch_mod",
+   "known_issues": [
+    "The attract demo can pick a different venue and teams than the original"
+   ],
+   "inputs": {
+    "sha1": [
+     "1172A418603F4083B7666FE7FC87B6119AD550D9"
+    ]
+   },
+   "outputs": {
+    "sha1": [
+     "1172A418603F4083B7666FE7FC87B6119AD550D9"
+    ]
+   }
+  },
+  {
+   "id": "poe_v11",
+   "name": "Project Outsider Extreme v1.1",
+   "game": "nomercy",
+   "version": "1.1.0",
+   "tier": "experimental",
+   "converter": "derelink",
+   "known_issues": [
+    "Built before the latest converter fixes"
+   ],
+   "note": "Expect an unreadable pause menu; a second-boot hang and a Quit Match freeze are likely.",
+   "outputs": {
+    "sha1": [
+     "585EC9FE8F70CCE1B81871039C5A8EB4589E889E"
+    ],
+    "codes_sha1": [
+     "25FA52AAFDEC8FE24494D29BAC482E1938AFE4CD"
+    ]
+   }
+  },
+  {
+   "id": "showdown64",
+   "name": "Showdown 64",
+   "game": "nomercy",
+   "version": "6.0.4",
+   "tier": "experimental",
+   "converter": "import-pj64",
+   "tier_proposed": true,
+   "known_issues": [
+    "Runs without its ROM patch",
+    "Codes that change the game's code while it runs do nothing"
+   ],
+   "note": "Its ROM patch has not been applied yet: not the full hack.",
+   "outputs": {
+    "sha1": [
+     "B230E544CE1EE66263BA084E125835B3BA4C9334"
+    ],
+    "codes_sha1": [
+     "1F291B276C98ED2BB3104AAC557AF827335A2344",
+     "FED3EE868160FEF0CD1E1F2CB5EAF9EEACECCFA6"
+    ]
+   }
+  },
+  {
+   "id": "some_nm_mod3",
+   "name": "Some No Mercy Mod v3",
+   "game": "nomercy",
+   "version": "1.0.0",
+   "tier": "verified",
+   "converter": "import-pj64",
+   "known_issues": [
+    "Move codes are not checked against the original",
+    "Codes that change the game's code while it runs do nothing",
+    "The attract demo can pick a different venue and teams than the original"
+   ],
+   "note": "The pack notes warn of a possible Mall freeze.",
+   "outputs": {
+    "sha1": [
+     "81334A3C6B72DB4470834D2B1289C78EC02D00DF"
+    ],
+    "codes_sha1": [
+     "2C1E113ADBA83A98AA5A8D3D5AA613927F15DFE7"
+    ]
+   }
+  },
+  {
+   "id": "tna2015",
+   "name": "TNA No Mercy 2015",
+   "game": "nomercy",
+   "version": "1.0.5",
+   "tier": "verified",
+   "converter": "import-pj64",
+   "known_issues": [
+    "The attract demo can pick a different venue and teams than the original"
+   ],
+   "outputs": {
+    "sha1": [
+     "4CE1C9CC98A4A3D1D98E715426530D8F456CBE1D"
+    ],
+    "codes_sha1": [
+     "16266401CA70236484C7EB574CD16F190BFE309D"
+    ]
+   }
+  },
+  {
+   "id": "tna_vs_roh",
+   "name": "TNA vs ROH",
+   "game": "nomercy",
+   "version": "1.1.0",
+   "tier": "verified",
+   "converter": "import-pj64",
+   "known_issues": [
+    "The attract demo can pick a different venue and teams than the original"
+   ],
+   "outputs": {
+    "codes_sha1": [
+     "86B86E95BC5CE566A7EF955734E321C867A980B0"
+    ]
+   }
+  },
+  {
+   "id": "wwf_invasion",
+   "name": "WWF inVasion",
+   "game": "nomercy",
+   "version": "1.0.2",
+   "tier": "verified",
+   "converter": "import-pj64",
+   "known_issues": [
+    "The Arena tab's off-screen list shows in the Expand side area"
+   ],
+   "note": "The off-screen arena list shows in Expand.",
+   "outputs": {
+    "sha1": [
+     "3A27D8F3D2DABE3396F1DFA9E0C30BE54D1FEC49"
+    ],
+    "codes_sha1": [
+     "4D4663A99C9F9F5E4FC8F85D88EEA0D74B51586D"
+    ]
+   }
+  },
+  {
+   "id": "revenji",
+   "name": "WCW-nWo Revenji",
+   "game": "revenge",
+   "version": "1.0.0",
+   "tier": "verified",
+   "converter": "derelink",
+   "inputs": {
+    "sha1": [
+     "0B84155F0696727B34F4E616DEF0D7B2E44E7AD1"
+    ]
+   },
+   "outputs": {
+    "sha1": [
+     "AE739389A41185BD06051A8127AF8AAF205AC4D8"
+    ]
+   }
+  },
+  {
+   "id": "revse",
+   "name": "WCW-nWo Revenge - Starrcade Edition 2.0",
+   "game": "revenge",
+   "version": "2.0.0",
+   "tier": "verified",
+   "converter": "derelink",
+   "known_issues": [
+    "Stalls about 16 seconds in"
+   ],
+   "note": "Intro runs faster than on an emulator.",
+   "outputs": {
+    "sha1": [
+     "60F118069E9DC0C7029571005372A45BC0139A15"
+    ]
+   }
+  },
+  {
+   "id": "salvo",
+   "name": "Virtual Pro Wrestling Salvo",
+   "game": "revenge",
+   "version": "1.0.0",
+   "tier": "verified",
+   "converter": "derelink",
+   "known_issues": [
+    "Entrance pyro never varies"
+   ],
+   "note": "Entrance pyro never varies.",
+   "inputs": {
+    "sha1": [
+     "32EB5EB1F13AC7F2A97FD0EF8D0E1E2506C8D83A"
+    ]
+   },
+   "outputs": {
+    "sha1": [
+     "31EDDB60B81220639132A8605774E172E8C17758"
+    ]
+   }
+  },
+  {
+   "id": "starrcade",
+   "name": "WCW/nWo Revenge: Starrcade Edition",
+   "game": "revenge",
+   "version": "1.0.1",
+   "tier": "verified",
+   "converter": "derelink",
+   "outputs": {
+    "sha1": [
+     "37EC6837B8D85DD8342186EF164A173C421B68CA"
+    ]
+   }
+  },
+  {
+   "id": "ulrevenge",
+   "name": "WCW-nWo Revenge [Unlocked]",
+   "game": "revenge",
+   "version": "1.0.0",
+   "tier": "verified",
+   "converter": "derelink",
+   "outputs": {
+    "sha1": [
+     "3B941CF91F34AC721BBE44833EE2A3456141A925"
+    ]
+   }
+  },
+  {
+   "id": "ajpw64",
+   "name": "All-Japan Pro Wrestling 64",
+   "game": "vpw2",
+   "version": "0.3.0",
+   "tier": "verified",
+   "converter": "derelink",
+   "inputs": {
+    "sha1": [
+     "67F2800CB2F0D8557699AC90FBD06716CC1E574D"
+    ]
+   },
+   "outputs": {
+    "sha1": [
+     "B684460F268A03310DE9CBC0B5408FAE64E2A6B8"
+    ]
+   }
+  },
+  {
+   "id": "gs64",
+   "name": "Giant Series 64",
+   "game": "vpw2",
+   "version": "0.1.0",
+   "tier": "verified",
+   "converter": "derelink",
+   "known_issues": [
+    "The attract demo can pick a different venue and teams than the original"
+   ],
+   "outputs": {
+    "sha1": [
+     "F1CD9C9BB6C3D02C368F03D0DE2800349B22B2B1"
+    ]
+   }
+  },
+  {
+   "id": "pnd",
+   "name": "PRIDE Never Die",
+   "game": "vpw2",
+   "version": "0.2.0",
+   "tier": "verified",
+   "converter": "derelink",
+   "known_issues": [
+    "The attract demo can pick a different venue and teams than the original",
+    "Contour lines during entrance camera fades"
+   ],
+   "outputs": {
+    "sha1": [
+     "4F0758F61840CE8B566A30B7E4619353EBDAC02E"
+    ]
+   }
+  },
+  {
+   "id": "ulvpw2",
+   "name": "Virtual Pro Wrestling 2 [Unlocked]",
+   "game": "vpw2",
+   "version": "1.0.0",
+   "tier": "verified",
+   "converter": "derelink",
+   "inputs": {
+    "sha1": [
+     "B84585D0CFE3F1313D049DC67A484C413D2D8A03"
+    ]
+   },
+   "outputs": {
+    "sha1": [
+     "C1EF1AEF8D9840536F4B28A4718D0FB6F7338C49"
+    ]
+   }
+  },
+  {
+   "id": "vpw2_english",
+   "name": "Virtual Pro Wrestling 2 (English Patched)",
+   "game": "vpw2",
+   "version": "1.0.0",
+   "tier": "verified",
+   "converter": "make_patch_mod",
+   "known_issues": [
+    "Keeps the stock boot image",
+    "The attract demo can pick a different venue and teams than the original"
+   ],
+   "note": "Start a new save to get the hack's default save data.",
+   "inputs": {
+    "sha1": [
+     "B829FDBC2DB6B8B57BE85ACBE48134DDC2A55833"
+    ]
+   },
+   "outputs": {
+    "sha1": [
+     "B829FDBC2DB6B8B57BE85ACBE48134DDC2A55833"
+    ]
+   }
+  },
+  {
+   "id": "vpw2_english_beta3_rey",
+   "name": "VPW2 English Beta 3 (rey)",
+   "game": "vpw2",
+   "version": "1.0.0",
+   "tier": "verified",
+   "converter": "make_patch_mod",
+   "known_issues": [
+    "The attract demo can pick a different venue and teams than the original"
+   ],
+   "inputs": {
+    "sha1": [
+     "DD5BDEE4A829230ECD04A1E85E35D08FB5A64D07"
+    ]
+   },
+   "outputs": {
+    "sha1": [
+     "DD5BDEE4A829230ECD04A1E85E35D08FB5A64D07"
+    ]
+   }
+  },
+  {
+   "id": "vpw2fe",
+   "name": "VPW2 freem Edition",
+   "game": "vpw2",
+   "version": "0.90.0",
+   "tier": "verified",
+   "converter": "derelink",
+   "inputs": {
+    "sha1": [
+     "2D7CFD5396C07AEE566BF394537961F027E5E8E7"
+    ]
+   },
+   "outputs": {
+    "sha1": [
+     "7912E014CA2CF8AD2DE2DE1D5CEE445D91D5080B"
+    ]
+   }
+  },
+  {
+   "id": "vpw2rr",
+   "name": "Virtual Pro Wrestling 2 - Royal Road",
+   "game": "vpw2",
+   "version": "1.0.0",
+   "tier": "verified",
+   "converter": "derelink",
+   "known_issues": [
+    "The attract demo can pick a different venue and teams than the original"
+   ],
+   "outputs": {
+    "sha1": [
+     "EE1CF1FE75C5C0AEA8A88667E82D706E0D5FA1DF"
+    ]
+   }
+  },
+  {
+   "id": "vpw64dx",
+   "name": "Virtual Pro Wrestling 64 Deluxe v1.1",
+   "game": "vpw2",
+   "version": "1.1.0",
+   "tier": "experimental",
+   "converter": "derelink",
+   "note": "v1.1. A new save's roster matches the original hack; singles and title matches play. Full matches are unchecked against an emulator.",
+   "inputs": {
+    "sha1": [
+     "857E51E0F7A81BF9E477269E6D0A7A322B14FF95"
+    ]
+   },
+   "outputs": {
+    "sha1": [
+     "66FAED1241D4D0F7FF1BADBDF2DD6D1925BFC96E"
+    ],
+    "codes_sha1": [
+     "2905E8C60101B484598579D8B6EBF50300E17A0E"
+    ]
+   }
+  },
+  {
+   "id": "vpw64st",
+   "name": "Virtual Pro Wrestling 64 - English Translation",
+   "game": "vpw64",
+   "version": "1.0.0",
+   "tier": "verified",
+   "converter": "make_patch_mod",
+   "known_issues": [
+    "Keeps the stock boot image",
+    "The Controller Pak note prompt never appears"
+   ],
+   "note": "Old saves keep Japanese names: reset the save.",
+   "inputs": {
+    "sha1": [
+     "524F9ED2E17E160A7A853DA1E704D6174F7041C9"
+    ]
+   },
+   "outputs": {
+    "sha1": [
+     "524F9ED2E17E160A7A853DA1E704D6174F7041C9"
+    ]
+   }
+  },
+  {
+   "id": "hpm_sk11",
+   "name": "ECW House Party Mixtape (SK Ed. v1.1)",
+   "game": "wm2k",
+   "version": "1.1.0",
+   "tier": "verified",
+   "converter": "derelink",
+   "known_issues": [
+    "A thin strip of art shows past the 4:3 edge in Expand"
+   ],
+   "note": "Overlapping menu text and the red flame screen are the hack's own.",
+   "inputs": {
+    "sha1": [
+     "4554EE2E539000B847107142FB4D10C7935E2101"
+    ]
+   },
+   "outputs": {
+    "sha1": [
+     "7C1F84049F1C331F6C626F12581401140A225D61"
+    ]
+   }
+  },
+  {
+   "id": "summit_gamma",
+   "name": "SUMMIT - Virtual Pro Wrestling Gamma",
+   "game": "wm2k",
+   "version": "1.0.0",
+   "tier": "verified",
+   "converter": "derelink",
+   "inputs": {
+    "sha1": [
+     "F09EDAD035BF329A8EBF7AEE246B2B4FB94137D1"
+    ]
+   },
+   "outputs": {
+    "sha1": [
+     "5C05406474A09D83AC6BE605D2B05EE706764131"
+    ]
+   }
+  },
+  {
+   "id": "wmx64",
+   "name": "WrestleMania X 64",
+   "game": "wm2k",
+   "version": "1.0.0",
+   "tier": "verified",
+   "converter": "derelink",
+   "note": "Pay Per View never opened in testing.",
+   "outputs": {
+    "sha1": [
+     "0AB183200BB13270999EDD0052FAAE11330CE10E"
+    ]
+   }
+  },
+  {
+   "id": "wz_badd_blood",
+   "name": "WWF WarZone - Badd Blood",
+   "game": "wm2k",
+   "version": "1.0.0",
+   "tier": "verified",
+   "converter": "derelink",
+   "note": "Singles matches were checked; tag, the other modes and a finished match were not.",
+   "inputs": {
+    "sha1": [
+     "AA8EFEDE5A93CBD943B34FC2A46FE780A1E54825",
+     "2CA4E54E452C4C8C67A352F638E866562B75479D"
+    ]
+   },
+   "outputs": {
+    "sha1": [
+     "1E153A1719596F3164071602861BAFCB34482744"
+    ],
+    "codes_sha1": [
+     "1B2B427F7A098E5F0DDEB6C64E53BD49F68A178B"
+    ]
+   }
+  },
+  {
+   "id": "underground9",
+   "name": "WCW vs. nWo: 9 Underground",
+   "game": "wt",
+   "version": "1.0.0",
+   "tier": "experimental",
+   "converter": "derelink",
+   "known_issues": [
+    "Can crash about 10 seconds in"
+   ],
+   "note": "Plays, but the hack's own roster and arenas are unchecked.",
+   "inputs": {
+    "sha1": [
+     "4936CD0718D4DF176190EF377DC397483BAEA076"
+    ]
+   },
+   "outputs": {
+    "sha1": [
+     "869F65C454EA6CFE16338E03FC78FD2C4F653A54"
+    ]
+   }
+  }
+ ]
+}

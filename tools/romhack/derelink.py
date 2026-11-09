@@ -1,0 +1,3310 @@
+"""De-relink an AKI-engine ROM hack back onto the stock layout, as a ROM-patch mod.
+
+Games are described by layout files (layouts/<game>.json: No Mercy, WrestleMania 2000); the
+one whose base_sha1 matches --base is used. Hacks that kept the stock layout (WM2000's) need
+little more than their changed functions ported and their extra code registered.
+
+Big No Mercy hacks (No Mercy Plus, ECW Born to be Wired) were relinked: every section moved in
+RAM, so almost every function's bytes differ, but mostly only in address immediates. Playing
+such a hack through the stock recompiled code needs the hack's code and data at stock
+addresses. This tool builds that: a ROM with the stock code/data layout, where
+
+  - functions the hack only moved are the stock bytes (the static recompiled code runs them,
+    with every repair the port made);
+  - functions the hack changed are its version, with addresses rewritten to stock ones, in
+    place (the runtime live-recompiles functions whose bytes differ from stock);
+  - code the hack added or reshaped goes to a new code area past the end of the ROM, described
+    in relink.json so the runtime registers it; stock entry points that the hack reworked
+    become `j <new code>` trampolines;
+  - data the hack changed is copied to the stock locations, pointers translated;
+  - variables the hack added to bss go to a free Expansion-RAM block;
+  - assets keep the hack's ROM offsets (the hack's own file tables point there).
+
+    python tools/romhack/derelink.py analyze --base nomercy.z64 --hack hack.z64
+    python tools/romhack/derelink.py build --base nomercy.z64 --hack hack.z64 --id nmplus21 \\
+        --name "No Mercy Plus v2.1" --out nmplus21.nrm
+
+Self-contained (Python 3.8+, no third-party modules): it reads the stock layout from
+layouts/ next to this file, so it runs on a player's machine. A layout holds addresses only
+(sections, function offsets/sizes, the overlay descriptor table, co-residency, stock code kept
+inside data areas) plus the base ROM's SHA1; `gen-layout` writes one from a port's
+RecompiledFuncs/recomp_overlays.inl and its ROM.
+"""
+import argparse, bisect, collections, io, json, os, struct, sys, zipfile
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import mips
+from mips import word, put_word
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+LAYOUTS_DIR = os.path.join(HERE, 'layouts')
+LAYOUT_PATH = os.path.join(LAYOUTS_DIR, 'nomercy.json')
+
+
+def find_layout(base):
+    """The layout file whose base_sha1 matches the base ROM, or None."""
+    import glob, hashlib
+    sha = hashlib.sha1(base).hexdigest()
+    for path in sorted(glob.glob(os.path.join(LAYOUTS_DIR, '*.json'))):
+        if json.load(open(path)).get('base_sha1') == sha:
+            return path
+    return None
+DESC_WORDS = 9
+
+
+# ------------------------------------------------------------------------------- layouts
+
+class Section:
+    """One code section: text, then data, then bss, loaded linearly from rom."""
+
+    def __init__(self, name, rom, text, data, bss, end, funcs=(), slot=None):
+        self.name, self.rom, self.text, self.data, self.bss, self.end = name, rom, text, data, bss, end
+        self.funcs = list(funcs)    # [(offset, size)] relative to text
+        self.slot = slot            # overlay slot (vram) or None for main
+
+    def rom_of(self, vram):
+        return self.rom + (vram - self.text)
+
+    @property
+    def rom_end(self):
+        return self.rom + (self.bss - self.text)
+
+    def to_json(self):
+        return dict(name=self.name, rom=self.rom, text=self.text, data=self.data, bss=self.bss, end=self.end,
+                    funcs=self.funcs, slot=self.slot)
+
+    @staticmethod
+    def from_json(d):
+        return Section(d['name'], d['rom'], d['text'], d['data'], d['bss'], d['end'], [tuple(f) for f in d['funcs']], d['slot'])
+
+
+def read_descriptors(rom, table_off, count):
+    out = []
+    for i in range(count):
+        w = struct.unpack_from('>9I', rom, table_off + 4 * DESC_WORDS * i)
+        out.append(w)
+    return out
+
+
+def find_descriptor_table(rom, count=5, lo=0x1000, hi=0x400000, hint=None):
+    """Offset of the overlay descriptor table (9 words each: rom start/end, entry, text start/end,
+    data start/end, bss start/end). `hint`: where the stock table is (hacks rarely move it)."""
+    def ok(w):
+        return (0x1000 <= w[0] < w[1] <= len(rom) and all(0x80000000 <= x < 0x80800000 for x in w[2:9])
+                and w[3] <= w[4] <= w[5] <= w[6] <= w[7] <= w[8] and w[1] - w[0] == w[6] - w[3])
+    def table_at(off):
+        return off + 0x24 * count <= len(rom) and all(ok(struct.unpack_from('>9I', rom, off + 0x24 * i)) for i in range(count))
+    if hint is not None and table_at(hint):
+        return hint
+    for off in range(lo, min(hi, len(rom) - 0x24 * count), 4):
+        if table_at(off):
+            return off
+    return None
+
+
+def entry_bss(rom):
+    """(bss start, bss size) from the entry point's clear loop (lui/addiu t0, lui/ori t1)."""
+    words = [word(rom, 0x1000 + 4 * i) for i in range(20)]
+    if words[0] >> 26 == 2:          # a hack's entry hook: follow the jump into its cave
+        return None
+    refs = mips.hilo_refs(words)
+    vals = [a for _, _, a in refs]
+    return vals[0], vals[1]
+
+
+ORDER = ['ovl_a', 'ovl_b', 'ovl_c', 'ovl_e', 'ovl_d']   # No Mercy's descriptor order (old layouts)
+
+
+def gen_layout(overlays_inl, base_rom, game, mod_game_id, manifest_base):
+    """Stock layout from recomp_overlays.inl + the stock ROM's descriptor table and entry.
+    Overlay sections are matched to descriptors by ROM start. Other recompiled sections (code a
+    segment keeps after its data, e.g. WM2000's) are listed as extra stock code ranges."""
+    import hashlib
+    from bps import load_sections
+    secs = load_sections(overlays_inl)
+    ovls = [x for x in secs if '_ovl_' in x[0]]
+    table = find_descriptor_table(base_rom, count=len(ovls))
+    assert table is not None, 'no overlay descriptor table'
+    descs = read_descriptors(base_rom, table, len(ovls))
+    bss_start, bss_size = entry_bss(base_rom)
+    out, extra = [], []
+    for name, rom, ram, size, funcs in secs:
+        f = [(off, sz) for _, off, sz in funcs]
+        if name == 'section_0_entry_funcs':
+            out.append(Section('entry', rom, ram, ram + size, ram + size, ram + size, f))
+        elif name.startswith('section_1_main'):
+            # main: text, then data up to the bss the entry clears.
+            out.append(Section('main', rom, ram, ram + size, bss_start, bss_start + bss_size, f))
+        elif '_ovl_' in name:
+            ovl = name.split('_', 2)[2].rsplit('_funcs', 1)[0]           # ovl_e
+            k = next(i for i, d in enumerate(descs) if d[0] == rom)
+            d = descs[k]
+            assert d[3] == ram, (name, hex(ram), hex(d[3]))
+            sec = Section(ovl, d[0], d[3], d[5], d[7], d[8], f, slot=ram).to_json()
+            sec['desc_index'] = k
+            out.append(sec)
+        else:
+            owner = None            # the segment whose ROM range holds this code
+            for d in descs:
+                if d[0] <= rom < d[1]:
+                    owner = next(o[0].split('_', 2)[2].rsplit('_funcs', 1)[0] for o in ovls if o[1] == d[0])
+            extra.append(dict(section=owner or 'main', ram=ram, rom=rom, size=size, funcs=f))
+    out = [x if isinstance(x, dict) else x.to_json() for x in out]
+    # overlays that can be resident together: their RAM ranges don't overlap
+    ranges = {x['name']: (x['text'], x['end']) for x in out if x.get('slot') is not None}
+    partners = {o: [tuple(sorted(q for q in ranges if q != o and (ranges[q][1] <= lo or hi <= ranges[q][0])))]
+                for o, (lo, hi) in ranges.items()}
+    partners = {o: [g for g in v if g] for o, v in partners.items()}
+    slots = collections.defaultdict(list)
+    for x in out:
+        if x.get('slot') is not None:
+            slots[x['slot']].append(x['name'])
+    groups = [tuple(sorted(v)) for k, v in sorted(slots.items(), reverse=True)] + [(o,) for o in sorted(ranges)]
+    return dict(game=game, mod_game_id=mod_game_id, manifest_base=manifest_base,
+                base_sha1=hashlib.sha1(base_rom).hexdigest(), descriptor_table=table,
+                descriptor_count=len(ovls), partners=partners, default_groups=groups,
+                sections=out, extra_code=extra)
+
+
+def load_layout(path=LAYOUT_PATH):
+    d = json.load(open(path))
+    return d, [Section.from_json(s) for s in d['sections']]
+
+
+def hack_sections(hack, stock_layout, stock_secs):
+    """The hack's section placement: overlays from its descriptor table; main text start and
+    rom are assumed unchanged (AKI's boot loads main from rom 0x1000 to 0x80000400)."""
+    count = stock_layout.get('descriptor_count', 5)
+    table = find_descriptor_table(hack, count=count, hint=stock_layout.get('descriptor_table'))
+    if table is None:
+        raise SystemExit('hack: no overlay descriptor table found')
+    descs = read_descriptors(hack, table, count)
+    index = {x['name']: x['desc_index'] for x in stock_layout['sections'] if 'desc_index' in x}
+    out = {}
+    for s in stock_secs:
+        if s.slot is None:
+            out[s.name] = None      # filled in by the matcher (main shifts piecewise)
+            continue
+        d = descs[index[s.name] if s.name in index else ORDER.index(s.name)]
+        out[s.name] = Section(s.name, d[0], d[3], d[5], d[7], d[8], slot=None)
+    return table, out
+
+
+# ------------------------------------------------------------------------------ matching
+
+K = 6   # words in the index window
+
+
+class SectionMatch:
+    """Stock -> hack placement of one section's functions.
+    matched: [(stock_vram, hack_vram, size)] in stock order (masked shape identical);
+    chunks:  [(stock_lo, stock_hi, hack_lo, hack_hi)] code between matched neighbours whose
+             shape the hack changed (functions rewritten, added or removed)."""
+
+    def __init__(self, stock, hack_text, hack_text_end):
+        self.stock, self.hack_text, self.hack_text_end = stock, hack_text, hack_text_end
+        self.matched, self.chunks = [], []
+
+
+def masked_words(data, off, n):
+    return [mips.masked(word(data, off + 4 * i)) for i in range(n)]
+
+
+def match_section(base, hack, stock, hack_rom, hack_text, hack_text_end, slack=0x400):
+    """Locate each stock function of `stock` in the hack's text [hack_text, hack_text_end),
+    loaded from hack_rom. Masked full-function compare; among candidates prefer the one
+    nearest the neighbours' shift; isolated shift outliers are dropped back to unmatched."""
+    hrom = lambda v: hack_rom + (v - hack_text)
+    n_hack = (hack_text_end - hack_text) // 4
+    hw = [mips.masked(word(hack, hrom(hack_text) + 4 * i)) for i in range(n_hack + K)]
+    index = collections.defaultdict(list)
+    for i in range(n_hack):
+        index[tuple(hw[i:i + K])].append(i)
+    small = {n: collections.defaultdict(list) for n in range(2, K)}
+    for i in range(n_hack):
+        for n in range(2, K):
+            small[n][tuple(hw[i:i + n])].append(i)
+    funcs = sorted(stock.funcs)
+    cands = []
+    for off, size in funcs:
+        n = size // 4
+        sv = stock.text + off
+        sw = masked_words(base, stock.rom_of(sv), n)
+        if n < 2:
+            cands.append([])
+            continue
+        if n >= K:
+            pos = index.get(tuple(sw[:K]), [])
+        else:
+            pos = small[n].get(tuple(sw), [])
+        good = [hack_text + 4 * i for i in pos if hw[i:i + n] == sw and i + n <= n_hack]
+        cands.append(good)
+    # pass 1: unique candidates are anchors
+    choice = [None] * len(funcs)
+    for k, good in enumerate(cands):
+        if len(good) == 1:
+            choice[k] = good[0]
+    # drop anchor outliers whose shift differs from both anchor neighbours and that are short
+    def anchors():
+        return [(k, choice[k] - (stock.text + funcs[k][0])) for k in range(len(funcs)) if choice[k] is not None]
+    for _ in range(2):
+        a = anchors()
+        for j, (k, d) in enumerate(a):
+            prev_d = a[j - 1][1] if j > 0 else None
+            next_d = a[j + 1][1] if j + 1 < len(a) else None
+            if d != prev_d and d != next_d and (prev_d is not None or next_d is not None):
+                if prev_d == next_d or funcs[k][1] < 0x40:
+                    choice[k] = None
+    # pass 2: non-unique candidates take the one nearest the previous anchor's shift,
+    # if it keeps the hack order monotonic
+    a = anchors()
+    ak = [k for k, _ in a]
+    for k, good in enumerate(cands):
+        if choice[k] is not None or len(good) < 2:
+            continue
+        j = bisect.bisect_left(ak, k)
+        prev = a[j - 1] if j > 0 else None
+        nxt = a[j] if j < len(a) else None
+        ref = [x[1] for x in (prev, nxt) if x is not None]
+        sv = stock.text + funcs[k][0]
+        best = min(good, key=lambda g: min(abs((g - sv) - d) for d in ref) if ref else 0)
+        if ref and (best - sv) in ref:
+            choice[k] = best
+    # monotonic check over the final list
+    m = SectionMatch(stock, hack_text, hack_text_end)
+    last_hack_end = hack_text
+    for k, (off, size) in enumerate(funcs):
+        h = choice[k]
+        if h is not None and h < last_hack_end:
+            choice[k] = None
+            continue
+        if h is not None:
+            last_hack_end = h + size
+    # inside a stretch whose size changed, functions that still appear exactly once in the
+    # hack's part of it are matched there too (only the reworked function stays unmatched)
+    chosen = [k for k in range(len(funcs)) if choice[k] is not None]
+    bounds = [(-1, hack_text)] + [(k, choice[k] + funcs[k][1]) for k in chosen] + [(len(funcs), hack_text_end)]
+    for (k0, h0), (k1, _) in zip(bounds, bounds[1:]):
+        h1 = choice[k1] if k1 < len(funcs) else hack_text_end
+        s0 = stock.text + (funcs[k0][0] + funcs[k0][1] if k0 >= 0 else 0)
+        s1 = stock.text + (funcs[k1][0] if k1 < len(funcs) else max(o + z for o, z in funcs))
+        if (s1 - s0) == (h1 - h0) or k1 - k0 < 2:
+            continue
+        last = h0
+        for k in range(k0 + 1, k1):
+            inside = [g for g in cands[k] if last <= g and g + funcs[k][1] <= h1]
+            if len(inside) == 1:
+                choice[k] = inside[0]
+                last = inside[0] + funcs[k][1]
+    # build matched + chunks
+    prev_s_end, prev_h_end = stock.text, hack_text
+    for k, (off, size) in enumerate(funcs):
+        h = choice[k]
+        if h is None:
+            continue
+        s = stock.text + off
+        if s > prev_s_end or h > prev_h_end:
+            m.chunks.append((prev_s_end, s, prev_h_end, h))
+        m.matched.append((s, h, size))
+        prev_s_end, prev_h_end = s + size, h + size
+    s_end = stock.text + max(o + z for o, z in funcs)
+    if s_end > prev_s_end or hack_text_end > prev_h_end:
+        m.chunks.append((prev_s_end, s_end, prev_h_end, hack_text_end))
+    return m
+
+
+def ref_pairs(base, hack, stock, sm, hack_rom, hack_text):
+    """(stock_addr, hack_addr) for every jal target and %hi/%lo address in functions whose masked
+    shape matched (same instruction index in both). The raw evidence for the address map."""
+    out = []
+    for s, h, size in sm.matched:
+        n = size // 4
+        sw = [word(base, stock.rom_of(s) + 4 * i) for i in range(n)]
+        hw = [word(hack, hack_rom + (h - hack_text) + 4 * i) for i in range(n)]
+        if sw == hw:
+            continue
+        for (i, kind, t), (j, kind2, t2) in zip(mips.jumps(sw, s), mips.jumps(hw, h)):
+            if i == j and kind == kind2 and kind == 'jal':
+                out.append((t, t2))
+        a = {(hi, lo): v for hi, lo, v in mips.hilo_refs(sw)}
+        b = {(hi, lo): v for hi, lo, v in mips.hilo_refs(hw)}
+        for k, v in a.items():
+            if k in b:
+                out.append((v, b[k]))
+    return out
+
+
+# ---------------------------------------------------------------------------- address map
+
+class AddressMap:
+    """hack RAM address -> stock RAM address. Ranges are (hack_lo, hack_hi, delta, kind);
+    main's ranges are global, each overlay's apply when code of that overlay (or any overlay
+    sharing the slot, if they agree) references them. Expansion RAM maps to itself."""
+
+    def __init__(self):
+        self.main = []          # [(lo, hi, delta, kind)]
+        self.ovl = {}           # name -> [(lo, hi, delta, kind)]
+        self.priority = []      # checked first (code moved out of a data area)
+        self.evidence = {}      # overlay -> sorted hack addresses its own code references
+        self.identity = [(0x80400000, 0x80800000)]
+        self.rom = []           # [(hack_rom_lo, hack_rom_hi, delta)] for the code region (weak candidates)
+        self.assets = []        # [(rom_lo, rom_hi)]: the hack's assets, kept at its ROM offsets (no candidates)
+
+    @staticmethod
+    def _find(ranges, a):
+        i = bisect.bisect_right(ranges, (a, 0xFFFFFFFF)) - 1
+        if i >= 0:
+            lo, hi, d, kind = ranges[i]
+            if lo <= a < hi:
+                return (a + d) & 0xFFFFFFFF, kind
+        return None
+
+    def lookup(self, a, ctx=None):
+        """(stock address, kind) or None. ctx: overlay name of the referencing code."""
+        r = self._find(self.priority, a)
+        if r:
+            return r
+        r = self._find(self.main, a)
+        if r:
+            return r
+        for lo, hi in self.identity:
+            if lo <= a < hi:
+                return a, 'exp'
+        if ctx in self.ovl:
+            r = self._find(self.ovl[ctx], a)
+            if r:
+                return r
+        # another overlay that can be resident at the same time (No Mercy: ovl_a with one of
+        # b/c/d; ovl_e alone): take the shift the candidates agree on
+        for group in self.partners(ctx):
+            hits = {self._find(self.ovl[o], a) for o in group if o in self.ovl} - {None}
+            if len(hits) == 1:
+                return hits.pop()
+            shifts = {(h[0] - a) & 0xFFFFFFFF for h in hits}
+            if len(shifts) == 1:
+                return hits.pop()
+        return None
+
+    def candidates(self, a, ctx=None):
+        """Every plausible stock address for hack address a, best first."""
+        out = []
+        def add(r):
+            if r is not None and r[0] not in out:
+                out.append(r[0])
+        if a < 0x00800000 and any(lo <= a < hi for lo, hi in self.assets) and \
+                not any(lo <= a < hi for lo, hi, _ in self.rom):
+            return []               # a ROM offset into the hack's assets, not a physical RAM address
+        moved = self._find(self.priority, a)
+        if moved:
+            return [moved[0]]       # code or buffers moved out of the stock layout: no alternative
+        add(self._find(self.main, a))
+        for lo, hi in self.identity:
+            if lo <= a < hi:
+                add((a, 'exp'))
+        if ctx in self.ovl:
+            add(self._find(self.ovl[ctx], a))
+        groups = self.partners(ctx) + [tuple(self.ovl)]
+        if ctx is None and self.evidence:
+            # code with no overlay of its own (payload, caves): prefer the overlay whose own code
+            # references a variable right below this address
+            near = []
+            for o, hs in self.evidence.items():
+                i = bisect.bisect_right(hs, a) - 1
+                if i >= 0 and a - hs[i] < 0x100 and self._find(self.ovl.get(o, []), a):
+                    near.append((a - hs[i], o))
+            if near:
+                groups = [(min(near)[1],)] + groups
+        for group in groups:
+            for o in group:
+                if o in self.ovl:
+                    add(self._find(self.ovl[o], a))
+        if a < 0x00800000 or 0xA0000000 <= a < 0xA0800000:
+            # a physical (or uncached KSEG1) RAM address: translate it as KSEG0
+            seg = a & 0xE0000000
+            for c in self.candidates((a & 0x1FFFFFFF) | 0x80000000, ctx):
+                if c >= 0x80000000:
+                    c = (c & 0x1FFFFFFF) | seg
+                    if c not in out:
+                        out.append(c)
+        for rlo, rhi, d in self.rom:
+            if rlo <= a < rhi:
+                out.append((a + d) & 0xFFFFFFFF)
+                break
+        if a >= 0x80000004 and not getattr(self, '_in_end', False):
+            # one past the end of a section (bss end, table end)
+            self._in_end = True
+            try:
+                for c in self.candidates(a - 4, ctx):
+                    if c >= 0x80000000 and c + 4 not in out:
+                        out.append(c + 4)
+            finally:
+                self._in_end = False
+        return out
+
+    PARTNERS = {'ovl_a': [('ovl_b', 'ovl_c', 'ovl_d')], 'ovl_b': [('ovl_a',)], 'ovl_c': [('ovl_a',)],
+                'ovl_d': [('ovl_a',)], 'ovl_e': []}
+
+    DEFAULT_GROUPS = [('ovl_b', 'ovl_c', 'ovl_d'), ('ovl_a',), ('ovl_e',), ('ovl_a', 'ovl_e')]
+
+    def partners(self, ctx):
+        table = getattr(self, 'partners_of', None) or self.PARTNERS
+        if ctx in table:
+            return table[ctx]
+        return getattr(self, 'default_groups', None) or self.DEFAULT_GROUPS
+
+    def translate(self, a, ctx=None):
+        r = self.lookup(a, ctx)
+        return None if r is None else r[0]
+
+    def near_data_shift(self, a, shift, ctx=None, reach=0x2000):
+        """Whether a data run of main or of the referencing overlay within `reach` of hack address a has this shift.
+        Never for an address in a priority range: what moved out of the stock layout has one answer."""
+        if self._find(self.priority, a):
+            return False
+        ranges = self.main + self.ovl.get(ctx, [])
+        return any(kind == 'data' and d == shift and lo - reach < a < hi + reach for lo, hi, d, kind in ranges)
+
+    def far_own_data_shift(self, a, shift, ctx):
+        """Whether a data run of the referencing overlay has this shift, with hack address a out of reach of all such runs."""
+        if self._find(self.priority, a) or self.near_data_shift(a, shift, ctx):
+            return False
+        return any(kind == 'data' and d == shift for lo, hi, d, kind in self.ovl.get(ctx, []))
+
+    def finish(self):
+        self.main.sort()
+        for k in self.ovl:
+            self.ovl[k].sort()
+
+    def to_json(self):
+        enc = lambda rs: [[lo, hi, d - (1 << 32) if d & 0x80000000 else d, k] for lo, hi, d, k in rs]
+        return dict(main=enc(self.main), overlays={k: enc(v) for k, v in self.ovl.items()},
+                    identity=self.identity)
+
+
+def runs_from_pairs(pairs, lo, hi):
+    """Piecewise ranges over hack addresses [lo, hi) from (stock, hack) evidence: each hack
+    address takes the shift of the nearest evidence at or below it (majority per address).
+    A lone evidence point whose neighbours agree on another shift is dropped as a stray."""
+    per = collections.defaultdict(collections.Counter)
+    for s, h in pairs:
+        if lo <= h < hi and (s - h) & 3 == 0:     # sections move by whole words
+            per[h][(s - h) & 0xFFFFFFFF] += 1
+    pts = sorted((h, c.most_common(1)[0][0]) for h, c in per.items())
+    runs = []                     # [first_h, delta, count]
+    for h, d in pts:
+        if runs and runs[-1][1] == d:
+            runs[-1][2] += 1
+        else:
+            runs.append([h, d, 1])
+    # weakly supported runs (a hack edit pointing an instruction elsewhere) between runs that
+    # agree are dropped, smallest first, until the neighbours of every short run differ
+    changed = True
+    while changed:
+        changed = False
+        for need in (1, 2):
+            for i in range(1, len(runs) - 1):
+                if runs[i][2] <= need:
+                    # look past a stretch of short runs for agreeing neighbours
+                    j = i
+                    while j + 1 < len(runs) - 1 and runs[j + 1][2] <= need:
+                        j += 1
+                    if runs[i - 1][1] == runs[j + 1][1]:
+                        runs[i - 1][2] += runs[j + 1][2]
+                        del runs[i:j + 2]
+                        changed = True
+                        break
+            if changed:
+                break
+    # the same stray as the very first point: nothing below it to agree with, and the first run reaches down to `lo`. One
+    # edit repointing an instruction would otherwise move everything below it, though the hack kept this layout
+    # (House Party Mixtape repoints a load to a table of its own, aki-roadmap#173: main's whole early data moved)
+    if len(runs) > 1 and runs[0][2] == 1 and sum(per[runs[0][0]].values()) == 1 and runs[1][1] == 0 and runs[1][2] >= 3:
+        runs[1][0] = runs[0][0]
+        runs[1][2] += 1
+        del runs[0]
+    out = []
+    for i, (h, d, n) in enumerate(runs):
+        start = lo if i == 0 else (h & ~3)
+        end = (runs[i + 1][0] & ~3) if i + 1 < len(runs) else hi
+        out.append((start, end, d))
+    # the last evidence of each run bounds where the next shift can start
+    runs_from_pairs.last_evidence = []
+    for i in range(len(out) - 1):
+        nxt = out[i + 1][0]
+        prev = [h for h, d in pts if h < nxt and out[i][0] <= h]
+        runs_from_pairs.last_evidence.append(max(prev) if prev else out[i][0])
+    return out
+
+
+def main_data_evidence(main, pairs):
+    """(stock, hack) reference pairs that can say how main's data moved: the stock side has to be in main's data or bss.
+    A hack hook that points an instruction at its cave pairs a stock text address with a cave address, which would read
+    as a huge shift of the data around the cave. translate_data drops what such a shift lands outside the data, so the
+    hack's words between two caves stayed stock (VPW64 Deluxe: `j 0x8002C560` at 0x8003C3F0, reached from code the hack
+    loads at run time, ran as zeros and crashed; jessetbh/aki-roadmap#222)."""
+    return [p for ps in pairs.values() for p in ps if main.data <= p[0] < main.end]
+
+
+class Analysis:
+    """Everything derived from (stock layout, hack ROM): per-section matches, hack placement,
+    the address map and the hack-ROM -> stock-ROM map for the code region."""
+
+    def __init__(self, base, hack, layout_path=LAYOUT_PATH):
+        self.base, self.hack = base, hack
+        self.layout, self.secs = load_layout(layout_path)
+        self.byname = {s.name: s for s in self.secs}
+        self.table, self.hsecs = hack_sections(hack, self.layout, self.secs)
+        self.matches = {}
+        self.place = {}          # name -> (hack_rom, hack_text, hack_text_end, hack_data, hack_end)
+        main = self.byname['main']
+        # main: same rom and start; its text end is found from the last matched function
+        m = match_section(base, hack, main, main.rom, main.text, main.data + 0x200)
+        last_s, last_h, last_z = m.matched[-1]
+        main_text_end = main.data + (last_h - last_s)
+        m = match_section(base, hack, main, main.rom, main.text, main_text_end)
+        self.matches['main'] = m
+        slot_a = min(h.text for h in self.hsecs.values() if h is not None)
+        self.place['main'] = (main.rom, main.text, main_text_end, main_text_end, slot_a)
+        for s in self.secs:
+            if s.slot is None:
+                continue
+            h = self.hsecs[s.name]
+            self.matches[s.name] = match_section(base, hack, s, h.rom, h.text, h.data)
+            self.place[s.name] = (h.rom, h.text, h.data, h.data, h.end)
+        e = self.byname['entry']
+        self.place['entry'] = (e.rom, e.text, e.data, e.data, e.data)
+        # units: matched functions plus same-size chunks, (stock vram, hack vram, size)
+        self.units = {}
+        self.resized = []
+        self.moved_resized = []  # (section, stock lo, stock hi, hack lo, hack hi): resized overlay code moved whole
+        self.shrunk = {}         # (section, stock vram) -> hack size, for functions the hack shortened
+        self.reshaped = []       # (section, stock lo, stock hi, hack lo, hack hi) rebuilt by the hack
+        for name, m in self.matches.items():
+            u = list(m.matched)
+            st = self.byname[name]
+            hrom_, htext_ = self.place[name][:2]
+            for slo, shi, hlo, hhi in m.chunks:
+                if shi - slo == hhi - hlo:
+                    if shi > slo:
+                        n = (shi - slo) // 4
+                        same = sum(mips.masked(word(base, st.rom_of(slo) + 4 * i)) ==
+                                   mips.masked(word(hack, hrom_ + (hlo - htext_) + 4 * i)) for i in range(n))
+                        if name != 'main' and n >= 16 and same < n // 2:
+                            # the hack rebuilt this stretch (new functions, tables inside code):
+                            # it moves whole to the new-code area instead of being ported in place
+                            self.reshaped.append((name, slo, shi, hlo, hhi))
+                        else:
+                            u.append((slo, hlo, shi - slo))
+                elif shi > slo or hhi > hlo:
+                    st = self.byname[name]
+                    inside = [o for o, z in st.funcs if slo <= st.text + o < shi]
+                    if name != 'main' and len(inside) == 1 and 0 < hhi - hlo <= shi - slo:
+                        # one function the hack made shorter: its version fits in place
+                        # (main's resized code is the Rev 0 flash-save code, which stays Rev 1)
+                        u.append((slo, hlo, shi - slo))
+                        self.shrunk[(name, slo)] = hhi - hlo
+                    elif name != 'main' and inside and getattr(self, 'move_resized', True):
+                        # an overlay stretch with stock functions whose size the hack changed (a hack on another revision: 9
+                        # Underground is World Tour rev 1 code on the rev 0 port): its version moves whole to the
+                        # new-code area, and the stock functions in it jump there (resized_redirects)
+                        self.reshaped.append((name, slo, shi, hlo, hhi))
+                        self.moved_resized.append((name, slo, shi, hlo, hhi))
+                    else:
+                        self.resized.append((name, slo, shi, hlo, hhi))
+            self.units[name] = sorted(u)
+        self.build_map()
+        self.move_main_rewrites()
+
+    def move_main_rewrites(self):
+        """Main's resized stretch (the Rev 0 flash-save code) moves whole to the new-code area
+        instead of staying stock Rev 1: hacks edit the code around it (V3 enlarges the save
+        records), so only the hack's own version is consistent. Its Rev 0-sized buffers (main bss
+        pieces that don't line up with Rev 1) get their own block past the payload."""
+        zones = keep_stock_zones(self, 'main')
+        m = self.matches['main']
+        for zlo, zhi in zones:
+            if zhi - zlo < 0x100:
+                continue            # a small libultra difference: stays stock
+            before = [(s, h, z) for s, h, z in m.matched if s + z <= zlo]
+            after = [(s, h, z) for s, h, z in m.matched if s >= zhi]
+            if not before or not after:
+                continue
+            hlo = zlo + (before[-1][1] - before[-1][0])
+            hhi = zhi + (after[0][1] - after[0][0])
+            self.reshaped.append(('main', zlo, zhi, hlo, hhi))
+            self.units['main'] = [u for u in self.units['main'] if not (zlo <= u[0] < zhi)]
+            self.resized = [r for r in self.resized if not (r[0] == 'main' and zlo <= r[1] < zhi)]
+        # the save buffers: main data runs between the first and last shift
+        runs = [(lo, hi, d) for lo, hi, d, k in self.map.main if k == 'data']
+        self.save_area = None
+        if len(runs) > 2 and any(r[0] == 'main' for r in self.reshaped):
+            lo, hi = runs[1][0], runs[-1][0]
+            base = save_area_base(find_payload(self.hack), hi - lo)
+            self.save_area = (lo, hi, base)
+            self.map.priority.append((lo, hi, (base - lo) & 0xFFFFFFFF, 'save'))
+            self.map.priority.sort()
+
+    def hack_rom_of(self, name, vram):
+        hrom, htext = self.place[name][:2]
+        return hrom + (vram - htext)
+
+    def build_map(self):
+        amap = AddressMap()
+        if 'partners' in self.layout:
+            amap.partners_of = {k: [tuple(g) for g in v] for k, v in self.layout['partners'].items()}
+            amap.default_groups = [tuple(g) for g in self.layout.get('default_groups', [])]
+        amap.identity.append((0x80000000, 0x80000400))
+        pairs = {}
+        for name, m in self.matches.items():
+            hrom, htext = self.place[name][:2]
+            pairs[name] = ref_pairs(self.base, self.hack, self.byname[name], m, hrom, htext)
+        for name, m in self.matches.items():
+            rs = amap.main if name == 'main' else amap.ovl.setdefault(name, [])
+            for s, h, z in m.matched:
+                rs.append((h, h + z, (s - h) & 0xFFFFFFFF, 'text'))
+            for slo, shi, hlo, hhi in m.chunks:
+                if (shi - slo == hhi - hlo or (name, slo) in self.shrunk) and hhi > hlo:
+                    rs.append((hlo, hhi, (slo - hlo) & 0xFFFFFFFF, 'text'))
+            # entry points inside size-changed chunks, from calls in matched code
+            for slo, shi, hlo, hhi in m.chunks:
+                if shi - slo != hhi - hlo:
+                    for ps, ph in set(p for ps in pairs.values() for p in ps):
+                        if hlo <= ph < hhi and slo <= ps < shi:
+                            rs.append((ph, ph + 4, (ps - ph) & 0xFFFFFFFF, 'entry'))
+            _, _, _, dlo, dhi = self.place[name]
+            if name == 'main':
+                ev = main_data_evidence(self.byname['main'], pairs)
+            else:
+                ev = pairs[name]
+                # the overlay's own data/bss: one shift from its descriptor unless evidence says otherwise
+                s = self.byname[name]
+                ev = ev + [(s.data, dlo)]
+            runs = runs_from_pairs(ev, dlo, dhi)
+            runs = self.refine_boundaries(name, runs, list(runs_from_pairs.last_evidence))
+            for lo, hi, d in runs:
+                rs.append((lo, hi, d, 'data'))
+        # above the overlay slots: the heap arena (its header is referenced by address)
+        top = max(p[4] for p in self.place.values())
+        stock_top = max(s.end for s in self.secs)
+        allp = [p for ps in pairs.values() for p in ps]
+        for lo, hi, d in runs_from_pairs(allp, top, 0x80400000):
+            if any(top <= h < 0x80400000 for _, h in allp):
+                if (lo + d) & 0xFFFFFFFF < stock_top:
+                    # a hack that moved its heap elsewhere reuses the old arena as plain memory and
+                    # repoints variables there; no heap shift, the area is free in the stock layout too
+                    amap.main.append((lo, hi, 0, 'heap'))
+                else:
+                    amap.main.append((lo, hi, d, 'heap'))
+        # stock code blocks with a gap (World Tour's overlays sit past the assets): the hack's assets stay at
+        # its ROM offsets, so ROM offsets into them are kept and main's data ends where the hack's does
+        blocks = stock_code_blocks(self.secs)
+        if len(blocks) > 1:
+            amap.assets = between_blocks(blocks, len(self.hack))
+        for name, (hrom, htext, htext_end, hdata, hend) in self.place.items():
+            st = self.byname[name]
+            hdata_rom_end = hrom + (self.hsecs[name].bss - htext) if self.hsecs.get(name) else hrom + (st.bss - st.text) + 0x100
+            if amap.assets and not self.hsecs.get(name):
+                rs = amap.main if name in ('main', 'entry') else amap.ovl[name]
+                ends = [(st.bss - d) & 0xFFFFFFFF for lo, hi, d, kind in rs
+                        if kind != 'exp' and lo <= (st.bss - d) & 0xFFFFFFFF <= hi]
+                if ends:
+                    hdata_rom_end = hrom + (ends[0] - htext)
+            # ROM offsets inside a section translate like its RAM addresses (weak candidates)
+            rs = amap.main if name in ('main', 'entry') else amap.ovl[name]
+            for lo, hi, d, kind in rs:
+                if kind == 'exp':
+                    continue
+                rl, rh = hrom + (lo - htext), hrom + (hi - htext)
+                if rl < hrom or rl >= hdata_rom_end:
+                    continue
+                rd = ((st.rom - st.text) - (hrom - htext) + d) & 0xFFFFFFFF
+                amap.rom.append((rl, min(rh, hdata_rom_end), rd))
+        amap.rom.sort()
+        amap.evidence = {n: sorted({h for _, h in ps}) for n, ps in pairs.items() if n in amap.ovl}
+        amap.finish()
+        self.map = amap
+        self.pairs = pairs
+
+    def refine_boundaries(self, name, runs, last_ev):
+        """Place each shift change inside its evidence gap where the hack's data lines up
+        best with the stock data (a few words inserted or removed between two variables)."""
+        st = self.byname[name]
+        hrom, htext = self.place[name][:2]
+        hack_bss = self.hsecs[name].bss if self.hsecs.get(name) else None
+        def score_word(y, d):
+            x = (y + d) & 0xFFFFFFFF
+            if not (st.data <= x < st.bss) or (hack_bss is not None and y >= hack_bss):
+                return 0
+            hw, sw = word(self.hack, hrom + (y - htext)), word(self.base, st.rom_of(x))
+            if hw == sw:
+                return 1
+            # A pointer into this same data differs from stock by its own shift, so a table of them would otherwise
+            # say nothing, and the change could land far from it (aki-roadmap#120: 9 Underground's message table, 2
+            # entries longer in rev 1, moved 2 slots low: every Controller Pak prompt showed the wrong text).
+            return 1 if any(lo <= hw < hi and (hw + dr) & 0xFFFFFFFF == sw for lo, hi, dr in runs) else 0
+        out = [list(r) for r in runs]
+        for i in range(len(out) - 1):
+            a, b = (last_ev[i] + 4) & ~3, out[i + 1][0] & ~3
+            if b - a > 0x4000 or b <= a:
+                continue
+            d1, d2 = out[i][2], out[i + 1][2]
+            best, best_score = b, -1
+            # score(b') = matches with d1 below b' plus matches with d2 from b'
+            s1 = [score_word(y, d1) for y in range(a, b, 4)]
+            s2 = [score_word(y, d2) for y in range(a, b, 4)]
+            n = len(s1)
+            pre = [0]
+            for v in s1:
+                pre.append(pre[-1] + v)
+            suf = [0] * (n + 1)
+            for k in range(n - 1, -1, -1):
+                suf[k] = suf[k + 1] + s2[k]
+            for k in range(n + 1):
+                sc = pre[k] + suf[k]
+                if sc > best_score or (sc == best_score and k == n):
+                    best, best_score = a + 4 * k, sc
+            # A table isn't split: the hack's code indexes it with the hack's numbering, even past entries it inserted, so
+            # all of it keeps one shift and the change comes after it. Words past a longer table overlap what follows,
+            # and the table keeps them (translate_data: the first range wins).
+            # It stops at b, the first code reference with the next shift: that's evidence, the table's look isn't.
+            def in_table(y):
+                if hack_bss is not None and y >= hack_bss:
+                    return False
+                hw = word(self.hack, hrom + (y - htext))
+                return any(lo <= hw < hi for lo, hi, _ in runs)
+            if best > a and in_table(best - 4):
+                start = best
+                while best < b and in_table(best):
+                    best += 4
+                if best != start:
+                    self.__dict__.setdefault('table_extensions', []).append((name, start, best))
+            out[i][1] = best
+            out[i + 1][0] = best
+        return [tuple(r) for r in out]
+
+    def ctx_of_hack(self, name):
+        return None if name in ('main', 'entry') else name
+
+
+# ------------------------------------------------------------------------------ porting
+
+class Unresolved(Exception):
+    pass
+
+
+def phys_data_address(amap, a, ctx=None):
+    """Whether a physical (segment 0) value built by a %hi/%lo pair is a RAM address worth translating: its KSEG0 form
+    lies in the data of the overlay whose code builds it (aki-roadmap#120: 9 Underground's ovl_a title code builds
+    `lui s6,0x000C; addiu s6,0x3E08`, rev 1's address of a triangle list in ovl_a data, for a G_DL).
+    - Text doesn't count: plain numbers built with lui (0x000C0000 fixed point, sizes) would land there.
+    - Main doesn't count: main's low values are ROM offsets into the hack's assets (0x39500, 7f84321), which read as
+      main-data addresses too."""
+    if ctx not in amap.ovl:
+        return False
+    r = amap._find(amap.ovl[ctx], (a & 0x1FFFFFFF) | 0x80000000)
+    return bool(r) and r[1] == 'data'
+
+
+def rewrite(words, hack_pc, new_pc, candidates, stock_words=None, problems=None, init=None):
+    """Rewrite one function's absolute addresses from hack to stock space.
+    words: the hack's words (at hack_pc); new_pc: where the result will live; candidates(a) ->
+    plausible stock addresses for hack address a, best first (the last ones may be ROM-offset
+    readings, used only when they agree with the stock code). stock_words: the stock counterpart
+    when the shapes match: a reference whose words equal the stock ones is kept, and among the
+    candidates the one that reproduces the stock words wins.
+    Returns the new words. Unresolvable references go to `problems` (index, kind, hack address)
+    and are left as they were."""
+    out = list(words)
+    n = len(words)
+    lo_pc, hi_pc = hack_pc, hack_pc + 4 * n
+    has_stock = stock_words is not None
+    phys_ok = getattr(candidates, 'phys_ok', None)   # see phys_data_address
+    near_shift = getattr(candidates, 'near_shift', None)   # see stock_biased_base
+    same = lambda idx: has_stock and all(words[i] == stock_words[i] for i in idx)
+
+    def stock_biased_base(hi, lo, a):
+        """The stock address of this %hi/%lo pair, when it looks like a biased table base and not a repoint.
+        A base like `table - first_id * 4` lies outside the table, often in a data run with another shift, so the run
+        at its own address gives the wrong stock value (aki-roadmap#177: BTBW's pause menu, 0x8015220C for a table at
+        0x80153520 across a run boundary, 4 entries off). The stock code holds the right value. It counts only when
+        the pair builds an address (addiu/ori), both instructions match the stock ones apart from the immediate, and
+        the stock value's shift is that of a data run nearby. This assumes a repoint by the hack doesn't land exactly
+        on such a shift; a build lists every use (report 'biased_bases') so one can be checked.
+        A load or store through the pair counts too when an index is added to the register between the two instructions
+        (`lui at; addu at,at,idx; lw v0,%lo(at)`), but only when overlay code builds it and the stock value's shift is one
+        of that overlay's own data runs, far from the base: a large first id puts the base outside the overlay, far from
+        its table (No Mercy's label lookup, aki-roadmap#191: 0x3C338 bytes). A base in main read by main code stays with
+        the map: the hack can have moved the table away from the stock value (0x8004D25C in V3 and BTBW, where the stock
+        value made the game freeze on the way to wrestler select)."""
+        if near_shift is None or not has_stock or a < 0x80000000 or lo_pc <= a < hi_pc:
+            return None
+        built = words[lo] >> 26 in (0x09, 0x0D)
+        indexed = not built and indexed_between(hi, lo)
+        if not built and not indexed:
+            return None
+        if (words[hi] ^ stock_words[hi]) & 0xFFFF0000 or (words[lo] ^ stock_words[lo]) & 0xFFFF0000:
+            return None
+        if words[lo] >> 26 == 0x0D:
+            sa = ((stock_words[hi] & 0xFFFF) << 16) | (stock_words[lo] & 0xFFFF)
+        else:
+            sa = (((stock_words[hi] & 0xFFFF) << 16) + mips.sx16(stock_words[lo] & 0xFFFF)) & 0xFFFFFFFF
+        if sa < 0x80000000:
+            return None
+        shift = (sa - a) & 0xFFFFFFFF
+        return sa if (near_shift(a, shift, far=True) if indexed else near_shift(a, shift)) else None
+
+    def indexed_between(hi, lo):
+        """Whether `addu base, base, x` (or `addu base, x, base`) adds an index to the %lo's base register after its lui."""
+        base = (words[lo] >> 21) & 31
+        for w in words[hi + 1:lo]:
+            if w >> 26 == 0 and w & 0x3F == 0x21 and (w >> 11) & 31 == base and base in ((w >> 21) & 31, (w >> 16) & 31):
+                return True
+        return False
+
+    def cands(a, ram_only=True):
+        if lo_pc <= a < hi_pc:                      # inside the function itself
+            return [new_pc + (a - hack_pc)]
+        c = candidates(a)
+        if ram_only:
+            c = [x for x in c if x >= 0x80000000] if a >= 0x80000000 else []
+        return c
+
+    for i, kind, t in mips.jumps(words, hack_pc):
+        if same([i]):
+            continue
+        cs = cands(t)
+        pick = None
+        for c in cs:
+            w = mips.with_jump_target(words[i], c)
+            if has_stock and w == stock_words[i]:
+                pick = c
+                break
+        if pick is None and cs:
+            pick = cs[0]
+        if pick is None:
+            if problems is not None:
+                problems.append((i, kind, t))
+            continue
+        out[i] = mips.with_jump_target(words[i], pick)
+    for i, w in enumerate(words):                    # branches that leave the function
+        t = mips.branch_target(w, hack_pc + 4 * i)
+        if t is None or lo_pc <= t < hi_pc or same([i]):
+            continue
+        cs = cands(t)
+        nt = cs[0] if cs else None
+        off = None if nt is None else (nt - (new_pc + 4 * i + 4)) >> 2
+        if off is None or not -0x8000 <= off < 0x8000:
+            if problems is not None:
+                problems.append((i, 'branch', t))
+            continue
+        out[i] = (w & 0xFFFF0000) | (off & 0xFFFF)
+    groups = collections.defaultdict(list)
+    external = []                               # %lo uses whose lui is in the code that jumped here
+    for hi, lo, a in mips.hilo_refs(words, base_pc=hack_pc, init=init,
+                                    return_writes=getattr(candidates, 'return_writes', None)):
+        if hi is None:
+            external.append((lo, a))
+        else:
+            groups[hi].append((lo, a))
+    for lo, a in external:
+        cs = [c for c in cands(a, ram_only=False) if c >= 0x80000000] if a >= 0x80000000 else []
+        if not cs:
+            continue
+        hi_val = (a - mips.sx16(words[lo] & 0xFFFF)) & 0xFFFF0000     # the caller's lui stays as it is
+        new_lo = (cs[0] - hi_val) & 0xFFFFFFFF
+        if words[lo] >> 26 == 0x0D:
+            ok = new_lo < 0x10000
+        else:
+            ok = new_lo < 0x8000 or new_lo >= 0xFFFF8000
+        if ok:
+            out[lo] = (words[lo] & 0xFFFF0000) | (new_lo & 0xFFFF)
+        elif problems is not None:
+            problems.append((lo, 'external-hi', a))
+
+    def halves(lo_word, na):
+        if lo_word >> 26 == 0x0D:                    # ori: unsigned low half
+            return na >> 16, na & 0xFFFF
+        return ((na + 0x8000) >> 16) & 0xFFFF, na & 0xFFFF
+
+    for hi, uses in groups.items():
+        idx = [hi] + [lo for lo, _ in uses]
+        if same(idx):
+            continue
+        new = []
+        all_cands = {}
+        for lo, a in uses:
+            cs = cands(a, ram_only=False)
+            all_cands[lo] = cs
+            pick = None
+            if has_stock:
+                for c in cs:
+                    h16, l16 = halves(words[lo], c)
+                    if (stock_words[lo] & 0xFFFF) == l16 and (stock_words[hi] & 0xFFFF) == h16:
+                        pick = c
+                        break
+                if pick is None:
+                    pick = stock_biased_base(hi, lo, a)
+                    if pick is not None:
+                        cs = [pick] + cs
+                        all_cands[lo] = cs
+            if pick is None:
+                ram = [c for c in cs if c >= 0x80000000] if a >= 0x80000000 else []
+                if not ram and phys_ok is not None and a < 0x00800000 and (a & 0xFFFF) and phys_ok(a):
+                    # a physical address built in code, such as a display list's G_DL target (aki-roadmap#120). Looked up
+                    # as KSEG0: candidates() reads a low value inside the hack's asset range as a ROM offset (7f84321).
+                    ram = [c & 0x1FFFFFFF for c in cands(a | 0x80000000, ram_only=False) if c >= 0x80000000]
+                pick = ram[0] if ram else None
+            if pick is None:
+                if 0x80000000 <= a < 0x80800000 and problems is not None:
+                    problems.append((lo, 'addr', a))
+                pick = a
+            new.append((lo, pick))
+        his = {halves(words[lo], na)[0] for lo, na in new}
+        if len(his) != 1:
+            # one lui feeds uses that picked different overlays: use one shift that suits them all
+            uses_a = dict(uses)
+            shift_sets = [{(c - uses_a[lo]) & 0xFFFFFFFF for c in all_cands[lo] if c >= 0x80000000}
+                          for lo, _ in new if uses_a[lo] >= 0x80000000]
+            common = set.intersection(*shift_sets) if shift_sets else set()
+            if common:
+                firsts = collections.Counter(((all_cands[lo][0] - uses_a[lo]) & 0xFFFFFFFF) for lo, _ in new
+                                             if all_cands[lo])
+                shift = max(common, key=lambda d: firsts.get(d, 0))
+                new = [(lo, (uses_a[lo] + shift) & 0xFFFFFFFF) if uses_a[lo] >= 0x80000000 else (lo, na)
+                       for lo, na in new]
+                his = {halves(words[lo], na)[0] for lo, na in new}
+        if len(his) != 1:
+            # keep the majority; leave the odd uses as they were and report them
+            count = collections.Counter(halves(words[lo], na)[0] for lo, na in new)
+            major = count.most_common(1)[0][0]
+            odd = [(lo, na) for lo, na in new if halves(words[lo], na)[0] != major]
+            if problems is not None:
+                problems.append((hi, 'split-hi', [hex(na) for _, na in odd]))
+            new = [(lo, na) for lo, na in new if halves(words[lo], na)[0] == major]
+            his = {major}
+        out[hi] = (words[hi] & 0xFFFF0000) | his.pop()
+        for lo, na in new:
+            out[lo] = (words[lo] & 0xFFFF0000) | (na & 0xFFFF)
+    return out
+
+
+class Port:
+    """One function's port: stock placement, the rewritten words, and why."""
+    def __init__(self, section, stock_vram, size, words, status, problems):
+        self.section, self.stock_vram, self.size, self.words = section, stock_vram, size, words
+        self.status, self.problems = status, problems
+
+
+def keep_stock_zones(A, name, gap=0x400):
+    """Stretches of stock code around the chunks the hack resized, merged when closer than
+    `gap`. Matched functions in between belong to the same rewrite (in No Mercy's relinked hacks:
+    the Rev 0 flash-save code that Rev 1 replaced) and keep the stock code with them."""
+    spans = sorted((slo, shi) for n, slo, shi, hlo, hhi in A.resized if n == name and shi > slo)
+    out = []
+    for lo, hi in spans:
+        if out and lo - out[-1][1] < gap:
+            out[-1][1] = max(out[-1][1], hi)
+        else:
+            out.append([lo, hi])
+    return [tuple(z) for z in out]
+
+
+def unchanged_code_functions(A, D, ports, report):
+    """ROM offsets of stock functions whose bytes changed only in padding: stock nops no entry reaches, where the
+    hack put data (Revenge Starrcade's tables after a function's code; at least one word must not be an
+    instruction, a lone instruction there may be a hack's code tweak). Their code is unchanged, so the runtime
+    keeps the static function instead of recompiling the data with it. Other changed functions outside the
+    ports are listed in report['unported_code_changes']."""
+    ported = {(p.section, p.stock_vram) for p in ports if p.status == 'changed'}
+    entries = collections.defaultdict(list)
+    for x in A.extras:
+        if x.kind == 'mid' and x.vram:
+            entries[x.section].append(x.vram)
+    out = []
+    funcs_of = {n: [(s.text + o, z) for o, z in section_funcs(A, n)] for n, s in A.byname.items()}
+    for name, st in A.byname.items():
+        for o, z in section_funcs(A, name):
+            if not z:
+                continue
+            v, r = st.text + o, st.rom_of(st.text + o)
+            if r + z > len(A.base) or D[r:r + z] == A.base[r:r + z]:
+                continue
+            words = [word(D, r + 4 * i) for i in range(z // 4)]
+            changed = [i for i in range(z // 4) if words[i] != word(A.base, r + 4 * i)]
+            ins = [e for e in entries[name] if v < e < v + z]
+            # switch cases are only entered through their jump table: read the cases as entries too
+            for _, t in jump_tables(words):
+                tsec = next((s for s in A.byname.values() if s.text <= t < s.bss and (s is st or s.slot is None)), None)
+                if tsec is None:
+                    continue
+                tr_ = tsec.rom_of(t)
+                for k in range(256):
+                    c = word(D, tr_ + 4 * k) if tr_ + 4 * k + 4 <= len(D) else 0
+                    if not v <= c < v + z:
+                        break
+                    ins.append(c)
+            seen = reach(lambda pc: words[(pc - v) // 4], [v] + ins, v, v + z)
+            # only padding: every changed word was a stock nop that nothing reaches (hack code elsewhere can jump
+            # into words the trace doesn't see, so a changed real instruction always counts as a code change)
+            # and at least one of them isn't an instruction, so it's data for certain. A stock function that is
+            # all nops is padding: when it's at most two words no code fits, so any change there is data.
+            padding = all(word(A.base, r + 4 * i) == 0 for i in range(z // 4))
+            if padding and z <= 8:
+                # ...unless the function before it now runs into it (VPW Gamma's hack code continues into the stub)
+                # (any function covering the word before it: the stub may be another function's delay slot)
+                prev = [(pv, pz) for pv, pz in funcs_of[name] if pv < v <= pv + pz and pz]
+                into = False
+                for pv, pz in prev:
+                    pw = [word(D, st.rom_of(pv) + 4 * i) for i in range(pz // 4)]
+                    pseen = reach(lambda pc, pw=pw, pv=pv: pw[(pc - pv) // 4], [pv], pv, pv + pz)
+                    k = (v - 4 - pv) // 4
+                    into = into or (v - 4 in pseen and not _ends_flow(pw[k]) and not (k >= 1 and _ends_flow(pw[k - 1])))
+                if not into:
+                    out.append(r)
+                elif (name, v) not in ported:
+                    report.setdefault('unported_code_changes', []).append((name, v))
+            elif all(v + 4 * i not in seen and word(A.base, r + 4 * i) == 0 for i in changed) and \
+                    not all(mips.plausible(words[i]) for i in changed):
+                out.append(r)
+            elif (name, v) not in ported:
+                report.setdefault('unported_code_changes', []).append((name, v))
+    return out
+
+
+def port_data_chunk(A, name, s, h, z, hw, sw, tr):
+    """Ports for a changed chunk whose entry is data: each stock function inside is data (copied
+    as it is) unless the code traced from its own start decodes, then it's rewritten as code. The
+    bytes between functions are copied as they are."""
+    st = A.byname[name]
+    out, pos = [], s
+    funcs = sorted((st.text + o, sz) for o, sz in section_funcs(A, name) if s <= st.text + o and st.text + o + sz <= s + z)
+    for v, sz in funcs + [(s + z, 0)]:
+        if v > pos:
+            i, j = (pos - s) // 4, (v - s) // 4
+            if hw[i:j] != sw[i:j]:
+                out.append(Port(name, pos, v - pos, hw[i:j], 'data', []))
+        if not sz:
+            break
+        i, j = (v - s) // 4, (v + sz - s) // 4
+        sub, ssub = hw[i:j], sw[i:j]
+        pos = v + sz
+        if sub == ssub:
+            continue
+        whole, unreached = data_in_code(sub, h + (v - s))
+        if whole or not all(mips.plausible(w) for w in sub):
+            # in a chunk the hack filled with data, only clean code counts as code
+            out.append(Port(name, v, sz, sub, 'data', []))
+            continue
+        probs = []
+        nw = rewrite(sub, h + (v - s), v, tr, ssub, probs)
+        bad = {p[0] for p in probs}
+        stray = {k for k in unreached if not mips.plausible(sub[k]) or k in bad}
+        for k in stray:
+            nw[k] = sub[k]
+        out.append(Port(name, v, sz, nw, 'moved' if nw == ssub else 'changed', [p for p in probs if p[0] not in stray]))
+    return out
+
+
+def port_code(A):
+    """Classify every stock function and port the changed ones in place.
+    status: 'moved' (translated hack == stock: keep the static code), 'changed' (ported in place).
+    Stretches of code the hack resized are listed in A.resized and keep the stock code."""
+    ports = []
+    A.biased_bases = []      # (section, hack address, stock address): see rewrite's stock_biased_base
+    for name, units in A.units.items():
+        stock = A.byname[name]
+        ctx = A.ctx_of_hack(name)
+        tr = lambda a, ctx=ctx: A.map.candidates(a, ctx)
+        tr.phys_ok = lambda a, ctx=ctx: phys_data_address(A.map, a, ctx)
+        def near_shift(a, shift, ctx=ctx, name=name, far=False):
+            ok = A.map.far_own_data_shift(a, shift, ctx) if far else A.map.near_data_shift(a, shift, ctx)
+            if ok:
+                A.biased_bases.append((name, a, (a + shift) & 0xFFFFFFFF))
+            return ok
+        tr.near_shift = near_shift
+        tr.return_writes = getattr(A, 'return_writes', None)   # see mips.hilo_refs
+        zones = keep_stock_zones(A, name)
+        for s, h, z in units:
+            if any(lo <= s and s + z <= hi for lo, hi in zones):
+                ports.append(Port(name, s, z, None, 'kept', []))
+                continue
+            n = z // 4
+            sw = [word(A.base, stock.rom_of(s) + 4 * i) for i in range(n)]
+            probs = []
+            if (name, s) in A.shrunk:
+                hn = A.shrunk[(name, s)] // 4
+                hw = [word(A.hack, A.hack_rom_of(name, h) + 4 * i) for i in range(hn)]
+                nw = rewrite(hw, h, s, tr, None, probs) + [0] * (n - hn)
+            else:
+                hw = [word(A.hack, A.hack_rom_of(name, h) + 4 * i) for i in range(n)]
+                rets = [t for t in getattr(A, 'return_init', {}) if h < t < h + z]
+                whole, unreached = data_in_code(hw, h, rets)
+                if whole and hw != sw:
+                    # Dead code the hack filled with data is copied as it is and never recompiled. A chunk
+                    # holds several stock functions: judge each one, as some may still be (hack) code.
+                    ports += port_data_chunk(A, name, s, h, z, hw, sw, tr)
+                    continue
+                nw = rewrite(hw, h, s, tr, sw, probs)
+                # %lo uses after a hook's return point that pair with the hook's lui
+                for t, init in getattr(A, 'return_init', {}).items():
+                    if h < t < h + z:
+                        k = (t - h) // 4
+                        ext = {lo for hi, lo, a in mips.hilo_refs(hw[k:], init=init) if hi is None}
+                        if ext:
+                            nw2 = rewrite(hw[k:], t, s + 4 * k, tr, sw[k:], probs, init=init)
+                            for i in ext:
+                                nw[k + i] = nw2[i]
+                # stray data words: unreached, and either not an instruction or "pointing" nowhere
+                bad = {p[0] for p in probs}
+                stray = {i for i in unreached if not mips.plausible(hw[i]) or i in bad}
+                for i in stray:
+                    nw[i] = hw[i]
+                probs = [p for p in probs if p[0] not in stray]
+            status = 'moved' if nw == sw else 'changed'
+            ports.append(Port(name, s, z, nw, status, probs))
+    return ports, A.resized
+
+
+# ------------------------------------------------------------------ code outside the text
+
+PAYLOAD_RAM_LIMIT = 0x80800000
+
+
+SAVE_AREA_BASE = 0x804C0000     # unused in ares RAM snapshots of BTBW and No Mercy Plus V3 / V3 SC / v2.1 (aki-roadmap#190)
+SAVE_AREA_ROOM = 0x10000        # the moved buffers, and the runtime variables placed after them
+
+
+def save_area_base(payload, size):
+    """Where main's moved save data goes. The hacks use much of Expansion RAM, so this is a place seen unused in ares:
+    - right after the payload, it and No Mercy Plus V3's table overwrote each other (aki-roadmap#179);
+    - at 0x804F0000, BTBW's table overwrote a live queue in it, and Quit Match froze the game (aki-roadmap#190);
+    - above 8 MB, the queue needs a runtime change and the flash no longer matched ares, cause not traced (aki-roadmap#190)."""
+    if not payload:
+        return 0x80600000
+    end = (payload['ram'] + payload['size'] + 0xFFFF) & ~0xFFFF
+    if end <= SAVE_AREA_BASE and size <= SAVE_AREA_ROOM // 2:
+        return SAVE_AREA_BASE
+    print("WARNING: the payload reaches the save data's place; it goes right after the payload, which may be "
+          "the hack's own memory (aki-roadmap#179)", file=sys.stderr)
+    return end
+
+
+def find_payload(hack):
+    """(rom, ram, size, zero_lo, zero_hi) of the Expansion-RAM payload the hack's entry hook
+    copies with direct cart reads, or None. The hook: `j cave` at the entry point; the cave
+    zeroes [zero_lo, zero_hi) and copies ROM (KSEG1 0xB0000000+rom) to RAM until an end address."""
+    w0 = word(hack, 0x1000)
+    if w0 >> 26 != 2:
+        return find_payload_copy_loop(hack)
+    cave = mips.jump_target(w0, 0x80000400)
+    rom = 0x1000 + (cave - 0x80000400)
+    words = [word(hack, rom + 4 * i) for i in range(64)]
+    vals = [a for _, _, a in mips.hilo_refs(words)]
+    cart = [v for v in vals if 0xB0000000 <= v < 0xB4000000]
+    ram = [v for v in vals if 0x80400000 <= v <= PAYLOAD_RAM_LIMIT]
+    if not cart or len(ram) < 4:
+        return None
+    zero_lo, zero_hi, dst, end = ram[0], ram[1], ram[2], ram[3]
+    return dict(rom=cart[0] - 0xB0000000, ram=dst, size=end - dst, zero_lo=zero_lo, zero_hi=zero_hi + 4,
+                cave=cave, resume=0x80000404)
+
+
+def find_payload_copy_loop(hack):
+    """The other entry-hook form (Revenge Starrcade 2.0): a `j cave` anywhere in the entry code; the cave sets
+    registers with lui/addiu/ori, then copies words with `lw` from the cart (KSEG1) to Expansion RAM in a loop counted
+    down by 4 (or up to an end address), then jumps back into the entry code. No zeroing."""
+    hook = next((i for i in range(0x50 // 4) if word(hack, 0x1000 + 4 * i) >> 26 == 2), None)
+    if hook is None:
+        return None
+    cave = mips.jump_target(word(hack, 0x1000 + 4 * hook), 0x80000400 + 4 * hook)
+    rom = 0x1000 + (cave - 0x80000400)
+    if not 0 <= rom < len(hack) - 0x100:
+        return None
+    regs = {}
+    words = [word(hack, rom + 4 * i) for i in range(48)]
+    for i, w in enumerate(words):
+        op, rs, rt, imm = w >> 26, (w >> 21) & 31, (w >> 16) & 31, w & 0xFFFF
+        if op == 0x0F:                                          # lui
+            regs[rt] = (imm << 16) & 0xFFFFFFFF
+        elif op == 0x09 and rs in regs and rs == rt:            # addiu rt, rt, imm
+            regs[rt] = (regs[rs] + mips.sx16(imm)) & 0xFFFFFFFF
+        elif op == 0x0D and rs in regs and rs == rt:            # ori
+            regs[rt] |= imm
+        elif op == 0x23:                                        # lw: the loop starts here
+            src = rs
+            rest = words[i:i + 12]
+            sw = next((x for x in rest if x >> 26 == 0x2B), None)
+            bnez = next((x for x in rest if x >> 26 == 0x05), None)
+            if sw is None or bnez is None:
+                return None
+            dst, cnt = (sw >> 21) & 31, (bnez >> 21) & 31
+            if src not in regs or dst not in regs or cnt not in regs:
+                return None
+            s, t, n = regs[src], regs[dst], regs[cnt]
+            if not (0xB0000000 <= s < 0xB4000000 and 0x80400000 <= t < PAYLOAD_RAM_LIMIT and 0 < n <= PAYLOAD_RAM_LIMIT - t):
+                return None
+            return dict(rom=s - 0xB0000000, ram=t, size=n, zero_lo=None, zero_hi=None, cave=cave,
+                        resume=0x80000400 + 4 * (hook + 2))
+    return None
+
+
+def trace_extent(get_word, entry, lo, hi):
+    """Linear extent [entry, end) of code entered at `entry` within [lo, hi): follows branches
+    and fallthrough, stops after jr / j (j targets are separate entries). A branch into the delay
+    slot of a j (hand-written hack code does that) traces on from the slot. Returns
+    (end, j_targets, jal_targets, back_branches)."""
+    seen = set()
+    work = [entry]
+    end = entry
+    jt, jalt, back = set(), set(), set()
+    while work:
+        pc = work.pop()
+        while lo <= pc < hi and pc not in seen:
+            seen.add(pc)
+            w = get_word(pc)
+            end = max(end, pc + 8)
+            op = w >> 26
+            t = mips.branch_target(w, pc)
+            if t is not None:
+                if t < entry:
+                    back.add(t)
+                elif t not in seen:
+                    work.append(t)
+                # beq zero,zero (b) is unconditional
+                if op == 0x04 and (w >> 16) & 0x3FF == 0:
+                    break
+            if op == 2:
+                jt.add(mips.jump_target(w, pc))
+                break
+            if op == 3:
+                jalt.add(mips.jump_target(w, pc))
+            if op == 0 and (w & 0x3F) == 0x08:          # jr
+                break
+            pc += 4
+    return min(end, hi), jt, jalt, back
+
+
+def reach(get_word, entries, lo, hi, follow_j=False):
+    """Addresses in [lo, hi) control can reach from `entries`: follows branches (both ways) and
+    fallthrough, stops after jr / j / an unconditional b (their delay slots included). follow_j: also
+    follow a `j` into [lo, hi) (a local jump when the range is one function)."""
+    seen = set()
+    work = list(entries)
+    while work:
+        pc = work.pop()
+        while lo <= pc < hi and pc not in seen:
+            seen.add(pc)
+            w = get_word(pc)
+            t = mips.branch_target(w, pc)
+            if t is None and follow_j and w >> 26 == 2:
+                t = mips.jump_target(w, pc)
+            if t is not None and t not in seen:
+                work.append(t)
+            if _ends_flow(w):
+                if lo <= pc + 4 < hi:
+                    seen.add(pc + 4)
+                break
+            pc += 4
+    return seen
+
+
+def data_in_code(hw, h, entries=()):
+    """Which words of a hack's function body may be data, not code: (whole, unreached). `whole`: the
+    code traced from its entry doesn't decode (the hack filled dead code with data: names, tables).
+    `unreached`: indices of words no entry reaches (stray data words, or code only a jump from
+    elsewhere enters)."""
+    get = lambda pc: hw[(pc - h) // 4]
+    seen = reach(get, [h] + list(entries), h, h + 4 * len(hw))
+    if any(not mips.plausible(get(pc)) for pc in seen):
+        return True, set()
+    return False, {i for i in range(len(hw)) if h + 4 * i not in seen}
+
+
+NEW_CODE_VRAM = 0x8F000000      # relocated hack code: never a data address (mods use 0x81000000+), only ever called
+
+
+class Extra:
+    """Code the runtime must live-recompile and register besides the in-place ports.
+    kind: 'payload' (Expansion-RAM code, vram = its RAM address), 'cave' (code the hack put in
+    main's data area, moved to NEW_CODE_VRAM), 'mid' (a hook returns into the middle of a
+    function: registered as its own function from there to the function's end)."""
+    def __init__(self, kind, hack_vram, vram, size, section=None):
+        self.kind, self.hack_vram, self.vram, self.size, self.section = kind, hack_vram, vram, size, section
+        self.rom = None             # set when the ROM is assembled
+        self.problems = []
+
+
+def resized_pairs(A):
+    """(section, stock function start, hack function start) for the stock functions inside each moved resized stretch:
+    hack starts are the stretch start, calls into it (from its own section and main) and a frame setup or a
+    `jr ra` stub right after a `jr ra` and its slot. Equal counts pair in order; otherwise the stretch starts pair (both are function
+    boundaries) and the rest pair where the frame sizes agree (difflib), positionally inside equal-length runs."""
+    import difflib
+    out = []
+    for name, slo, shi, hlo, hhi in getattr(A, 'moved_resized', []):
+        st = A.byname[name]
+        hw = lambda v, name=name: word(A.hack, A.hack_rom_of(name, v))
+        starts = {hlo}
+        for src in (name, 'main'):
+            hrom, htext, htext_end = A.place[src][:3]
+            for i in range((htext_end - htext) // 4):
+                w = word(A.hack, hrom + 4 * i)
+                if w >> 26 == 3:
+                    t = mips.jump_target(w, htext + 4 * i)
+                    if hlo <= t < hhi:
+                        starts.add(t)
+        for v in range(hlo, hhi - 8, 4):
+            # a function after a return: a frame setup, or a stub the hack left (`jr ra; nop`)
+            if hw(v) == 0x03E00008 and (((hw(v + 8) >> 16) == 0x27BD and hw(v + 8) & 0x8000) or hw(v + 8) == 0x03E00008):
+                starts.add(v + 8)
+        hs = sorted(starts)
+        ss = sorted(st.text + o for o, z in st.funcs if slo <= st.text + o < shi)
+        frame = lambda w: (w & 0xFFFF) if w >> 16 == 0x27BD else 0
+        hsig = [frame(hw(v)) for v in hs]
+        ssig = [frame(word(A.base, st.rom_of(v))) for v in ss]
+        if not ss:
+            continue
+        if len(ss) == len(hs):
+            out.extend((name, a, b) for a, b in zip(ss, hs))
+            continue
+        # the stretch starts on a function boundary on both sides; the rest by frame sizes
+        out.append((name, ss[0], hlo))
+        hs, hsig = [v for v in hs if v != hlo], [f for v, f in zip(hs, hsig) if v != hlo]
+        ss, ssig = ss[1:], ssig[1:]
+        for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, ssig, hsig, autojunk=False).get_opcodes():
+            if tag == 'equal' or (tag == 'replace' and i2 - i1 == j2 - j1):
+                out.extend((name, ss[i], hs[j]) for i, j in zip(range(i1, i2), range(j1, j2)))
+    return out
+
+
+def discover_extra_code(A):
+    """Find the hack's code outside the stock text: payload functions, main-data caves, chunks
+    the hack reshaped (moved whole to the new-code area) and mid-function return points.
+    Fills A.payload, A.extras, A.region_entries, A.new_blocks and the map's priority ranges."""
+    A.payload = find_payload(A.hack)
+    main = A.byname['main']
+    hrom, htext, htext_end = A.place['main'][:3]
+    data_shift = (A.map.translate(htext_end) or htext_end) - htext_end    # main data: one shift (none known: 0)
+    hack_main_data = (htext_end, main.bss - data_shift)
+    # regions: (name, lo, hi, get_word, section or None); a reshaped chunk only receives jumps
+    # from its own section's code (overlays share addresses)
+    regions = []
+    if A.payload:
+        p = A.payload
+        regions.append(('payload', p['ram'], p['ram'] + p['size'], lambda v, p=p: word(A.hack, p['rom'] + (v - p['ram'])), None))
+    regions.append(('cave', hack_main_data[0], hack_main_data[1], lambda v: word(A.hack, hrom + (v - htext)), None))
+    for name, slo, shi, hlo, hhi in A.reshaped:
+        regions.append(('reshaped', hlo, hhi, lambda v, name=name: word(A.hack, A.hack_rom_of(name, v)), name))
+    skip = {A.payload['cave']} if A.payload else set()
+
+    # the stock functions themselves, not their chunk's span: hacks put code in the padding between them
+    # (Revenge Starrcade 2.0 jumps to 0x8002EB04, between the stub at 0x8002E900 and 0x8002EC2C)
+    stock_code = [(x['ram'] + o, x['ram'] + o + z) for x in A.layout.get('extra_code', []) for o, z in x['funcs'] if z]
+
+    def region_of(a, src=None):
+        for r in regions:
+            if r[1] <= a < r[2] and (r[4] in (None, 'main') or r[4] == src):
+                if r[0] == 'cave' and any(lo <= a < hi for lo, hi in stock_code):
+                    return None     # a stock function the recompiler already has
+                return r
+        return None
+
+    def hook_out_units(t):
+        """The changed functions holding t whose word at t - 8 is a `j` out of them: the hack's `j hook; slot` before
+        the point the hook returns to."""
+        found = set()
+        for name, units in A.units.items():
+            srom, stext = A.place[name][:2]
+            for s, h, z in units:
+                if h + 8 <= t < h + z:
+                    w = word(A.hack, srom + (t - 8 - stext))
+                    if w >> 26 == 2 and not (h <= mips.jump_target(w, t - 8) < h + z):
+                        found.add((name, s, h, z))
+        return found
+
+    def entry_region(a, src=None):
+        """region_of, plus: main's text (always resident) jumping into an overlay's reshaped chunk enters that chunk when
+        only one reshaped chunk holds the address and no other overlay's changed function has a hook going out right
+        before it (then the jump is that hook coming back). Not for the caves: No Mercy Plus V3's and BTBW's caves jump
+        back into ovl_b/ovl_c/ovl_e functions at addresses where ovl_d has a reshaped chunk. VPW64 Deluxe v1.1: main's hook at 0x80010ADC
+        does `j 0x800F2ADC`, into ovl_a's chunk at 0x800F2A40; without the entry the chunk's code there was copied
+        unrewritten, so its `j 0x800FC29C` reached the stock Controller Pak function at that address instead of the
+        hook derelink moved to the new-code area (jessetbh/aki-roadmap#222)."""
+        r = region_of(a, src)
+        if r is None and src == 'main':
+            rs = [r_ for r_ in regions if r_[0] == 'reshaped' and r_[1] <= a < r_[2]]
+            if len(rs) == 1 and not any(name != rs[0][4] for name, s, h, z in hook_out_units(a)):
+                return rs[0]
+        return r
+
+    work = []                                   # (address, source section or None)
+    for name, (srom, stext, stext_end, _, _) in A.place.items():
+        words = [word(A.hack, srom + 4 * i) for i in range((stext_end - stext) // 4)]
+        for i, kind, t in mips.jumps(words, stext):
+            r = entry_region(t, name)
+            if r and t not in skip:
+                work.append((t, r[4] if r[0] == 'reshaped' else name))
+    # seeds from data: jump-table cases and function pointers the hack pointed at its own code
+    # (the stock word at the same place is a code address)
+    stock_text = [(st.text, st.data) for st in A.secs]
+    data_seed_owner = {}
+    for name, (srom, stext, stext_end, hdata, hend) in A.place.items():
+        if name == 'entry':
+            continue
+        st = A.byname[name]
+        rs = A.map.main if name == 'main' else A.map.ovl[name]
+        for lo, hi, d, kind in rs:
+            if kind != 'data':
+                continue
+            for y in range(lo, hi, 4):
+                x = (y + d) & 0xFFFFFFFF
+                if not (st.data <= x < st.bss):
+                    continue
+                hw = word(A.hack, srom + (y - stext))
+                if hw & 3 == 0 and region_of(hw, name) and hw not in skip:
+                    sw = word(A.base, st.rom_of(x))
+                    r = region_of(hw, name)
+                    if any(a <= sw < b for a, b in stock_text) and                             mips.plausible_entry([r[3](hw + 4 * k) for k in range(6)]):
+                        work.append((hw, name))
+                        data_seed_owner.setdefault(hw, set()).add((name, sw))
+    # moved resized stretches: the hack's function starts paired with stock ones get entries (resized_redirects)
+    A.resized_pairs = resized_pairs(A)
+    work += [(h, name) for name, s_, h in A.resized_pairs]
+    entries = {}                                # address -> (region, end, back)
+    text_jumps = set()
+
+    def run(work):
+        while work:
+            e, src = work.pop()
+            if e in entries or e in skip:
+                continue
+            r = region_of(e, src)
+            if r is None:
+                continue
+            end, jt, jalt, back = trace_extent(r[3], e, r[1], r[2])
+            entries[e] = (r, end, back)
+            inner = r[4]                        # code in a reshaped chunk keeps its section
+            for t in jt | jalt:
+                if region_of(t, inner):
+                    work.append((t, inner))
+                elif t not in skip:
+                    text_jumps.add((t, inner))
+    run(work)
+
+    # code reached from region code by j (not jal) chains, for hook-return ownership
+    reach_from = {}
+    def reach(e0, src):
+        key = (e0, src)
+        if key in reach_from:
+            return reach_from[key]
+        seen, out, todo = set(), set(), [(e0, src)]
+        while todo:
+            e, s = todo.pop()
+            if e in seen:
+                continue
+            seen.add(e)
+            r = region_of(e, s)
+            if r is None:
+                out.add(e)
+                continue
+            end, jt, jalt, back = trace_extent(r[3], e, r[1], r[2])
+            for t in jt:
+                todo.append((t, r[4]))
+        reach_from[key] = out
+        return out
+
+    # hooks entered from a reshaped chunk return into it: those points are entries of the chunk
+    for _ in range(3):
+        more = []
+        for r in regions:
+            if r[0] != 'reshaped':
+                continue
+            words = [r[3](v) for v in range(r[1], r[2], 4)]
+            for i, kind, t in mips.jumps(words, r[1]):
+                if kind == 'j' and region_of(t) and not (r[1] <= t < r[2]):
+                    for b in reach(t, None):
+                        if r[1] <= b < r[2] and b not in entries:
+                            more.append((b, r[4]))
+        if not more:
+            break
+        run(more)
+    A.region_entries = entries
+    A.text_jumps = {t for t, _ in text_jumps}
+
+    # the new-code area: the caves (one block per cluster, cave_blocks) and each reshaped chunk, whole, in hack layout
+    A.new_blocks = []                           # (kind, section, hack lo, hack hi, new vram)
+    cur = NEW_CODE_VRAM
+    for lo, hi in cave_blocks((e, end) for e, (r, end, _) in entries.items() if r[0] == 'cave'):
+        A.new_blocks.append(('cave', None, lo, hi, cur))
+        cur = (cur + (hi - lo) + 15) & ~15
+    for name, slo, shi, hlo, hhi in A.reshaped:
+        A.new_blocks.append(('reshaped', name, hlo, hhi, cur))
+        cur = (cur + (hhi - hlo) + 15) & ~15
+    A.map.priority = sorted([r for r in A.map.priority if r[3] == 'save'] +
+                            [(lo, hi, (nv - lo) & 0xFFFFFFFF, k) for k, sec, lo, hi, nv in A.new_blocks
+                             if k == 'cave' or sec == 'main'])
+    for k, sec, lo, hi, nv in A.new_blocks:
+        if k == 'reshaped' and sec != 'main':
+            A.map.ovl[sec].append((lo, hi, (nv - lo) & 0xFFFFFFFF, 'reshaped'))
+    A.map.finish()
+    for name in A.map.ovl:      # a reshaped range replaces the text ranges it overlaps
+        rs = A.map.ovl[name]
+        resh = [(lo, hi) for lo, hi, d, k in rs if k == 'reshaped']
+        A.map.ovl[name] = [r for r in rs if r[3] == 'reshaped' or not any(lo <= r[0] < hi for lo, hi in resh)]
+
+    def new_vram(e, r):
+        for k, sec, lo, hi, nv in A.new_blocks:
+            if lo <= e < hi and (sec is None or sec == r[4]):
+                return nv + (e - lo)
+        return None
+
+    extras = []
+    for e, (r, end, back) in sorted(entries.items(), key=lambda kv: kv[0]):
+        if r[0] == 'payload':
+            v = e
+        else:
+            v = new_vram(e, r)
+        x = Extra(r[0], e, v, end - e, section=r[4])
+        extras.append(x)
+
+    # which overlay's code enters each payload/cave entry (directly or through other entries):
+    # that overlay is the context for translating its addresses
+    region_ctx = collections.defaultdict(set)
+    def enter(e0, sec):
+        todo, seen = [e0], set()
+        while todo:
+            e = todo.pop()
+            if e in seen or e not in entries:
+                continue
+            seen.add(e)
+            region_ctx[e].add(sec)
+            r = entries[e][0]
+            end, jt, jalt, back = trace_extent(r[3], e, r[1], r[2])
+            todo += [t for t in jt | jalt if t in entries]
+    for name, units in A.units.items():
+        srom, stext = A.place[name][:2]
+        for s, h, z in units:
+            words = [word(A.hack, srom + (h - stext) + 4 * i) for i in range(z // 4)]
+            for i, kind, t in mips.jumps(words, h):
+                if t in entries and entries[t][0][0] in ('payload', 'cave'):
+                    enter(t, name)
+    for hw, owners_of in data_seed_owner.items():
+        for name, sw in owners_of:
+            if hw in entries:
+                enter(hw, name)
+    A.region_ctx = {e: next(iter(v)) for e, v in region_ctx.items() if len(v) == 1 and next(iter(v)) != 'main'}
+    # registers holding a lui value when a function jumps into a hook: the hack moved the
+    # displaced instructions there, so a %lo in the hook can pair with a lui left behind
+    inits = {}
+    for name, units in A.units.items():
+        srom, stext = A.place[name][:2]
+        for s, h, z in units:
+            words = [word(A.hack, srom + (h - stext) + 4 * i) for i in range(z // 4)]
+            for i, kind, t in mips.jumps(words, h):
+                if kind == 'j' and t in entries and entries[t][0][0] in ('payload', 'cave'):
+                    st = mips.hilo_state_at(words, i)
+                    inits[t] = st if t not in inits else {r: v for r, v in inits[t].items() if st.get(r) == v}
+    A.entry_init = {e: st for e, st in inits.items() if st}
+    # ...and the other way round: registers a hook leaves holding a lui value when it jumps back
+    # into the function (the hack moved a lui there; the %lo stayed behind)
+    rinits = {}
+    rwrites = collections.defaultdict(set)   # return point -> registers the hooks coming back there write
+    for e, (r, end, back) in entries.items():
+        words = [r[3](v) for v in range(e, end, 4)]
+        for i, kind, t in mips.jumps(words, e):
+            if kind == 'j' and not region_of(t, r[4]):
+                st = mips.hilo_state_at(words, i)
+                rinits[t] = st if t not in rinits else {k: v for k, v in rinits[t].items() if st.get(k) == v}
+                rwrites[t] |= mips.regs_written(words[:i + 2])
+    A.return_init = {t: st for t, st in rinits.items() if st}
+    # a register the hook writes holds no lui value of the function's any more when the hook comes back: a relinked
+    # hack's `lui r,%hi; j hook`, the hook doing the stock `lw r,%lo(r)` (aki-roadmap#239)
+    A.return_writes = {t: frozenset(w) for t, w in rwrites.items() if w}
+
+    # mid-function return points: a hook entered by a `j` from function U returns into U
+    owners = collections.defaultdict(set)          # hack text address -> {(section, s, h, z)}
+    for name, units in A.units.items():
+        srom, stext = A.place[name][:2]
+        for s, h, z in units:
+            words = [word(A.hack, srom + (h - stext) + 4 * i) for i in range(z // 4)]
+            for i, kind, t in mips.jumps(words, h):
+                if kind == 'j' and region_of(t, name) and not region_of(t, name)[0] == 'reshaped':
+                    for b in reach(t, name):
+                        if h < b < h + z:
+                            owners[b].add((name, s, h, z))
+    # hooks entered from a redirected switch case return into the function that owned the case
+    for hw, owners_of in data_seed_owner.items():
+        for name, sw in owners_of:
+            for s, h, z in A.units.get(name, []):
+                if s <= sw < s + z:
+                    for b in reach(hw, name):
+                        if h < b < h + z:
+                            owners[b].add((name, s, h, z))
+    def hook_out_owner(t):
+        """The changed function a return point belongs to, when the chain back to it isn't traceable (it runs through
+        hooks in main's text, which reach doesn't follow): the one function hook_out_units finds. VPW64 Deluxe v1.1:
+        ovl_b's 0x801211A0 does `j 0x80010ADC` at 0x80123A7C, and the chain (main 0x80010ADC, ovl_a 0x800F2ADC and
+        0x800FC29C) comes back at 0x80123A84; with no entry there the hook's return ended the main thread
+        (jessetbh/aki-roadmap#222)."""
+        found = hook_out_units(t)
+        return found if len(found) == 1 else None
+
+    starts = {h for units in A.units.values() for s, h, z in units}
+    stock_starts = {st.text + o for st in A.secs for o, z in st.funcs}
+    resh_ranges = [(lo, hi) for k, sec, lo, hi, nv in A.new_blocks if k == 'reshaped']
+    for t in sorted(A.text_jumps):
+        if t in entries:
+            continue
+        if t in starts and t not in owners:
+            continue
+        if t not in owners and A.map.translate(t) in stock_starts:
+            continue        # a tail call to a function the map knows (e.g. inside resized code)
+        own = owners.get(t) or hook_out_owner(t)
+        if not own:
+            if any(lo <= t < hi for lo, hi in resh_ranges):
+                continue    # into a reshaped chunk from code that can't say which overlay: no entry
+            x = Extra('mid', t, None, 0)
+            x.problems.append(('mid-unowned', t))
+            extras.append(x)
+            continue
+        for name, s, h, z in sorted(own):
+            extras.append(Extra('mid', t, s + (t - h), z - (t - h), section=name))
+    A.extras = extras
+    return extras
+
+
+# ------------------------------------------------------------------------------ assembly
+
+CAVE_GAP = 0x10
+
+
+def cave_blocks(caves, gap=CAVE_GAP):
+    """The hack's cave code (entry, end) spans as blocks to move whole: spans at most gap bytes apart share a block (code
+    that falls through or sits back to back), farther ones get their own. One block over all of them took in the data
+    between two far caves (Revenge Starrcade 2.0: 0x8002EB04 and 0x8003A8E8 spanned ~48 KB of main's tables), whose
+    changes translate_data then skipped as cave code (jessetbh/aki-roadmap#119)."""
+    blocks = []
+    for lo, hi in sorted(caves):
+        if blocks and lo <= blocks[-1][1] + gap:
+            blocks[-1][1] = max(blocks[-1][1], hi)
+        else:
+            blocks.append([lo, hi])
+    return [tuple(b) for b in blocks]
+
+
+def code_spans(extras, kind):
+    """Merged [lo, hi) hack spans of the extras of one kind."""
+    spans = sorted((x.hack_vram, x.hack_vram + x.size) for x in extras if x.kind == kind and x.size)
+    out = []
+    for lo, hi in spans:
+        if out and lo <= out[-1][1]:
+            out[-1][1] = max(out[-1][1], hi)
+        else:
+            out.append([lo, hi])
+    return [tuple(s) for s in out]
+
+
+# Display-list commands whose second word is an address (F3D/F3DEX/F3DEX2): G_VTX (0x01, 0x04), G_MTX (0x01, 0xDA),
+# G_MOVEMEM (0x03, 0xDC), G_DL (0x06, 0xDE), G_SETTIMG (0xFD), G_SETZIMG (0xFE), G_SETCIMG (0xFF).
+DL_ADDRESS_OPS = {0x01, 0x03, 0x04, 0x06, 0xDA, 0xDC, 0xDE, 0xFD, 0xFE, 0xFF}
+
+
+def dl_address_word(w0):
+    """Whether w0 is a display-list command whose next word is an address."""
+    return (w0 >> 24) in DL_ADDRESS_OPS
+
+
+def translate_data(A, D, report):
+    """Copy the hack's data changes into the stock data images in D (pointers translated).
+    Words equal to stock, or whose translation equals stock, keep the stock value."""
+    skip = [(lo, hi) for k, sec, lo, hi, nv in A.new_blocks if k == 'cave']
+    if A.payload:
+        cave = A.payload['cave']
+        skip.append((cave, cave + 0x100))
+    changed = 0
+    for name, (hrom, htext, htext_end, hdata, hend) in A.place.items():
+        if name == 'entry' or name in getattr(A, 'experiment_no_data', ()):
+            continue
+        skip_ranges = [tuple(int(v, 16) for v in e.split(':')[1].split('-'))
+                       for e in getattr(A, 'experiment_no_data', ()) if e.startswith(name + ':')]
+        st = A.byname[name]
+        ctx = A.ctx_of_hack(name)
+        rs = A.map.main if name == 'main' else A.map.ovl[name]
+        hack_bss = None
+        if name in A.hsecs and A.hsecs[name] is not None:
+            hack_bss = A.hsecs[name].bss
+        claimed = set()     # stock addresses a hack word already landed on (equal to stock or not)
+        for lo, hi, d, kind in sorted(r for r in rs if r[3] == 'data'):
+            for y in range(lo, hi, 4):
+                x = (y + d) & 0xFFFFFFFF
+                if not (st.data <= x < st.bss):
+                    continue
+                if hack_bss is not None and y >= hack_bss:
+                    continue
+                if any(a <= y < b for a, b in skip):
+                    continue
+                # Data the hack grew has no room here, so two of its ranges can land on one stock address: the first
+                # keeps it, or the later range cuts it mid-word (aki-roadmap#120: "Controller or Coetry" in 9 Underground).
+                if x in claimed:
+                    report['data_words_overlapped'] = report.get('data_words_overlapped', 0) + 1
+                    if word(A.hack, hrom + (y - htext)) != word(A.base, st.rom_of(x)):
+                        report.setdefault('data_words_dropped', []).append((name, y, x))
+                    continue
+                claimed.add(x)
+                hw = word(A.hack, hrom + (y - htext))
+                xr = st.rom_of(x)
+                sw = word(A.base, xr)
+                if hw == sw or any(a <= x < b for a, b in skip_ranges):
+                    continue
+                cs = A.map.candidates(hw, ctx) if 0x80000000 <= hw < 0x80800000 or hw < 0x00800000 else []
+                if sw in cs:
+                    continue
+                ram = [c for c in cs if c >= 0x80000000] if hw >= 0x80000000 else []
+                if not ram and hw < 0x00800000 and dl_address_word(word(A.hack, hrom + (y - 4 - htext))) and                         phys_data_address(A.map, hw, ctx):
+                    # a static display list's physical address into the overlay's own data (G_SETTIMG, G_DL, ...):
+                    # 9 Underground's logo textures (aki-roadmap#120). Translated as KSEG0, kept physical.
+                    ram = [c & 0x1FFFFFFF for c in A.map.candidates(hw | 0x80000000, ctx) if c >= 0x80000000]
+                    if sw in ram:
+                        continue
+                put_word(D, xr, ram[0] if ram else hw)
+                changed += 1
+                report.setdefault('data_changes', []).append((name, x, sw, ram[0] if ram else hw))
+    report['data_words_changed'] = changed
+
+
+def resized_redirects(A, D, report):
+    """Each stock function inside a moved resized stretch becomes `j <its hack version in the new-code area>`: the
+    runtime regenerates it (its bytes changed), so stock code still calling it directly runs the hack's version."""
+    n = 0
+    for name, s_, h in getattr(A, 'resized_pairs', []):
+        nv = next((nv + (h - lo) for k, sec, lo, hi, nv in A.new_blocks if k == 'reshaped' and sec == name and lo <= h < hi), None)
+        if nv is None:
+            continue
+        r = A.byname[name].rom_of(s_)
+        put_word(D, r, (2 << 26) | ((nv >> 2) & 0x3FFFFFF))
+        put_word(D, r + 4, 0)
+        n += 1
+    report['resized_redirects'] = n
+
+
+def runtime_targets(A):
+    """(section, hack address) of each `j`/`jal` into a chunk reshaped at its own address, from code the hack loads at run
+    time: words in the ROM outside the stock code and the payload, out of reach of the rewrite. Decodable neighbours tell
+    code from a chance match in compressed assets."""
+    chunks = [(name, lo, hi) for name, slo, shi, lo, hi in A.reshaped if (slo, shi) == (lo, hi)]
+    if not chunks:
+        return set()
+    skip = list(stock_code_blocks(A.secs))
+    if A.payload:
+        skip.append((A.payload['rom'], A.payload['rom'] + A.payload['size']))
+    out = set()
+    for off in range(24, len(A.hack) - 27, 4):
+        w = word(A.hack, off)
+        if w >> 26 not in (2, 3):
+            continue
+        t = 0x80000000 | ((w & 0x3FFFFFF) << 2)
+        for name, lo, hi in chunks:
+            if lo <= t < hi and not any(a <= off < b for a, b in skip) and all(mips.plausible(word(A.hack, off + 4 * i)) for i in range(-6, 7)):
+                out.add((name, t))
+    return out
+
+
+def runtime_functions(A, area, new_rom, report):
+    """Code loaded at run time reaches a reshaped chunk at the hack's address, where the moved chunk left stock words (VPW64
+    Deluxe: `j 0x8011DA24` ran them with the wrong registers and crashed, and `jal 0x800F7A14` got the stock function, which
+    takes other arguments; jessetbh/aki-roadmap#222). Each target is compiled from a copy of the hack's words at its own
+    address and tied to its overlay, which also replaces a stock function there for calls through the lookup. RAM stays
+    stock: hack words there would change the stock function around them and the runtime would regenerate it. Branches out of
+    the chunk keep their offsets, so they become lookups."""
+    out, problems = [], []
+    for name, t in sorted(runtime_targets(A)):
+        st = A.byname[name]
+        lo, hi = next((l, h) for n_, a, b, l, h in A.reshaped if n_ == name and l <= t < h)
+        get = lambda v, name=name: word(A.hack, A.hack_rom_of(name, v))
+        end, _, _, back = trace_extent(get, t, lo, hi)
+        first = min([b for b in back if lo <= b] + [t])
+        words = rewrite([get(v) for v in range(first, end, 4)], first, first, lambda a, name=name: A.map.candidates(a, name), None, problems)
+        vram = first
+        if first < t:       # loops reach above the entry: the same form as the back-branch copies, a branch to the real entry first
+            words = [0x10000000 | (((t - (first - 4)) >> 2) & 0xFFFF), 0] + words
+            vram = first - 8
+        off = (len(area) + 15) & ~15
+        area.extend(bytes(off - len(area)))
+        for w in words:
+            area.extend(w.to_bytes(4, 'big'))
+        out.append(dict(vram=vram, entry=t, rom=new_rom + off, size=4 * len(words), kind='runtime', section_rom=st.rom,
+                        data=[st.text, st.bss, st.rom]))
+    report['runtime_functions'] = [f['entry'] for f in out]
+    report['runtime_function_problems'] = problems
+    return out
+
+
+def keep_caves_in_place(A, D, report):
+    """Main-data caves also keep their code at the hack's addresses, where main's data isn't shifted: code the hack
+    loads at run time (compressed modules, out of reach of the rewrite) jumps there (VPW64 Deluxe's hooks fall back
+    to 0x8003C5D0), and the runtime compiles it from RAM. Only runs written mostly over stock padding (zero words,
+    which may start in the last words of what was there): a cave block can span microcode the hack modified, which
+    must stay stock for the renderer to recognize it."""
+    main = A.byname['main']
+    hrom, htext, htext_end, hdata, hend = A.place['main']
+    if (htext, htext_end, hdata) == (main.text, main.data, main.data):
+        ident = [(main.data, main.bss)]     # main kept the stock bounds: its data isn't shifted (whatever matching said)
+    else:
+        ident = [(lo, hi) for lo, hi, d, kind in A.map.main if kind == 'data' and d == 0]
+    kept = 0
+    for kind, sec, lo, hi, nv in A.new_blocks:
+        if kind != 'cave' or sec:
+            continue
+        run = []
+        for y in range(lo, hi + 4, 4):
+            r = main.rom_of(y)
+            ok = y < hi and any(a <= y < b for a, b in ident) and main.data <= y < main.bss
+            hw = word(A.hack, hrom + (y - htext)) if ok else 0
+            if ok and hw != word(D, r) and word(D, r) == word(A.base, r):
+                run.append((r, hw))
+                continue
+            if run and 2 * sum(word(A.base, r_) == 0 for r_, _ in run) > len(run):
+                for r_, w_ in run:
+                    put_word(D, r_, w_)
+                kept += len(run)
+            run = []
+    report['cave_words_kept_in_place'] = kept
+
+
+PAYLOAD_DATA_REACH = 0x1000     # how far past the address its code builds a payload data block can run
+
+
+def payload_data_owners(A, get, spans):
+    """For payload data: the overlay context of the code that owns it, as a function of the word's address (or None).
+
+    A word belongs to the nearest address at or below it that payload code builds with lui + %lo (a table's base),
+    within PAYLOAD_DATA_REACH, when every stretch of code building that address is entered from one overlay. Pointers
+    in it are translated the way that overlay's own code sees memory: the co-resident overlays (No Mercy's ovl_b/c/d
+    beside ovl_e) give different stock addresses for one hack address. A relinked hack's hook in an ovl_e function
+    can walk address/value tables in the payload; translated as ovl_b/c/d data (-0x1500 instead of ovl_e's -0x1530)
+    every write lands 12 entries past its table slot and the game crashes (aki-roadmap#223)."""
+    p = A.payload
+    ctx_of = getattr(A, 'region_ctx', {})
+    in_code = lambda a: any(lo <= a < hi for lo, hi in spans)
+    owners = {}
+    for lo, hi in spans:
+        secs = {ctx_of[e] for e in ctx_of if lo <= e < hi}
+        ctx = secs.pop() if len(secs) == 1 else None
+        words = [get(v) for v in range(lo, hi, 4)]
+        for h, l, a in mips.hilo_refs(words):
+            if h is not None and p['ram'] <= a < p['ram'] + p['size'] and not in_code(a):
+                owners.setdefault(a & ~3, set()).add(ctx)
+    refs = sorted(owners)
+
+    def ctx_at(v):
+        i = bisect.bisect_right(refs, v) - 1
+        if i < 0 or v - refs[i] >= PAYLOAD_DATA_REACH or any(refs[i] < b <= v for a, b in spans):
+            return None
+        cs = owners[refs[i]]
+        return next(iter(cs)) if len(cs) == 1 else None
+    return ctx_at
+
+
+def payload_fixups(A, D, report):
+    """Rewrite the payload's code (hack -> stock addresses) and translate pointers in its data."""
+    p = A.payload
+    if not p:
+        return
+    get = lambda v: word(A.hack, p['rom'] + (v - p['ram']))
+    spans = code_spans(A.extras, 'payload')
+    probs = []
+    ctx_of = getattr(A, 'region_ctx', {})
+    for lo, hi in spans:
+        # the overlay whose code enters this stretch, when only one does
+        secs = {ctx_of[e] for e in ctx_of if lo <= e < hi}
+        ctx = secs.pop() if len(secs) == 1 else None
+        cand = lambda a, ctx=ctx: A.map.candidates(a, ctx)
+        words = [get(v) for v in range(lo, hi, 4)]
+        nw = rewrite(words, lo, lo, cand, None, probs)
+        for i, w in enumerate(nw):
+            put_word(D, p['rom'] + (lo - p['ram']) + 4 * i, w)
+    # hook entries: %lo uses paired with the jumping function's lui
+    for x in A.extras:
+        init = getattr(A, 'entry_init', {}).get(x.hack_vram) if x.kind == 'payload' else None
+        if not init:
+            continue
+        ctx = getattr(A, 'region_ctx', {}).get(x.hack_vram)
+        words = [get(v) for v in range(x.hack_vram, x.hack_vram + x.size, 4)]
+        ext = {lo for hi, lo, a in mips.hilo_refs(words, init=init) if hi is None}
+        nw = rewrite(words, x.hack_vram, x.hack_vram, lambda a, ctx=ctx: A.map.candidates(a, ctx), None, probs, init=init)
+        for i in ext:
+            put_word(D, p['rom'] + (x.hack_vram - p['ram']) + 4 * i, nw[i])
+    data_ctx = payload_data_owners(A, get, spans)
+    ptrs = owned = 0
+    for v in range(p['ram'], p['ram'] + p['size'], 4):
+        if any(a <= v < b for a, b in spans):
+            continue
+        w = get(v)
+        if 0x80000400 <= w < 0x80400000 and w & 3 == 0:
+            ctx = data_ctx(v)
+            c = A.map.translate(w, ctx)
+            if ctx is not None and c != A.map.translate(w):
+                owned += 1
+            if c is not None and c != w:
+                put_word(D, p['rom'] + (v - p['ram']), c)
+                ptrs += 1
+    report['payload_pointers_by_owner'] = owned
+    report['payload_code_spans'] = len(spans)
+    report['payload_code_problems'] = probs
+    report['payload_pointers_translated'] = ptrs
+
+
+def patch_unsupported_instructions(D, functions, report):
+    """The live recompiler only reads COP0 Status. Hacks read COP0 Random ($1) as a cheap random
+    number: replace `mfc0 rt, $Random` with `mflo rt` (LO, the last multiply's leftover, varies
+    with game state too). [(vram, rom, size)]"""
+    n = 0
+    for vram, rom, size in functions:
+        for i in range(size // 4):
+            w = word(D, rom + 4 * i)
+            if w >> 21 == (0x10 << 5) | 0x00 and ((w >> 11) & 31) == 1 and (w & 0x7FF) == 0:
+                put_word(D, rom + 4 * i, (((w >> 16) & 31) << 11) | 0x12)
+                n += 1
+    report['cop0_random_replaced'] = n
+
+
+def overlay_switch_tables(A, D, x):
+    """[(section, table vram)] for jump tables in an overlay's data that payload function x
+    dispatches through (`lw rX, %lo(table)(...)` ... `jr rX`, the hack taking over a switch)."""
+    sec = getattr(A, 'region_ctx', {}).get(x.hack_vram)
+    if x.kind != 'payload' or sec is None or sec == 'main':
+        return []
+    st = A.byname[sec]
+    words = [word(D, x.rom + 4 * i) for i in range(x.size // 4)]
+    jr_regs = {(w >> 21) & 31 for w in words if w >> 26 == 0 and (w & 0x3F) == 0x08 and (w >> 21) & 31 != 31}
+    out = []
+    for hi, lo, a in mips.hilo_refs(words):
+        w = words[lo]
+        if w >> 26 == 0x23 and (w >> 16) & 31 in jr_regs and st.data <= a < st.bss:
+            out.append((sec, a))
+    return out
+
+
+def add_switch_case_entries(A, D):
+    """Cases of overlay switch tables that payload code dispatches through are mid-function
+    points of stock overlay code: register them so the lookup tail calls find them."""
+    have = {(x.section, x.vram) for x in A.extras if x.kind == 'mid'}
+    for x in list(A.extras):
+        if x.kind != 'payload' or x.rom is None:
+            continue
+        for sec, tv in overlay_switch_tables(A, D, x):
+            st = A.byname[sec]
+            x.data_section = sec
+            v = tv
+            while v < st.bss:
+                t = word(D, st.rom_of(v))
+                if not (st.text <= t < st.data) or t & 3:
+                    break
+                inside = [(st.text + o, z) for o, z in st.funcs if st.text + o < t < st.text + o + z]
+                if inside and (sec, t) not in have:
+                    fs, fz = min(inside, key=lambda f: f[1])
+                    A.extras.append(Extra('mid', None, t, fs + fz - t, section=sec))
+                    have.add((sec, t))
+                v += 4
+
+
+def section_funcs(A, sec):
+    """(offset, size) of every stock function of a section, including code it keeps inside its
+    data area (layout extra_code)."""
+    st = A.byname[sec]
+    out = list(st.funcs)
+    for x in A.layout.get('extra_code', []):
+        if x['section'] == sec:
+            out += [(x['ram'] - st.text + o, z) for o, z in x['funcs']]
+    return out
+
+
+def _ends_flow(w):
+    """j, jr or an unconditional b: control never reaches the next instruction (after the slot)."""
+    op = w >> 26
+    return op == 2 or (op == 0 and (w & 0x3F) == 0x08) or (op == 0x04 and (w >> 16) & 0x3FF == 0)
+
+
+def with_delay_slot(size, last_word):
+    """A function can't end on a jump or branch: its delay slot comes with it (the recompiler needs
+    the slot; an extent cut between them fails to compile, without a message)."""
+    if _jumpish(last_word):
+        return size + 4
+    return size
+
+
+def add_fall_through_entries(A, D, ports):
+    """A changed function whose code now runs off its end (the hack wrote over the stock exit and
+    continues into padding or the next function) is followed there by the runtime's lookup tail
+    call: register an entry at that address when it isn't a function start, reaching through the
+    next function."""
+    have = {(x.section, x.vram) for x in A.extras if x.kind == 'mid'}
+    # the runtime regenerates stock functions one by one: check each changed one
+    bodies = []
+    for sec in A.byname:
+        if sec == 'entry':
+            continue
+        st = A.byname[sec]
+        for o, z in section_funcs(A, sec):
+            r = st.rom_of(st.text + o)
+            if D[r:r + z] != A.base[r:r + z]:
+                bodies.append((sec, st.text + o, z))
+    for sec, vram, size in bodies:
+        st = A.byname[sec]
+        body = [word(D, st.rom_of(vram + 4 * i)) for i in range(size // 4)]
+        if size < 8 or not all(mips.plausible(w) for w in body):
+            continue        # data the recompiler keeps as a function (WM2000's ovl_a tail chunk)
+        if not any(body):
+            continue        # the hack blanked it (dead code): nothing runs into what follows
+        prev, last = word(D, st.rom_of(vram + size - 8)), word(D, st.rom_of(vram + size - 4))
+        if _ends_flow(prev) or _ends_flow(last) or last == 0x42000018:
+            continue
+        t = vram + size
+        funcs = sorted((st.text + o, z) for o, z in section_funcs(A, sec))
+        if any(a == t for a, z in funcs) or (sec, t) in have:
+            continue
+        nxt = [(a, z) for a, z in funcs if a > t]
+        inside = [(a, z) for a, z in funcs if a < t < a + z]
+        end = max([a + z for a, z in inside] + ([nxt[0][0] + nxt[0][1]] if nxt else []), default=None)
+        if end is None or end <= t:
+            continue
+        # data before the next function: only the code that runs from there
+        if not all(mips.plausible(word(D, st.rom_of(v))) for v in range(t, end, 4)):
+            traced, _, _, _ = trace_extent(lambda v: word(D, st.rom_of(v)), t, t, end)
+            end = min(end, traced)
+        A.extras.append(Extra('mid', None, t, end - t, section=sec))
+        have.add((sec, t))
+
+
+def padding_code(A, D, sec, t, funcs):
+    """Hack code at t in text padding no stock function covers (VPW64 Deluxe's trampoline at 0x8000043C, after the
+    entry code, which branches back into func_80003E88): copied into D at its own address, since it branches back
+    into stock code it can't move. Returns its traced extent within the gap, or None. Only where the hack keeps the
+    section's text in place."""
+    st = A.byname[sec]
+    place = getattr(A, 'place', {})
+    if sec not in place or tuple(place[sec][:2]) != (st.rom, st.text):
+        return None
+    ext = [(st.text + o, st.text + o + z) for o, z in funcs if z]
+    lo_bound = st.text
+    e = A.byname.get('entry')
+    if sec == 'main' and e is not None and e.rom_of(st.text) == st.rom:
+        # main follows the entry code in the same image: the gap between them is main's padding too
+        ext += [(e.text + o, e.text + o + z) for o, z in e.funcs if z]
+        lo_bound = e.text
+    if not lo_bound <= t < st.data or any(a <= t < b for a, b in ext):
+        return None
+    if getattr(A, 'map', None) is not None and A.map.translate(t, sec) not in (None, t):
+        # the hack's code is shifted here (9 Underground, rev 1 main): the gap holds a function the runtime
+        # implements natively (World Tour's __osSiRawStartDma at 0x80023970), not hack code in padding
+        return None
+    lo = max([b for a, b in ext if b <= t], default=lo_bound)
+    hi = min([a for a, b in ext if a > t], default=st.data)
+    get = lambda v: word(A.hack, st.rom_of(v))
+    if get(t) == word(A.base, st.rom_of(t)) or not mips.plausible_entry([get(v) for v in range(t, min(hi, t + 24), 4)]):
+        return None
+    end = min(trace_extent(get, t, lo, hi)[0], hi)
+    for v in range(t, end, 4):
+        put_word(D, st.rom_of(v), get(v))
+    return end - t
+
+
+def kseg1_fixups(A, D, area, ports, report):
+    """Hack code that copies with direct cartridge reads at run time (Revenge Starrcade 2.0 at 0x8001C6D0: lw from
+    0xB2300000, sw to 0xA0420000): a `lui` of an uncached RAM base (0xA000-0xA07F) becomes the cached one (same memory;
+    the port has no uncached view), and one of a cartridge base (0xB000-0xBFFF) asks the runtime to map the ROM there
+    (report['direct_rom_reads']). Only words the hack changed (ported code, in-place entries, the new-code area)."""
+    rom_reads = 0
+    fixed = 0
+    A.overwritten = []
+    def fix(get, put, lo, hi):
+        nonlocal rom_reads, fixed
+        for v in range(lo, hi, 4):
+            w = get(v)
+            if w >> 26 != 0x0F:
+                continue
+            imm = w & 0xFFFF
+            if 0xA000 <= imm <= 0xA07F:
+                put(v, (w & 0xFFFF0000) | (imm - 0x2000))
+                fixed += 1
+                # a copy loop's destination (lui base, `addiu rN, zero, count-1` next to it): the code there changes
+                # at run time, so it must not be precompiled (A.overwritten)
+                for k in range(-3, 4):
+                    c = get(v + 4 * k)
+                    if c >> 26 == 0x09 and (c >> 21) & 31 == 0 and k != 0:
+                        dst = ((imm - 0x2000) << 16) & 0xFFFFFFFF
+                        A.overwritten.append((dst, dst + 4 * ((c & 0xFFFF) + 1)))
+                        break
+            elif 0xB000 <= imm <= 0xBFFF:
+                rom_reads += 1
+    for p in ports:
+        if p.status != 'changed':
+            continue
+        st = A.byname[p.section]
+        get = lambda v, st=st: word(D, st.rom_of(v))
+        put = lambda v, w, st=st: put_word(D, st.rom_of(v), w) if word(A.base, st.rom_of(v)) != w else None
+        fix(lambda v, st=st: word(D, st.rom_of(v)) if word(D, st.rom_of(v)) != word(A.base, st.rom_of(v)) else 0, put,
+            p.stock_vram, p.stock_vram + p.size)
+    for x in A.extras:
+        if x.kind == 'mid' and x.vram and x.size and x.section in A.byname:
+            st = A.byname[x.section]
+            fix(lambda v, st=st: word(D, st.rom_of(v)) if word(D, st.rom_of(v)) != word(A.base, st.rom_of(v)) else 0,
+                lambda v, w, st=st: put_word(D, st.rom_of(v), w), x.vram, x.vram + x.size)
+    fix(lambda v: word(area, v - NEW_CODE_VRAM), lambda v, w: put_word(area, v - NEW_CODE_VRAM, w),
+        NEW_CODE_VRAM, NEW_CODE_VRAM + len(area) // 4 * 4)
+    report['kseg1_fixups'] = fixed
+    report['direct_rom_reads'] = rom_reads
+
+
+def os_code(A, sec, vram, size):
+    """A stock function holding COP0 moves or cache instructions: libultra's exception / interrupt / TLB code, which
+    the ports stub and the runtime implements natively. Never an entry for live code (Revenge Starrcade 2.0: an entry
+    at 0x8002CA60, inside the stubbed func_8002CA00, ran the exception handler's code and broke the host stack)."""
+    st = A.byname[sec]
+    for i in range(size // 4):
+        w = word(A.base, st.rom_of(vram + 4 * i))
+        if (w >> 26 == 0x10 and (w >> 21) & 31 in (0, 4, 0x10)) or w >> 26 == 0x2F:
+            return True
+    return False
+
+
+def add_branch_out_entries(A, D, ports, rounds=4):
+    """Branches and `j` tail calls that leave a function (IDO shares tails between functions)
+    become lookup tail calls in the live recompiler, so their targets must be registered: add each
+    target as an entry point of the same section's function containing it (a function start there
+    may belong to a co-resident overlay only)."""
+    have = {(x.section, x.vram) for x in A.extras if x.kind == 'mid'}
+    bodies = [(p.section, p.stock_vram, p.size) for p in ports if p.status == 'changed']
+    bodies += [(x.section, x.vram, x.size) for x in A.extras if x.kind == 'mid' and x.vram]
+    # changed functions in code kept inside data areas: the runtime regenerates those itself
+    for x in A.layout.get('extra_code', []):
+        st = A.byname[x['section']]
+        for o, z in x['funcs']:
+            r = st.rom_of(x['ram'] + o)
+            if D[r:r + z] != A.base[r:r + z]:
+                bodies.append((x['section'], x['ram'] + o, z))
+    funcs = {sec: section_funcs(A, sec) for sec in A.byname}
+    for _ in range(rounds):
+        new = []
+        for sec, vram, size in bodies:
+            st = A.byname[sec]
+            get = lambda v, st=st: word(D, st.rom_of(v))
+            scan = range(vram, vram + size, 4)
+            if not all(mips.plausible(get(v)) for v in scan):
+                # data inside: only the code its entry reaches (VPW64 Deluxe's func_80003E88 keeps a table after
+                # its `j 0x8000043C`); not code at all when what the entry reaches doesn't decode
+                starts = [vram] + [st.text + o for o, z in funcs[sec] if vram < st.text + o < vram + size]
+                scan = sorted(reach(get, starts, vram, vram + size, follow_j=True))
+                if not all(mips.plausible(get(v)) for v in scan):
+                    continue    # not code: its "branches" are data
+            for v in scan:
+                w = word(D, st.rom_of(v))
+                t = mips.branch_target(w, v)
+                if t is None and w >> 26 in (2, 3):     # j, and jal into the middle of a function (Giant Series 64)
+                    t = mips.jump_target(w, v)
+                if t is None or (sec, t) in have:
+                    continue
+                # a branch or j inside the function stays a local jump; a jal is a call through the lookup even
+                # when it targets its own function's middle (Giant Series 64 calls 0x800071D4 from 0x80007070).
+                # The function is the stock one holding v: the runtime regenerates them one by one, so a port
+                # spanning two needs entries for jumps between them (VPW64 Deluxe's `j 0x80003EB0` at 0x80003DC4)
+                own = [(st.text + o, st.text + o + z) for o, z in funcs[sec] if z and st.text + o <= v < st.text + o + z]
+                flo, fhi = min(own, key=lambda f: f[1] - f[0]) if own else (vram, vram + size)
+                flo, fhi = max(flo, vram), min(fhi, vram + size)
+                if flo <= t < fhi and (w >> 26 != 3 or t == flo):
+                    continue
+                inside = [(st.text + o, z) for o, z in funcs[sec] if st.text + o < t < st.text + o + z]
+                if not inside and not any(st.text + o == t for o, z in funcs[sec]):
+                    pad = padding_code(A, D, sec, t, funcs[sec])
+                    if pad:
+                        A.extras.append(Extra('mid', None, t, pad, section=sec))
+                        have.add((sec, t))
+                        new.append((sec, t, pad))
+                    continue
+                if not inside or any(st.text + o == t for o, z in funcs[sec]):
+                    continue        # a real function start is registered already
+                fs, fz = min(inside, key=lambda f: f[1])
+                if os_code(A, sec, fs, fz):
+                    continue        # libultra's exception/OS code: ports stub it, the runtime handles it natively
+                x = Extra('mid', None, t, fs + fz - t, section=sec)
+                A.extras.append(x)
+                have.add((sec, t))
+                new.append((sec, t, fs + fz - t))
+        if not new:
+            break
+        bodies = new
+
+
+def add_new_area_entries(A, D, area, ports, report, rounds=4):
+    """Every jump the rewrite points into the new-code area must land on a function the live recompiler knows, or the
+    lookup fails there. Two ways it didn't (VPW64 Deluxe v1.1, jessetbh/aki-roadmap#222):
+    - a branch from one new-code function into another: the hook at 0x8010DD50 branches to the `j` back at 0x8010D448,
+      in the chunk reshaped at 0x8010D404 (attract crash, "Failed to find function at 0x8F001194");
+    - a `j`/`jal` from ported code into a chunk no code of its own overlay enters: main's hook at 0x80010ADC does
+      `j 0x800F2ADC`, in ovl_a's chunk reshaped at 0x800F2A40 (crash after the match intro at 0x8F0007CC).
+    Each target gets an entry of its block's kind, as far as code entered there reaches in the block. Loops back above a
+    function's entry in its own block are left to the back-branch copy."""
+    blocks = [(nv, nv + (hi - lo), k, sec, lo) for k, sec, lo, hi, nv in A.new_blocks]
+    starts = {x.vram for x in A.extras if x.vram}
+    get_area = lambda v: word(area, v - NEW_CODE_VRAM)
+
+    def block_of(t):
+        return next((b for b in blocks if b[0] <= t < b[1]), None)
+
+    def get_for(x):
+        if x.kind in ('cave', 'reshaped'):
+            return get_area
+        if x.kind == 'payload':
+            return lambda v: word(D, A.payload['rom'] + (v - A.payload['ram']))
+        st = A.byname[x.section]
+        return lambda v, st=st: word(D, st.rom_of(v))
+
+    bodies = [(get_for(x), x.vram, x.size) for x in A.extras
+              if x.vram and x.size and x.kind in ('cave', 'reshaped', 'mid', 'payload') and (x.kind != 'mid' or x.section)]
+    bodies += [((lambda v, st=A.byname[p.section]: word(D, st.rom_of(v))), p.stock_vram, p.size) for p in ports if p.status == 'changed']
+    added = []
+    for _ in range(rounds):
+        new = []
+        for get, vram, size in bodies:
+            own = block_of(vram)
+            floor = own[0] if own else vram
+            for v in range(vram, vram + size, 4):
+                w = get(v)
+                t = mips.branch_target(w, v)
+                if t is None and w >> 26 in (2, 3):
+                    t = mips.jump_target(w, v)
+                elif t is not None and floor <= t < vram:
+                    continue    # a loop above the entry in its own block: the back-branch copy
+                if t is None or vram <= t < vram + size or t in starts:
+                    continue
+                b = block_of(t)
+                if b is None:
+                    continue
+                end, _, _, _ = trace_extent(get_area, t, b[0], b[1])
+                e = Extra(b[2], b[4] + (t - b[0]), t, end - t, section=b[3])
+                A.extras.append(e)
+                starts.add(t)
+                added.append((v, t))
+                new.append((get_area, t, end - t))
+        if not new:
+            break
+        bodies = new
+    report['new_area_entries'] = added
+
+
+REFRESH_OPS = {0x0F, 0x09, 0x0C, 0x0D, 0x0A, 0x0B} | mips.LOAD_GPR | {0x28, 0x29, 0x2B}
+REFRESH_SPECIAL = {0x00, 0x02, 0x03, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x2A, 0x2B}
+REFRESH_TEMPS = {1, 8, 9, 10, 11, 12, 13, 14, 15, 24, 25}
+
+
+def pure_hook_body(words):
+    """The body of a hook that only derives values from memory: straight-line loads, arithmetic
+    and stores into caller-saved temporaries, ending in the `j` back. Returns (indices of the body
+    words, incl. the j's delay slot, input addresses, output addresses) or None."""
+    for i, w in enumerate(words):
+        op = w >> 26
+        if op == 2:
+            idx = list(range(i)) + ([i + 1] if i + 1 < len(words) and words[i + 1] else [])
+            break
+        if op == 0:
+            if (w & 0x3F) not in REFRESH_SPECIAL:
+                return None
+        elif op not in REFRESH_OPS:
+            return None
+        r = mips.gpr_written(w)
+        if r is not None and r not in REFRESH_TEMPS:
+            return None
+    else:
+        return None
+    body = [words[i] for i in idx]
+    refs = mips.hilo_refs(body)
+    ins = {a for hi, lo, a in refs if body[lo] >> 26 in mips.LOAD_GPR}
+    outs = {a for hi, lo, a in refs if body[lo] >> 26 in mips.STORE_OPS}
+    if not ins or not outs:
+        return None
+    return idx, ins, outs
+
+
+def add_refresh_stubs(A, D, area, report, lookahead=12):
+    """A hook the game runs every retrace can keep values derived from other memory (V3/BTBW: a
+    pointer = *(save struct pointer) + 0x10000). On hardware the retrace interrupt preempts the game
+    thread, so the value is fresh soon after its input changes; natively nothing preempts, and code
+    that sets the input and reads the derived value in one go reads a stale one. For each pure
+    hook, the call that follows each store to one of its inputs goes through a stub in the new-code
+    area that runs the hook's body first and then tail-calls the original target (at a call, the
+    temporaries the body uses are free)."""
+    hooks = []
+    for e, (r, end, back) in A.region_entries.items():
+        if r[0] not in ('cave', 'payload'):
+            continue
+        hw = [r[3](v) for v in range(e, end, 4)]
+        got = pure_hook_body(hw)
+        if not got:
+            continue
+        idx, ins, outs = got
+        # the already-translated body: caves sit in the new-code area, payload code in D
+        x = next((x for x in A.extras if x.hack_vram == e and x.vram), None)
+        if x is None:
+            continue
+        if r[0] == 'cave':
+            tw = [word(area, x.vram - NEW_CODE_VRAM + 4 * i) for i in range(len(hw))]
+        else:
+            tw = [word(D, A.payload['rom'] + (e - A.payload['ram']) + 4 * i) for i in range(len(hw))]
+        hooks.append((e, [tw[i] for i in idx], ins, outs))
+    sites = []
+    for name, units in A.units.items():
+        st = A.byname[name]
+        for s, h, z in units:
+            hw = [word(A.hack, A.hack_rom_of(name, h) + 4 * i) for i in range(z // 4)]
+            for hi, lo, a in mips.hilo_refs(hw):
+                if hw[lo] >> 26 not in mips.STORE_OPS:
+                    continue
+                hook = next((k for k in hooks if a in k[2]), None)
+                if hook is None:
+                    continue
+                if lo and (mips.branch_target(hw[lo - 1], 0) is not None or hw[lo - 1] >> 26 in (2, 3)):
+                    continue                    # a store in a delay slot: leave it
+                for k in range(lo + 1, min(lo + 1 + lookahead, len(hw))):
+                    w = hw[k]
+                    if w >> 26 == 3:
+                        sites.append((name, s + 4 * k, hook, a))
+                        break
+                    if mips.branch_target(w, 0) is not None or w >> 26 == 2 or (w >> 26 == 0 and (w & 0x3F) in (0x08, 0x09)):
+                        report.setdefault('refresh_unhandled', []).append((name, h + 4 * lo, a))
+                        break
+    stubs = {}
+    for name, v, (e, tbody, ins, outs), a in sites:
+        st = A.byname[name]
+        r = st.rom_of(v)
+        jal = word(D, r)
+        target = mips.jump_target(jal, v)
+        key = (e, target)
+        if key not in stubs:
+            off = (len(area) + 15) & ~15
+            area.extend(bytes(off - len(area)))
+            sv = NEW_CODE_VRAM + off
+            for w in tbody + [mips.with_jump_target(0x08000000, target), 0]:
+                area.extend(w.to_bytes(4, 'big'))
+            x = Extra('refresh', None, sv, 4 * (len(tbody) + 2))
+            A.extras.append(x)
+            stubs[key] = sv
+        put_word(D, r, mips.with_jump_target(jal, stubs[key]))
+        report.setdefault('refresh_sites', []).append((name, v, a, stubs[key]))
+    report['refresh_hooks'] = [(e, sorted(ins), sorted(outs)) for e, _, ins, outs in hooks]
+
+
+def caller_checks(A):
+    """Return addresses the hack's own code compares $ra with (`lui r; ori r; beq/bne ra,r`), from its caves and the code it
+    loads at run time. A hook tells its callers apart that way."""
+    skip = list(stock_code_blocks(A.secs))
+    caves = [(A.hack_rom_of('main', lo), A.hack_rom_of('main', hi)) for k, sec, lo, hi, nv in A.new_blocks if k == 'cave']
+    out = set()
+    for off in range(16, len(A.hack) - 3, 4):
+        w = word(A.hack, off)
+        rs, rt = (w >> 21) & 31, (w >> 16) & 31
+        if w >> 26 not in (4, 5) or 31 not in (rs, rt) or rs == rt:
+            continue
+        if any(a <= off < b for a, b in skip) and not any(a <= off < b for a, b in caves):
+            continue
+        reg = rs if rt == 31 else rt
+        hi, lo = word(A.hack, off - 8), word(A.hack, off - 4)
+        if hi >> 26 == 0x0F and (hi >> 16) & 31 == reg and lo >> 26 == 0x0D and (lo >> 16) & 31 == reg and (lo >> 21) & 31 == reg:
+            ra = ((hi & 0xFFFF) << 16) | (lo & 0xFFFF)
+            if 0x80000000 <= ra < 0x80800000 and ra & 3 == 0:
+                out.add(ra)
+    return out
+
+
+def add_caller_stubs(A, D, area, report):
+    """Recompiled code doesn't put the return address in $ra, so a hook that checks who called it never matches (VPW64 Deluxe:
+    title belts in entrances, `jal 0x800FCCAC` at 0x80123AF8 and 0x80123E1C, and 0x800164FC called from ovl_d: 0x800FCCAC
+    called from elsewhere gets the wrestler's real second argument and a second man appears; jessetbh/aki-roadmap#222). Each
+    such `jal f` goes through a stub that sets $ra, calls f and clears $ra again: left set, it would match for the next
+    caller, since no jal overwrites it here. Only for sites at the hack's address, as the hack's value is what gets compared."""
+    stubs = {}
+    for ra in sorted(caller_checks(A)):
+        site = ra - 8
+        found = False
+        for name, st in A.byname.items():
+            if name == 'entry' or not st.text <= site < st.data:
+                continue
+            hrom, htext, htext_end = A.place[name][:3]
+            if not htext <= site < htext_end:
+                continue
+            w = word(A.hack, hrom + (site - htext))
+            if w >> 26 != 3 or (A.map.translate(site, name) or site) != site:
+                continue
+            target = mips.jump_target(word(D, st.rom_of(site)), site)
+            if (ra, target) not in stubs:
+                off = (len(area) + 15) & ~15
+                area.extend(bytes(off - len(area)))
+                sv = NEW_CODE_VRAM + off
+                code = [0x3C1F0000 | (ra >> 16), 0x37FF0000 | (ra & 0xFFFF), mips.with_jump_target(0x0C000000, target), 0,
+                        0x0000F821, 0x03E00008, 0]      # move ra, zero; jr ra
+                for c in code:
+                    area.extend(c.to_bytes(4, 'big'))
+                A.extras.append(Extra('refresh', None, sv, 4 * len(code)))
+                stubs[(ra, target)] = sv
+            put_word(D, st.rom_of(site), mips.with_jump_target(0x0C000000, stubs[(ra, target)]))
+            report.setdefault('caller_stubs', []).append((name, site, target))
+            found = True
+        if not found:
+            report.setdefault('caller_checks_unhandled', []).append(ra)
+
+
+def _jumpish(w):
+    return mips.branch_target(w, 0) is not None or w >> 26 in (2, 3) or \
+        (w >> 26 == 0 and (w & 0x3F) in (0x08, 0x09))
+
+
+def stub_over(A, D, area, P, first, words_at, targets):
+    """Replace payload instruction P (and the one after it, which would sit in the j's delay slot)
+    by a jump to a new-code-area stub: `first` (instructions standing in for P), the instruction
+    after P, then back to P + 8 (registered as a payload entry). None if P can't be moved."""
+    p = A.payload
+    w_prev, w_next = words_at(P - 4), words_at(P + 4)
+    if _jumpish(w_prev) or _jumpish(w_next) or (P + 4) in targets:
+        return None
+    owner = next((x for x in A.extras if x.kind == 'payload' and x.vram and x.vram <= P < x.vram + x.size), None)
+    if owner is None or P + 8 >= owner.vram + owner.size:
+        return None
+    off = (len(area) + 15) & ~15
+    area.extend(bytes(off - len(area)))
+    sv = NEW_CODE_VRAM + off
+    code = list(first) + [w_next, mips.with_jump_target(0x08000000, P + 8), 0]
+    for c in code:
+        area.extend(c.to_bytes(4, 'big'))
+    rom = p['rom'] + (P - p['ram'])
+    put_word(D, rom, mips.with_jump_target(0x08000000, sv))
+    put_word(D, rom + 4, 0)
+    A.extras.append(Extra('refresh', None, sv, 4 * len(code)))
+    A.extras.append(Extra('payload', P + 8, P + 8, owner.vram + owner.size - (P + 8)))
+    return sv
+
+
+def ram_variable(A, area, new_rom, init_word):
+    """A word of free Expansion RAM (after the payload and the moved save buffers) that the runtime
+    preloads with init_word (stored in the new-code area). Returns its address."""
+    if not hasattr(A, 'ram_vars'):
+        end = A.payload['ram'] + A.payload['size'] if A.payload else 0x80400000
+        if getattr(A, 'save_area', None):
+            lo, hi, base = A.save_area
+            end = max(end, base + (hi - lo))
+        A.ram_vars = [((end + 0xFFF) & ~0xFFF) + 0x1000, []]
+    off = (len(area) + 3) & ~3
+    area.extend(bytes(off - len(area)))
+    area.extend(init_word.to_bytes(4, 'big'))
+    v = A.ram_vars[0] + 4 * len(A.ram_vars[1])
+    A.ram_vars[1].append(dict(rom=new_rom + off, ram=v, size=4))
+    return v
+
+
+def fix_get_pc(A, D, area, report, new_rom):
+    """Hack code that takes its own address (`jal` to a bare `jr ra`, then `addiu rX, ra, imm`) gets
+    nothing natively (the recompiler doesn't keep ra): compute the address absolutely. When the
+    address is then used to patch the immediate of an `ori/addiu rY, zero, imm` in payload code
+    (a variable kept in an instruction), that instruction reads the halfword from RAM instead."""
+    p = A.payload
+    if not p:
+        return
+    pw = lambda v: word(D, p['rom'] + (v - p['ram']))
+    helpers = set()
+    for x in A.extras:
+        if x.kind == 'payload' and x.vram:
+            ws = [pw(x.vram + 4 * i) for i in range(min(x.size // 4, 4))]
+            k = next((i for i, w in enumerate(ws) if w), None)
+            if k is not None and ws[k] == 0x03E00008:
+                helpers.add(x.vram)
+    if not helpers:
+        return
+    done = []
+    for lo, hi in code_spans(A.extras, 'payload'):
+        nw = [pw(v) for v in range(lo, hi, 4)]
+        targets = {mips.branch_target(w, lo + 4 * i) for i, w in enumerate(nw)} - {None}
+        for i, w in enumerate(nw):
+            J = lo + 4 * i
+            if w >> 26 != 3 or mips.jump_target(w, J) not in helpers or i + 1 >= len(nw) or nw[i + 1]:
+                continue
+            for k in range(i + 2, min(i + 9, len(nw))):
+                x = nw[k]
+                if x >> 26 == 0x09 and (x >> 21) & 31 == 31 and (x >> 16) & 31 not in (0, 31):
+                    rt = (x >> 16) & 31
+                    addr = (J + 8 + mips.sx16(x & 0xFFFF)) & 0xFFFFFFFF
+                    put_word(D, p['rom'] + (J + 4 - p['ram']), (0x0F << 26) | (rt << 16) | (((addr + 0x8000) >> 16) & 0xFFFF))
+                    put_word(D, p['rom'] + (lo + 4 * k - p['ram']), (0x09 << 26) | (rt << 21) | (rt << 16) | (addr & 0xFFFF))
+                    done.append((J, addr))
+                    # a halfword store through it into an instruction's immediate
+                    for m in range(k + 1, min(k + 5, len(nw))):
+                        y = nw[m]
+                        if y >> 26 == 0x29 and (y >> 21) & 31 == rt:
+                            tgt = (addr + mips.sx16(y & 0xFFFF)) & 0xFFFFFFFF
+                            I = tgt & ~3
+                            iw = pw(I) if p['ram'] <= I < p['ram'] + p['size'] else None
+                            if iw is not None and tgt == I + 2 and iw >> 26 in (0x0D, 0x09) and (iw >> 21) & 31 == 0:
+                                # the instruction's word lives in a RAM variable instead (its RAM copy
+                                # becomes the jump to the stub); the store and the read go there
+                                var = ram_variable(A, area, new_rom, iw)
+                                vt = var + 2
+                                ry = (iw >> 16) & 31
+                                load = 0x25 if iw >> 26 == 0x0D else 0x21      # ori: lhu, addiu: lh
+                                first = [(0x0F << 26) | (ry << 16) | (((vt + 0x8000) >> 16) & 0xFFFF),
+                                         (load << 26) | (ry << 21) | (ry << 16) | (vt & 0xFFFF)]
+                                if stub_over(A, D, area, I, first, pw, targets) is not None:
+                                    base_addr = (vt - mips.sx16(y & 0xFFFF)) & 0xFFFFFFFF
+                                    put_word(D, p['rom'] + (J + 4 - p['ram']), (0x0F << 26) | (rt << 16) | (((base_addr + 0x8000) >> 16) & 0xFFFF))
+                                    put_word(D, p['rom'] + (lo + 4 * k - p['ram']), (0x09 << 26) | (rt << 21) | (rt << 16) | (base_addr & 0xFFFF))
+                                    done.append((I, var))
+                                else:
+                                    report.setdefault('get_pc_left', []).append(I)
+                    break
+    report['get_pc_fixed'] = done
+
+
+AT = 1
+FPR_RT_OPS = {0x31, 0x35, 0x39, 0x3D}     # lwc1/ldc1/swc1/sdc1: rt names an FPR
+
+
+def gpr_read(w):
+    """The GPRs an instruction may read (conservative: a field that might name a GPR counts)."""
+    op = w >> 26
+    rs, rt = (w >> 21) & 31, (w >> 16) & 31
+    if not w or op in (2, 3, 0x0F):         # nop, j, jal, lui
+        return set()
+    if op == 0:
+        return {rs, rt}
+    if op in (0x1A, 0x1B, 0x22, 0x26):      # ldl ldr lwl lwr merge into rt
+        return {rs, rt}
+    if op == 0x01 or op in (0x06, 0x07, 0x16, 0x17) or op in mips.LOAD_GPR or op in FPR_RT_OPS or 0x08 <= op <= 0x0E:
+        return {rs}                         # regimm, blez/bgtz(l), loads, FPU loads/stores, immediates
+    if op == 0x11:
+        return {rt} if rs in (4, 6) else set()     # mtc1/ctc1 read rt; other COP1 ops name FPRs
+    return {rs, rt}                         # beq/bne(l), stores, anything else
+
+
+def overwritten_before_read(words, r):
+    """True if, running straight through words, GPR r is written before anything reads it. A branch or jump first
+    (or running out of words) counts as a read: the value might be needed past it."""
+    for w in words:
+        if r in gpr_read(w):
+            return False
+        if mips.gpr_written(w) == r:
+            return True
+        if mips.branch_target(w, 0) is not None or w >> 26 in (2, 3) or (w >> 26 == 0 and (w & 0x3F) in (0x08, 0x09)):
+            return False
+    return False
+
+
+def fix_unreachable_lo(A, D, area, report):
+    """One lui can feed %lo uses whose translations need different %hi values (the hack's
+    variables straddle a 64 KB boundary after the shift). In payload code, a load into a GPR or an
+    addiu the chosen %hi can't reach goes through a stub: `lui rt, %hi(A)` + the instruction based
+    on rt, then the instruction after it (moved out of the j's delay slot), then back.
+
+    A store can't build its address in rt (rt holds the value), so it goes through $at instead:
+    a scratch register: the store's own base register, else $at, whichever the code after it overwrites before
+    reading. The store takes the first candidate address, like rewrite() does for the uses it could encode.
+    Left alone, the store kept its old %lo under the new %hi and wrote to an unrelated address
+    (a relinked hack can patch an ovl_d immediate this way; the stray write corrupts a store in another
+    function, aki-roadmap#223)."""
+    p = A.payload
+    if not p:
+        return
+    fixed = []
+    ctx_of = getattr(A, 'region_ctx', {})
+    for lo, hi in code_spans(A.extras, 'payload'):
+        secs = {ctx_of[e] for e in ctx_of if lo <= e < hi}
+        ctx = secs.pop() if len(secs) == 1 else None
+        rom = p['rom'] + (lo - p['ram'])
+        hw = [word(A.hack, rom + i) for i in range(0, hi - lo, 4)]
+        nw = [word(D, rom + i) for i in range(0, hi - lo, 4)]
+        got = {l: a for h, l, a in mips.hilo_refs(nw)}
+        targets = {mips.branch_target(w, lo + 4 * i) for i, w in enumerate(nw)} - {None}
+        for h, l, a in mips.hilo_refs(hw):
+            cs = A.map.candidates(a, ctx)
+            if not cs or got.get(l) in cs or cs[0] == a and got.get(l) == a:
+                continue     # rewrite() reached one of them (it may pick a later one for a shift all uses share)
+            want, w = cs[0], nw[l]
+            op, rs, rt = w >> 26, (w >> 21) & 31, (w >> 16) & 31
+            if l == 0 or l + 2 > len(nw):
+                continue
+            if (op in mips.LOAD_GPR or op == 0x09) and rt and len(cs) == 1:
+                base = rt
+            elif op in mips.STORE_OPS:
+                after = nw[l + 1:]
+                value = set() if op in FPR_RT_OPS else {rt}
+                base = next((r for r in (rs, AT) if r and r not in value and overwritten_before_read(after, r)), None)
+                if base is None:
+                    report.setdefault('unreachable_lo_left', []).append(lo + 4 * l)
+                    continue
+            else:
+                continue
+            P = lo + 4 * l
+            first = [(0x0F << 26) | (base << 16) | (((want + 0x8000) >> 16) & 0xFFFF),
+                     (w & 0xFC1F0000) | (base << 21) | (want & 0xFFFF)]
+            pw = lambda v: word(D, p['rom'] + (v - p['ram']))
+            if stub_over(A, D, area, P, first, pw, targets) is None:
+                report.setdefault('unreachable_lo_left', []).append(P)
+                continue
+            fixed.append((P, a, want))
+    report['unreachable_lo_fixed'] = fixed
+
+
+def add_entry_logs(A, D, area, report):
+    """(debugging) For each 'section:vram' in A.experiment_log_entries: the function's first word
+    becomes a jump to a stub that records (a0, a1) of calls with a0 >= 0x10000 in a 256-entry ring at 0x807FF108 (write offset
+    at 0x807FF100, above No Mercy Plus's Expansion-RAM heap), runs the second word and jumps back."""
+    for spec in getattr(A, 'experiment_log_entries', ()):
+        if spec.startswith('jsite:'):
+            # the j/jal at sec:vram goes through a stub that records (site vram, s0, s1) in the 0x804B0000
+            # ring (12-byte entries) and then jumps to the original target
+            _, sec, v = spec.split(':')
+            v = int(v, 16)
+            r = A.byname[sec].rom_of(v)
+            w = word(D, r)
+            target = mips.jump_target(w, v)
+            off = (len(area) + 15) & ~15
+            area.extend(bytes(off - len(area)))
+            sv = NEW_CODE_VRAM + off
+            code = [0x3C18804B, 0x8F190000, 0x2739000C, 0x3339FFFF, 0xAF190000, 0x0338C821,
+                    0x3C010000 | (v >> 16), 0x34210000 | (v & 0xFFFF), 0xAF210008,   # site vram (not v0)
+                    0xAF30000C, 0xAF310010, mips.with_jump_target(0x08000000, target), 0]
+            for c in code:
+                area.extend(c.to_bytes(4, 'big'))
+            put_word(D, r, mips.with_jump_target(w, sv))
+            A.extras.append(Extra('refresh', None, sv, 4 * len(code)))
+            continue
+        sec, v, *flt = spec.split(':')
+        v = int(v, 16)
+        reg = 5 if flt == ['a1'] else 4     # the argument compared with the minimum
+        st = A.byname[sec]
+        r = st.rom_of(v)
+        fsz = next(z for o, z in st.funcs if st.text + o == v)
+        w0, w1 = word(D, r), word(D, r + 4)
+        off = (len(area) + 15) & ~15
+        area.extend(bytes(off - len(area)))
+        sv = NEW_CODE_VRAM + off
+        if flt == ['heap']:
+            # every call: (a0, size of the heap head block at 0x80500000, where No Mercy Plus V3 and
+            # BTBW put it) into an 8192-entry ring at
+            # 0x804B0008 (write offset at 0x804B0000; free Expansion RAM below the hack's heap)
+            code = [0x3C18804B, 0x8F190000, 0x27390008, 0x3339FFF8, 0xAF190000, 0x0338C821,
+                    0xAF240008, 0x3C018050, 0x8C210004, 0xAF21000C,
+                    w1, mips.with_jump_target(0x08000000, v + 8), 0]
+        else:
+            # calls with a0 >= the minimum only: (a0, a1) into the ring
+            code = [0x3C190000 | (getattr(A, 'experiment_log_min', 0) >> 16), (reg << 21) | 0x0019C82B, 0x17200008, 0x3C188080,
+                    0x8F19F100, 0x27390008, 0x333907F8, 0xAF19F100, 0x0338C821,
+                    0xAF24F108, 0xAF25F10C, w1, mips.with_jump_target(0x08000000, v + 8), 0]
+        for w in code:
+            area.extend(w.to_bytes(4, 'big'))
+        put_word(D, r, mips.with_jump_target(0x08000000, sv))
+        put_word(D, r + 4, w0)
+        A.extras.append(Extra('refresh', None, sv, 4 * len(code)))
+        A.extras.append(Extra('mid', None, v + 8, fsz - 8, section=sec))
+        report.setdefault('entry_logs', []).append((sec, v, sv))
+
+
+def reroute_vi_hook(A, D, area, report):
+    """A hack can hook libultra's VI manager thread to run its code every retrace (No Mercy Plus v2.1's whole payload
+    hangs off one, aki-roadmap#193). The port replaces osCreateViManager natively, so that thread never exists and the
+    hook never runs. The game's own retrace thread does run, one at a time with the other game threads, so its wait
+    for the next retrace (layout 'retrace_site', a `jal osRecvMesg`) goes through a stub that runs the hook first.
+    The hook jumps back into the VI loop when it's done: those jumps become returns. The stub keeps the argument and
+    saved registers, since the hook only had to keep what the VI loop needed."""
+    thread = A.layout.get('vi_thread')
+    if not thread:
+        return
+    lo, hi = thread[0], thread[0] + thread[1]
+    main = A.byname['main']
+    hooks = []
+    for v in range(lo, hi, 4):
+        r = main.rom_of(v)
+        w = word(D, r)
+        if w != word(A.base, r) and w >> 26 in (2, 3) and not lo <= mips.jump_target(w, v) < hi:
+            hooks.append(mips.jump_target(w, v))
+    if not hooks:
+        return
+    def unhandled(why):
+        report['vi_hook_unhandled'] = why
+    site = A.layout.get('retrace_site')
+    if not site:
+        return unhandled('no retrace_site in this game\'s layout')
+    r = main.rom_of(site)
+    call = word(D, r)
+    if call >> 26 != 3 or call != word(A.base, r):
+        return unhandled('the word at retrace_site %08X is not the stock call' % site)
+    # the hook's way back, in the code the hack added
+    tails = {}      # by place: cave entries can overlap
+    for x in A.extras:
+        if not x.vram or not x.size or x.kind not in ('cave', 'payload'):
+            continue
+        if x.kind == 'cave':
+            buf, base = area, x.vram - NEW_CODE_VRAM
+        else:
+            buf, base = D, A.payload['rom'] + (x.vram - A.payload['ram'])
+        for i in range(x.size // 4):
+            w = word(buf, base + 4 * i)
+            if w >> 26 == 2 and lo <= mips.jump_target(w, x.vram + 4 * i) < hi:
+                tails[(id(buf), base + 4 * i)] = (buf, base + 4 * i)
+    if not tails:
+        return unhandled('the hook has no jump back into the VI loop')
+    for buf, off in tails.values():
+        put_word(buf, off, 0x03E00008)      # jr ra
+    saved = [4, 5, 6, 7] + list(range(16, 24))
+    frame = 0x10 + 4 * len(saved) + 8       # o32 argument area, the registers, ra (the frame stays 8-aligned)
+    ra_slot = frame - 8
+    sw = lambda rt, off: 0xAFA00000 | (rt << 16) | off
+    lw = lambda rt, off: 0x8FA00000 | (rt << 16) | off
+    code = [0x27BD0000 | (-frame & 0xFFFF), sw(31, ra_slot)]
+    code += [sw(reg, 0x10 + 4 * i) for i, reg in enumerate(saved)]
+    for h in hooks:
+        code += [mips.with_jump_target(0x0C000000, h), 0]
+    code += [lw(reg, 0x10 + 4 * i) for i, reg in enumerate(saved)]
+    code += [call, 0, lw(31, ra_slot), 0x03E00008, 0x27BD0000 | frame]
+    off = (len(area) + 15) & ~15
+    area.extend(bytes(off - len(area)))
+    sv = NEW_CODE_VRAM + off
+    for w in code:
+        area.extend(w.to_bytes(4, 'big'))
+    A.extras.append(Extra('refresh', None, sv, 4 * len(code)))
+    put_word(D, r, mips.with_jump_target(call, sv))
+    report['vi_hook'] = dict(hooks=hooks, site=site, stub=sv, returns=len(tails))
+
+
+CODE_BLOCK_GAP = 0x10000
+
+
+def port_instruction_patches(A, D, ports):
+    """The port's own instruction patches (its recompiler config's [[patches.instruction]], listed in the layout as
+    "instruction_patches": [[vram, value], ...]) applied to functions the hack changed: the runtime live-compiles
+    those from the ROM, so a patch only the static code has is lost. World Tour's idle thread (func_800004AC, changed
+    by 9 Underground) spins in `jal; b` without its `b .` at 0x8000058C, and native threads never preempt it.
+    A patch applies only where the word is still the stock one. Returns the patches applied."""
+    n = 0
+    for vram, value in A.layout.get('instruction_patches', []):
+        for p in ports:
+            if p.status != 'changed' or not p.stock_vram <= vram < p.stock_vram + p.size:
+                continue
+            r = A.byname[p.section].rom_of(vram)
+            if word(D, r) == word(A.base, r):
+                put_word(D, r, value)
+                n += 1
+    return n
+
+
+def stock_code_blocks(secs):
+    """ROM ranges that take the stock bytes: the header and boot code plus the sections, with sections
+    under CODE_BLOCK_GAP apart merged. Everything else keeps the hack's bytes, so its assets stay at the
+    hack's ROM offsets (World Tour keeps its overlays near the ROM end, past most of the assets)."""
+    blocks = []
+    for s in sorted(secs, key=lambda s: s.rom):
+        if blocks and s.rom - blocks[-1][1] < CODE_BLOCK_GAP:
+            blocks[-1][1] = max(blocks[-1][1], s.rom_end)
+        else:
+            blocks.append([0 if not blocks else s.rom, s.rom_end])
+    return [tuple(b) for b in blocks]
+
+
+def between_blocks(blocks, rom_size):
+    """The ROM ranges outside the stock code blocks (up to rom_size)."""
+    edges = [x for b in blocks for x in b] + [rom_size]
+    return [(edges[i], edges[i + 1]) for i in range(1, len(edges) - 1, 2) if edges[i] < edges[i + 1]]
+
+
+def stock_descriptor_rom_fields(A, D):
+    """The overlay descriptors' ROM start/end words point at the stock overlays: the patched ROM keeps them at their
+    stock offsets, but a hack on another revision lists its own (9 Underground: ovl_a at 0xA1CD06, stock 0xA21750),
+    so the port's overlay swap never recognised the DMA. Only words still holding the hack's value change."""
+    count = A.layout.get('descriptor_count', 5)
+    table = A.layout.get('descriptor_table') or find_descriptor_table(A.base, count=count)
+    stock, hack = read_descriptors(A.base, table, count), read_descriptors(A.hack, A.table, count)
+    n = 0
+    for i in range(count):
+        for k in (0, 1):
+            off = table + 4 * (DESC_WORDS * i + k)
+            if word(D, off) == hack[i][k] != stock[i][k]:
+                put_word(D, off, stock[i][k])
+                n += 1
+    return n
+
+
+def assemble(A, report):
+    """The stock-layout ROM: stock code/data with the hack's changes, the hack's assets and
+    payload, and the new-code area appended. Returns (rom bytes, relink manifest)."""
+    discover_extra_code(A)
+    ports, resized = port_code(A)
+    D = bytearray(A.hack)
+    for lo, hi in stock_code_blocks(A.secs):
+        D[lo:hi] = A.base[lo:hi]
+    keep = set(getattr(A, 'experiment_stock_ports', ()))
+    for p in ports:
+        if p.status == 'changed' and p.stock_vram in keep:
+            p.status = 'kept'
+        if p.status in ('changed', 'data'):
+            r = A.byname[p.section].rom_of(p.stock_vram)
+            for i, w in enumerate(p.words):
+                put_word(D, r + 4 * i, w)
+    report['ports'] = ports
+    report['resized'] = resized
+    report['instruction_patches'] = port_instruction_patches(A, D, ports)
+    translate_data(A, D, report)
+    report['descriptor_rom_fields'] = stock_descriptor_rom_fields(A, D)
+    keep_caves_in_place(A, D, report)
+    resized_redirects(A, D, report)
+    payload_fixups(A, D, report)
+    # new-code area: caves and reshaped chunks, copied whole, their code rewritten in place
+    new_rom = (len(D) + 0xFFFF) & ~0xFFFF
+    area = bytearray()
+    cave_probs = []
+    for kind, sec, lo, hi, nv in A.new_blocks:
+        get = (lambda v, sec=sec: word(A.hack, A.hack_rom_of(sec, v))) if sec else               (lambda v: word(A.hack, A.place['main'][0] + (v - A.place['main'][1])))
+        off = nv - NEW_CODE_VRAM
+        if len(area) < off + (hi - lo):
+            area.extend(bytes(off + (hi - lo) - len(area)))
+        raw = [get(v) for v in range(lo, hi, 4)]
+        for i, w in enumerate(raw):
+            put_word(area, off + 4 * i, w)
+        spans = [(a_, b_) for a_, b_ in code_spans([x for x in A.extras if x.section == sec], kind)
+                 if lo <= a_ < hi]
+        cand = lambda a, sec=sec: A.map.candidates(a, sec)
+        for a_, b_ in spans:
+            words = raw[(a_ - lo) // 4:(b_ - lo) // 4]
+            nw = rewrite(words, a_, nv + (a_ - lo), cand, None, cave_probs)
+            for i, w in enumerate(nw):
+                put_word(area, off + (a_ - lo) + 4 * i, w)
+        if kind == 'reshaped':
+            # words outside the code are tables: translate pointers into code the hack moved
+            for i, w in enumerate(raw):
+                v = lo + 4 * i
+                if lo <= w < hi and w & 3 == 0:
+                    # a case address inside the chunk (tables sit between code the trace covers)
+                    put_word(area, off + 4 * i, nv + (w - lo))
+                    continue
+                if any(a_ <= v < b_ for a_, b_ in spans):
+                    continue
+                if 0x80000400 <= w < 0x80400000 and w & 3 == 0:
+                    c = A.map.translate(w, sec)
+                    if c is not None:
+                        put_word(area, off + 4 * i, c)
+    report['cave_problems'] = cave_probs
+    add_refresh_stubs(A, D, area, report)
+    add_caller_stubs(A, D, area, report)
+    fix_unreachable_lo(A, D, area, report)
+    fix_get_pc(A, D, area, report, new_rom)
+    add_entry_logs(A, D, area, report)
+    reroute_vi_hook(A, D, area, report)
+    for x in A.extras:
+        if x.kind == 'payload' and x.vram:
+            x.rom = A.payload['rom'] + (x.vram - A.payload['ram'])
+    add_switch_case_entries(A, D)
+    add_fall_through_entries(A, D, ports)
+    add_branch_out_entries(A, D, ports)
+    add_new_area_entries(A, D, area, ports, report)
+    kseg1_fixups(A, D, area, ports, report)
+    functions = []
+    copies = 0
+    for x in A.extras:
+        if x.vram is None or not x.size:
+            continue
+        if x.kind == 'payload' and any(lo <= x.vram < hi for lo, hi in getattr(A, 'overwritten', [])):
+            continue    # the hack replaces this code at run time: the runtime compiles what's in RAM when it's called
+        if x.kind == 'payload':
+            x.rom = A.payload['rom'] + (x.vram - A.payload['ram'])
+            floor = A.payload['ram']
+        elif x.kind in ('cave', 'reshaped', 'refresh'):
+            x.rom = new_rom + (x.vram - NEW_CODE_VRAM)
+            floor = max((nv for k, sec, lo, hi, nv in A.new_blocks if nv <= x.vram), default=x.vram)
+        else:
+            st = A.byname[x.section]
+            x.rom = st.rom_of(x.vram)
+            floor = max((lo for lo, hi in [(st.text + o, st.text + o + z) for o, z in section_funcs(A, x.section)] if lo <= x.vram), default=x.vram)
+        f = dict(vram=x.vram, rom=x.rom, size=x.size, kind=x.kind)
+        if x.kind == 'mid' and A.byname[x.section].slot is not None:
+            f['section_rom'] = A.byname[x.section].rom
+        src = D if x.kind not in ('cave', 'reshaped', 'refresh') else None
+        get = (lambda v, x=x: word(D, x.rom + (v - x.vram))) if src is not None else               (lambda v: word(area, v - NEW_CODE_VRAM))
+        x.size = with_delay_slot(x.size, get(x.vram + x.size - 4))
+        f['size'] = x.size
+        back = []
+        for v in range(x.vram, x.vram + x.size, 4):
+            w = get(v)
+            t = mips.branch_target(w, v)     # loops branch; a backward j is a tail call
+            if t is not None and floor <= t < x.vram:
+                back.append(t)
+        if back:
+            # loops reach back above the entry: compile a copy of [lowest target, end) at its own
+            # addresses, preceded by a branch to the real entry, and register it under the entry
+            lo = min(back)
+            if x.kind in ('cave', 'reshaped'):
+                get_src = lambda v: word(area, v - NEW_CODE_VRAM)
+            elif x.kind == 'payload':
+                get_src = lambda v: word(D, A.payload['rom'] + (v - A.payload['ram']))
+            else:
+                st = A.byname[x.section]
+                get_src = lambda v, st=st: word(D, st.rom_of(v))
+            end = x.vram + x.size
+            off = (len(area) + 15) & ~15
+            area.extend(bytes(off - len(area)))
+            words = [0x10000000 | (((x.vram - (lo - 4)) >> 2) & 0xFFFF), 0]
+            words += [get_src(v) for v in range(lo, end, 4)]
+            for w in words:
+                area.extend(w.to_bytes(4, 'big'))
+            f = dict(f, vram=lo - 8, entry=x.vram, rom=new_rom + off, size=4 * len(words), kind=x.kind + '+copy')
+            copies += 1
+        if x.kind == 'payload' and getattr(x, 'data_section', None):
+            # dispatches through an overlay's switch table: that overlay's data for jump tables
+            # (the payload's own tables still resolve through the manifest's data_ranges)
+            st = A.byname[x.data_section]
+            f['data'] = [st.text, st.bss, st.rom]
+        elif x.kind == 'payload':
+            f['data'] = [A.payload['ram'], A.payload['ram'] + A.payload['size'], A.payload['rom']]
+        elif x.kind == 'mid':
+            st = A.byname[x.section]
+            f['data'] = [st.text, st.bss, st.rom]
+        elif x.kind == 'reshaped' and x.section in A.byname:
+            # a chunk moved to the new-code area whose switch table stayed in its section's data
+            st = A.byname[x.section]
+            words = [word(area, x.vram - NEW_CODE_VRAM + 4 * i) for i in range(x.size // 4)]
+            if any(st.text <= t < st.bss for _, t in jump_tables(words)):
+                f['data'] = [st.text, st.bss, st.rom]
+        if f['size'] <= 0 or f['size'] & 3 or f['vram'] & 3 or f['rom'] + f['size'] > len(D) + len(area) + 0x10000:
+            report.setdefault('bad_functions', []).append(f)
+            continue
+        functions.append(f)
+    report['back_branch_copies'] = copies
+    functions += runtime_functions(A, area, new_rom, report)
+    # (debugging) raw word patches at stock addresses: section:vram=word
+    for spec in getattr(A, 'experiment_word_patches', ()):
+        sec, rest = spec.split(':')
+        v, w = (int(x, 16) for x in rest.split('='))
+        put_word(D, A.byname[sec].rom_of(v), w)
+    if area:
+        D.extend(bytes(new_rom - len(D)))
+        D.extend(area)
+        D.extend(bytes((-len(D)) % 16))
+    # COP0 Random reads are supported by the runtime (feat/fullconv); patch_unsupported_instructions()
+    # stays for runtimes without it (its mflo stand-in can spin in retry loops).
+    report['cop0_random_replaced'] = 0
+    code_ranges = []
+    if A.payload:
+        code_ranges.append([A.payload['ram'], A.payload['ram'] + A.payload['size']])
+    if area:
+        code_ranges.append([NEW_CODE_VRAM, NEW_CODE_VRAM + len(area)])
+    data_ranges = []
+    if A.payload:
+        data_ranges.append([A.payload['ram'], A.payload['ram'] + A.payload['size'], A.payload['rom']])
+    manifest = dict(format=1, base=A.layout.get('manifest_base', 'nomercy-rev1'), functions=functions, code_ranges=code_ranges,
+                    data_ranges=data_ranges)
+    # stock functions now holding data: the runtime keeps their static code instead of recompiling the data
+    data_funcs = []
+    for p in ports:
+        if p.status == 'data':
+            st = A.byname[p.section]
+            data_funcs += [st.rom_of(st.text + o) for o, z in section_funcs(A, p.section)
+                           if z and p.stock_vram <= st.text + o and st.text + o + z <= p.stock_vram + p.size]
+    data_funcs += unchanged_code_functions(A, D, ports, report)
+    if data_funcs:
+        manifest['data_functions'] = sorted(set(data_funcs))
+    if report.get('direct_rom_reads'):
+        manifest['direct_rom_reads'] = True
+    if A.payload:
+        p = A.payload
+        manifest['preload'] = [dict(rom=p['rom'], ram=p['ram'], size=p['size'])]
+        manifest['preload'] += getattr(A, 'ram_vars', [0, []])[1]
+        if p.get('zero_lo') is not None:
+            manifest['zero'] = [dict(ram=p['zero_lo'], size=p['zero_hi'] - p['zero_lo'])]
+    if getattr(A, 'save_area', None):
+        lo, hi, base = A.save_area
+        manifest.setdefault('zero', []).append(dict(ram=base, size=(hi - lo + 0xF) & ~0xF))
+    return bytes(D), manifest
+
+
+# ----------------------------------------------------------------------------------- CLI
+
+def summarize(A, report):
+    ports = report['ports']
+    c = collections.Counter((p.section, p.status) for p in ports)
+    lines = ['sections: ' + ', '.join('%s %d/%d changed' % (n, c[(n, 'changed')], c[(n, 'changed')] + c[(n, 'moved')])
+                                      for n in A.units)]
+    lines.append('in-place ports: %d function(s), %d now data; resized code kept stock: %s' % (
+        sum(1 for p in ports if p.status == 'changed'), sum(1 for p in ports if p.status == 'data'),
+        ', '.join('%s %08X-%08X' % (n, a, b) for n, a, b, _, _ in report['resized'] if b > a) or 'none'))
+    if getattr(A, 'moved_resized', None):
+        lines.append('resized overlay code moved whole: %d stretch(es), %d stock function(s) redirected' % (
+            len(A.moved_resized), report.get('resized_redirects', 0)))
+    for name, a, st in sorted(set(getattr(A, 'biased_bases', []))):
+        lines.append('biased table base taken from stock: %s %08X -> %08X' % (name, a, st))
+    k = collections.Counter(x.kind for x in A.extras)
+    lines.append('extra functions: %d payload, %d cave, %d reshaped, %d mid-function return points' % (k['payload'], k['cave'], k['reshaped'], k['mid']))
+    if report.get('new_area_entries'):
+        lines.append('jumps into new code without a function there: %d entr(ies) added' % len(report['new_area_entries']))
+    lines.append('data words changed: %d; payload pointers translated: %d (%d by the overlay of the code that owns them)' % (
+        report['data_words_changed'], report.get('payload_pointers_translated', 0), report.get('payload_pointers_by_owner', 0)))
+    for name, old, new in getattr(A, 'table_extensions', []):
+        lines.append('pointer table kept whole: %s shift change %08X -> %08X' % (name, old, new))
+    if report.get('data_words_overlapped'):
+        dropped = report.get('data_words_dropped', [])
+        lines.append('data words with no room: %d, %d of them differ from stock and were dropped%s' % (
+            report['data_words_overlapped'], len(dropped),
+            ' (first: %s %08X -> %08X)' % dropped[0] if dropped else ''))
+    if report.get('unreachable_lo_fixed') or report.get('unreachable_lo_left'):
+        lines.append('%%lo uses no %%hi reaches: %d moved to stubs, %d left' % (
+            len(report.get('unreachable_lo_fixed', [])), len(report.get('unreachable_lo_left', []))))
+    if report.get('get_pc_fixed') or report.get('get_pc_left'):
+        lines.append('own-address (get-PC) uses fixed: %d, left: %d' % (
+            len(report.get('get_pc_fixed', [])), len(report.get('get_pc_left', []))))
+    if report.get('refresh_hooks'):
+        lines.append('hook-derived values refreshed: %d hook(s), %d call site(s), %d store(s) with no call after' % (
+            len(report['refresh_hooks']), len(report.get('refresh_sites', [])), len(report.get('refresh_unhandled', []))))
+    if report.get('vi_hook'):
+        h = report['vi_hook']
+        lines.append('VI thread hook runs from the retrace thread: %s, called at %08X through %08X, %d return(s)' % (
+            ', '.join('%08X' % t for t in h['hooks']), h['site'], h['stub'], h['returns']))
+    if report.get('vi_hook_unhandled'):
+        lines.append('WARNING: the hack hooks the VI thread, which the port replaces, so that hook will not run: %s' % report['vi_hook_unhandled'])
+    probs = [(p.section, p.stock_vram, x) for p in ports if p.status == 'changed' for x in p.problems]
+    probs += [('payload', 0, x) for x in report.get('payload_code_problems', [])]
+    probs += [('cave', 0, x) for x in report.get('cave_problems', [])]
+    probs += [('extra', x.hack_vram, pr) for x in A.extras for pr in x.problems]
+    lines.append('unresolved references: %d' % len(probs))
+    for sec, v, x in probs[:30]:
+        lines.append('  %s %08X %s' % (sec, v, x))
+    if A.payload:
+        p = A.payload
+        lines.append('payload: rom 0x%X -> 0x%08X, 0x%X bytes (preloaded natively)' % (p['rom'], p['ram'], p['size']))
+    return '\n'.join(lines)
+
+
+# Hacks can patch their own instructions while they run: No Mercy Plus and Born to be Wired pick their menu art with a
+# per-frame `sh` onto the immediate of an `addiu a0,zero,<asset id>` (aki-roadmap#191). On hardware the CPU runs the new
+# value; recompiled code never reads its instructions back, so the art stays the one compiled in. The runtime already
+# follows such writes when they come from a codes table (aki-roadmap#187): it watches every word a table can write,
+# whether or not the write's condition ever holds, and recompiles a function when a watched word changes. So the pack
+# gets a table that only watches: each write sits behind a condition that is never true, and the hack does the writing.
+CODE_WATCH_FILE = 'codes.txt'
+_ENTRY_RAM = 0x80000400         # the ROM's entry code: nothing rewrites it, so a wrong value there is never true
+
+def code_write_targets(words, is_code):
+    """Word addresses the code in `words` stores to, for those is_code() accepts. Follows `lui` (+ `addiu`/`ori`) in
+    straight lines only, so a computed address is missed. A store landing on another overlay's code at the same address
+    is harmless: the runtime only compares words of loaded sections."""
+    targets, known = set(), {}
+    for w in words:
+        op, rs, rt = w >> 26, (w >> 21) & 31, (w >> 16) & 31
+        imm = w & 0xFFFF
+        simm = imm - 0x10000 if imm & 0x8000 else imm
+        if op in (40, 41, 42, 43, 46):      # sb sh swl sw swr
+            if rs in known:
+                t = (known[rs] + simm) & 0xFFFFFFFF
+                if is_code(t):
+                    targets.add(t & ~3)
+        elif op == 15:                      # lui
+            known[rt] = imm << 16
+        elif op == 9 and rs in known:       # addiu
+            known[rt] = (known[rs] + simm) & 0xFFFFFFFF
+        elif op == 13 and rs in known:      # ori
+            known[rt] = known[rs] | imm
+        elif op == 0:                       # R-type: a result in rd
+            known.pop((w >> 11) & 31, None)
+        elif 8 <= op <= 14 or 32 <= op <= 39:   # other immediates and loads: a result in rt
+            known.pop(rt, None)
+    return targets
+
+def code_watch_text(targets, entry_halfword, rom_name):
+    """A codes table that watches `targets` and never writes."""
+    lines = ['# Watches code the hack rewrites itself (aki-roadmap#191). The conditions are never true: nothing is written.',
+             '# rom: %s' % rom_name, '', '[Conversion\\Hack code writes]', '# default: on']
+    for t in sorted(targets):
+        lines += ['D1%06X %04X' % (_ENTRY_RAM & 0xFFFFFF, entry_halfword ^ 1), '81%06X 0000' % (t & 0xFFFFFF)]
+    return '\n'.join(lines) + '\n'
+
+def hack_code_watch(A, D, funcs, payload):
+    """The watch table for the assembled ROM D: stores in the hack's payload and in the code it changed or added."""
+    ranges = sorted((s.text + o, s.text + o + z) for n, s in A.byname.items() if n != 'entry' for o, z in s.funcs)
+    starts = [r[0] for r in ranges]
+    # overlays share addresses, so ranges overlap: look back over the longest function
+    longest = max((hi - lo for lo, hi in ranges), default=0)
+    def is_code(addr):
+        i = bisect.bisect_right(starts, addr) - 1
+        while i >= 0 and addr - ranges[i][0] < longest:
+            if addr < ranges[i][1]:
+                return True
+            i -= 1
+        return False
+    blocks = [(p['rom'], p['size']) for p in payload] + [(f[1], f[2]) for f in funcs if not (len(f) > 3 and f[3])]
+    targets = set()
+    for rom, size in blocks:
+        n = size // 4
+        targets |= code_write_targets(struct.unpack('>%dI' % n, D[rom:rom + n * 4]), is_code)
+    entry = A.byname['entry']
+    entry_halfword = struct.unpack('>H', D[entry.rom:entry.rom + 2])[0]
+    return targets, code_watch_text(targets, entry_halfword, A.layout.get('manifest_base', 'nomercy-rev1'))
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest='cmd', required=True)
+    for name in ('analyze', 'build', 'map'):
+        p = sub.add_parser(name)
+        p.add_argument('--base', required=True, help='the stock ROM the game port uses, .z64')
+        p.add_argument('--hack', required=True, help='the hack ROM, .z64')
+        p.add_argument('--layout', help='layout file (default: the one in layouts/ for the base ROM)')
+        if name == 'build':
+            p.add_argument('--id', required=True, help='mod id (also the saves folder)')
+            p.add_argument('--name', required=True)
+            p.add_argument('--version', default='1.0.0')
+            p.add_argument('--author', action='append', default=[])
+            p.add_argument('--game-id', help="the port's mod game id (default: from the layout)")
+            p.add_argument('--out', required=True, help='output .nrm')
+            p.add_argument('--rom-out', help='also write the stock-layout ROM (local testing only; never share it)')
+            p.add_argument('--x-stock-ports', help='(debugging) comma-separated stock vrams to leave unported')
+            p.add_argument('--x-no-data', help='(debugging) comma-separated sections whose data changes are skipped')
+            p.add_argument('--x-word-patch', help='(debugging) section:vram=word,... raw words written at stock addresses')
+            p.add_argument('--x-log-entry', help='(debugging) section:vram[:a1],... log (a0, a1) of calls with a0 (or a1) >= 0x10000 in a RAM ring')
+        if name == 'map':
+            p.add_argument('--out', required=True, help='output JSON (hack RAM ranges -> stock shifts)')
+    gen = sub.add_parser('gen-layout', help='(developers) write a game layout from its RecompiledFuncs')
+    gen.add_argument('--base', required=True)
+    gen.add_argument('--overlays', default='RecompiledFuncs/recomp_overlays.inl')
+    gen.add_argument('--game', required=True, help='layout name, e.g. nomercy, wm2k')
+    gen.add_argument('--mod-game-id', required=True, help="the port's mod game id, e.g. wwfnomercy")
+    gen.add_argument('--manifest-base', required=True, help='base name in relink.json, e.g. nomercy-rev1')
+    gen.add_argument('--out')
+    args = ap.parse_args(argv)
+
+    if args.cmd == 'gen-layout':
+        out = args.out or os.path.join(LAYOUTS_DIR, args.game + '.json')
+        made = gen_layout(args.overlays, open(args.base, 'rb').read(), args.game, args.mod_game_id, args.manifest_base)
+        if os.path.exists(out):     # facts found by hand, which the recompiled sections don't tell
+            old = json.load(open(out))
+            made.update({k: old[k] for k in ('vi_thread', 'retrace_site') if k in old})
+        json.dump(made, open(out, 'w'))
+        print('wrote', out)
+        return
+    base = open(args.base, 'rb').read()
+    hack = open(args.hack, 'rb').read()
+    for label, rom in (('base', base), ('hack', hack)):
+        if rom[:4] != b'\x80\x37\x12\x40':
+            sys.exit('%s ROM is not big-endian .z64 (starts %s)' % (label, rom[:4].hex()))
+    layout_path = args.layout or find_layout(base)
+    if layout_path is None:
+        sys.exit('base ROM matches no layout in %s (it must be the exact ROM the game port uses)' % LAYOUTS_DIR)
+    layout = json.load(open(layout_path))
+    import hashlib
+    if layout.get('base_sha1') and hashlib.sha1(base).hexdigest() != layout['base_sha1']:
+        sys.exit('base ROM is not the one %s expects (SHA1 %s)' % (os.path.basename(layout_path), layout['base_sha1']))
+    if getattr(args, 'game_id', None) is None and args.cmd == 'build':
+        args.game_id = layout.get('mod_game_id', 'wwfnomercy')
+    A = Analysis(base, hack, layout_path)
+    if getattr(args, 'x_stock_ports', None):
+        A.experiment_stock_ports = [int(v, 16) for v in args.x_stock_ports.split(',')]
+    if getattr(args, 'x_word_patch', None):
+        A.experiment_word_patches = args.x_word_patch.split(',')
+    if getattr(args, 'x_log_entry', None):
+        A.experiment_log_entries = args.x_log_entry.split(',')
+        A.experiment_log_min = 0x10000
+    if getattr(args, 'x_no_data', None):
+        A.experiment_no_data = args.x_no_data.split(',')
+    if args.cmd == 'map':
+        json.dump(A.map.to_json(), open(args.out, 'w'), indent=1)
+        print('wrote', args.out)
+        return
+    report = {}
+    D, manifest = assemble(A, report)
+    print(summarize(A, report))
+    funcs = [(f['vram'], f['rom'], f['size'], f.get('data')) for f in manifest['functions']]
+    funcs += [(p.stock_vram, A.byname[p.section].rom_of(p.stock_vram), p.size) for p in report['ports'] if p.status == 'changed']
+    bad = check_jump_tables(D, funcs, manifest['code_ranges'], manifest.get('data_ranges', []))
+    for vram, pc, table, why in bad:
+        print('  JUMP TABLE: function 0x%08X, jr at 0x%08X, table 0x%08X: %s' % (vram, pc, table, why))
+    if bad:
+        print('WARNING: %d jump table(s) the runtime would reject (the mod would fail to load)' % len(bad))
+    if args.cmd == 'analyze':
+        return
+    import bps
+    patch = bps.bps_encode(base, D)
+    assert bps.bps_apply(base, patch) == D, 'BPS round trip failed'
+    mod = {
+        'game_id': args.game_id,
+        'id': args.id,
+        'display_name': args.name,
+        'description': '%s (relinked hack, de-relinked onto the stock layout; patches your own ROM when the game starts).' % args.name,
+        'short_description': 'ROM hack (patches your own ROM when the game starts).',
+        'version': args.version,
+        'authors': args.author or ['unknown'],
+        'minimum_recomp_version': '0.1.0',
+    }
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
+        z.writestr('mod.json', json.dumps(mod, indent=4))
+        z.writestr('patch.bps', patch)
+        z.writestr('relink.json', json.dumps(manifest, indent=1))
+    open(args.out, 'wb').write(buf.getvalue())
+    if args.rom_out:
+        open(args.rom_out, 'wb').write(D)
+    print('wrote %s (patch %d bytes, mod %d bytes, %d extra functions)' % (args.out, len(patch), len(buf.getvalue()), len(manifest['functions'])))
+    targets, watch = hack_code_watch(A, D, funcs, [p for p in manifest.get('preload', []) if p['size'] >= 0x100])
+    if targets:
+        path = os.path.join(os.path.dirname(os.path.abspath(args.out)), CODE_WATCH_FILE)
+        open(path, 'w', newline='\n').write(watch)
+        print('hack code writes: %d word(s) watched, wrote %s (the pack needs it as its codes component)' % (len(targets), path))
+
+
+
+# ------------------------------------------------------------------------- offline checks
+
+def jump_tables(words):
+    """[(index of the jr, table address)]: as N64Recomp's analysis finds them, a `lw reg, %lo(T)` whose base
+    had an index added after the lui (`addu base, lui reg, index`), feeding `jr reg` (without the index it's
+    a jump through a pointer variable, not a table)."""
+    loads = {}
+    for hi, lo, a in mips.hilo_refs(words):
+        if words[lo] >> 26 != 0x23:
+            continue
+        base, lui_reg = (words[lo] >> 21) & 31, (words[hi] >> 16) & 31
+        indexed = any(w >> 26 == 0 and w & 0x3F in (0x21, 0x2D) and (w >> 11) & 31 == base
+                      and lui_reg in ((w >> 21) & 31, (w >> 16) & 31) for w in words[hi + 1:lo])
+        if indexed:
+            loads[lo] = a
+    out = []
+    for i, w in enumerate(words):
+        if w >> 26 != 0 or (w & 0x3F) != 0x08 or ((w >> 21) & 31) == 31:
+            continue
+        reg = (w >> 21) & 31
+        for j in range(i - 1, max(-1, i - 12), -1):
+            if j in loads and ((words[j] >> 16) & 31) == reg:
+                out.append((i, loads[j]))
+                break
+            if mips.gpr_written(words[j]) == reg:
+                break                   # the jr's register comes from something else
+    return out
+
+
+def check_jump_tables(D, functions, code_ranges, data_ranges):
+    """Find jump tables the runtime's live recompiler would reject: (vram, jr pc, table, reason).
+    functions: [(vram, rom, size)]. Tables as jump_tables() finds them; entries are read until one falls
+    outside the function (or the hack code ranges)."""
+    bad = []
+    for f in functions:
+        vram, rom, size = f[:3]
+        own = [tuple(f[3])] if len(f) > 3 and f[3] else []
+        words = [word(D, rom + 4 * i) for i in range(size // 4)]
+        for i, table in jump_tables(words):
+            trom = None
+            for lo, hi, r in own + list(data_ranges):
+                if lo <= table < hi:
+                    trom = r + (table - lo)
+            if trom is None:
+                trom = rom + (table - vram)
+            if not (0 <= trom < len(D) - 4):
+                bad.append((vram, vram + 4 * i, table, 'table outside the ROM'))
+                continue
+            first = word(D, trom)
+            inside = vram <= first < vram + size or any(lo <= first < hi for lo, hi in code_ranges)
+            if not inside:
+                bad.append((vram, vram + 4 * i, table, 'first entry 0x%08X outside the function' % first))
+    return bad
+
+
+if __name__ == '__main__':
+    main()

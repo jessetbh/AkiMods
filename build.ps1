@@ -3,8 +3,9 @@
 #   .\build.ps1 cheats             one mod, all its games
 #   .\build.ps1 cheats nomercy     one mod, one game
 #   .\build.ps1 camera nomercy -Define CAMERA_DEBUG    extra -D flags (debug builds)
-# Output: build\<mod>\<game>\<mod id>.nrm
-param([string]$Mod = 'all', [string]$Game = 'all', [string[]]$Define = @())
+#   .\build.ps1 -ModsDir examples\starter-nomercy -Mod patch nomercy   a mod folder outside mods\ (the starter kit)
+# Output: build\<mod>\<game>\<mod id>.nrm (with -ModsDir: build\_external\<mod>\<game>, which stage.ps1 never ships)
+param([string]$Mod = 'all', [string]$Game = 'all', [string[]]$Define = @(), [string]$ModsDir = '')
 # Native tools print warnings on stderr; failures are caught via $LASTEXITCODE below.
 $ErrorActionPreference = 'Continue'
 
@@ -12,8 +13,10 @@ $root = $PSScriptRoot
 # The game repos (for their symbol files): next to this repo, or wherever AKI_GAMES_DIR points.
 $depot = if ($env:AKI_GAMES_DIR) { $env:AKI_GAMES_DIR } else { Split-Path $root -Parent }
 $games = Import-PowerShellDataFile "$root\common\games.psd1"
+# Where the mod folders are: mods\ by default; -ModsDir for one elsewhere (relative to this repo or absolute).
+$modsRoot = if (-not $ModsDir) { "$root\mods" } elseif ([IO.Path]::IsPathRooted($ModsDir)) { $ModsDir } else { Join-Path $root $ModsDir }
 
-$modNames = @(Get-ChildItem "$root\mods" -Directory | Where-Object { Test-Path "$($_.FullName)\mod.psd1" } | ForEach-Object Name)
+$modNames = @(Get-ChildItem $modsRoot -Directory | Where-Object { Test-Path "$($_.FullName)\mod.psd1" } | ForEach-Object Name)
 if ($Mod -ne 'all' -and $Mod -notin $modNames) { throw "Unknown mod '$Mod' (known: $($modNames -join ', '), all)" }
 if ($Game -ne 'all' -and -not $games.ContainsKey($Game)) { throw "Unknown game '$Game' (known: $($games.Keys -join ', '), all)" }
 $selectedMods = if ($Mod -eq 'all') { $modNames } else { @($Mod) }
@@ -30,7 +33,7 @@ $baseFlags = @('-target', 'mips-freestanding-none', '-mcpu=mips2', '-mabi=32', '
     '-I', "$root\common\include")
 
 foreach ($m in $selectedMods) {
-    $modDir = "$root\mods\$m"
+    $modDir = Join-Path $modsRoot $m
     $cfg = Import-PowerShellDataFile "$modDir\mod.psd1"
     $modGames = if ($cfg.Games -eq 'all') { @($games.Keys) } else { @($cfg.Games) }
     $targetGames = if ($Game -eq 'all') { $modGames } elseif ($Game -in $modGames) { @($Game) } else { @() }
@@ -39,7 +42,7 @@ foreach ($m in $selectedMods) {
     foreach ($g in ($targetGames | Sort-Object)) {
         $info = $games[$g] # not $game: PowerShell names are case-insensitive, and [string]$Game would coerce it
         $over = if ($cfg.PerGame -and $cfg.PerGame.ContainsKey($g)) { $cfg.PerGame[$g] } else { @{} }
-        $out = "$root\build\$m\$g"
+        $out = if ($ModsDir) { "$root\build\_external\$m\$g" } else { "$root\build\$m\$g" }
         New-Item -ItemType Directory -Force $out | Out-Null
 
         # Optional per-mod generator: writes headers into $out (on the include path) and
@@ -80,6 +83,30 @@ foreach ($m in $selectedMods) {
 
         & $modTool "$out\mod.toml" $out
         if ($LASTEXITCODE) { throw "${m}/${g}: RecompModTool failed" }
+        if ($cfg.ContainsKey('EnabledByDefault')) {
+            # RecompModTool doesn't write the manifest's enabled_by_default (librecomp: true when absent), so it goes
+            # into the packed mod.json here. False: a new install of the mod stays off until the player turns it on.
+            Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
+            $flag = if ($cfg.EnabledByDefault) { 'true' } else { 'false' }
+            $zip = [IO.Compression.ZipFile]::Open("$out\$($cfg.Id).nrm", 'Update')
+            try {
+                $entry = $zip.GetEntry('mod.json')
+                $reader = New-Object IO.StreamReader($entry.Open())
+                $json = $reader.ReadToEnd(); $reader.Dispose()
+                $stamp = $entry.LastWriteTime   # RecompModTool's; a fixed new one would also do, it just mustn't be now
+                if ($json -match '"enabled_by_default"') { throw "${m}/${g}: mod.json already has enabled_by_default" }
+                if ($json -notmatch '^\s*\{\s*"') { throw "${m}/${g}: mod.json doesn't start like RecompModTool's ({ `"key`" ...)" }
+                $json = $json -replace '^\s*\{', "{`n    `"enabled_by_default`" : $flag,"
+                $check = $json | ConvertFrom-Json
+                if ($check.enabled_by_default -ne [bool]$cfg.EnabledByDefault) { throw "${m}/${g}: enabled_by_default didn't land in mod.json" }
+                $entry.Delete()
+                $new = $zip.CreateEntry('mod.json')
+                $new.LastWriteTime = $stamp   # RecompModTool's time, like its other entries (it stamps them all with the build time)
+                $writer = New-Object IO.StreamWriter($new.Open(), (New-Object Text.UTF8Encoding $false))
+                $writer.Write($json); $writer.Dispose()
+            }
+            finally { $zip.Dispose() }
+        }
         Get-Item "$out\$($cfg.Id).nrm" | Select-Object @{n = 'Mod'; e = { $m } }, @{n = 'Game'; e = { $g } }, Length, FullName
     }
 }

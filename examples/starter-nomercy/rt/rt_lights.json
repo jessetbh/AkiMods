@@ -1,0 +1,43 @@
+{
+    // AKI Starter Kit: ray tracing light rig (CC0 1.0). aki.json names it as components.rt.lights.
+    //
+    // The game reads ONE rig file: this one replaces the game's own assets\rt_lights.json while the conversion
+    // runs, so it carries a "default" for every venue it doesn't list, plus its own venues. Comments (//) are fine.
+    // Units are the game's world units: the ring is about 1300 across, centered on 0, Y is up, +Z is the entrance.
+    //
+    // A venue is recognized by its "match" list: hashes of textures the venue draws (any one seen in the scene picks
+    // it). Run the game with WCW_RT_VENUE_LOG=1 to print the current scene's candidates. The Raw list below is the
+    // game's own rig's; the hashes name the ORIGINAL textures, so they still match with this kit's mat and logo.
+    // Every field: the comment at the top of the game's assets\rt_lights.json.
+    "default": {
+        // Plain TV lighting for every other venue: a key over the ring, four corner lamps.
+        "lights": [[0, 900, 0, 2], [-400, 850, -400, 1], [400, 850, -400, 1], [-400, 850, 400, 1], [400, 850, 400, 1]],
+        "size": 24,
+        "radius": 650,
+        "shadow": 0.6,
+        "characterShadow": 0.35,
+        "outsideDarkness": 0.4,
+        "outsideEdge": 500
+    },
+    "venues": [
+        {
+            // Raw: the kit's showcase. A teal key light straight over the ring and two violet lamps at the hard-camera
+            // corners, so the change is obvious in a screenshot: teal-lit mat, violet rim light on the wrestlers,
+            // a dark arena (outsideDarkness 0.7), and a soft violet glow over the entrance stage.
+            "name": "Raw",
+            "match": ["B1E01BE92A6F5BE1", "66578B3E4816988B", "EF135CC7C26673E5", "5581B2F76A29CE38", "669C9B0502D15DC0",
+                      "3FF838B666927262", "110318FA35D3B483", "41865EF953B662F7", "56ECCBE5DF1F13F0", "C51D117013CA13F2",
+                      "F3F77C104B535891", "692A0CC7C61905BF", "EC001CC480EFAACC", "60E5E746C8B86B4B"],
+            // [x, y, z, weight, r, g, b] per light (up to 8).
+            "lights": [[0, 1000, 0, 3, 0.55, 1.0, 0.95], [-600, 700, -600, 1.2, 0.75, 0.45, 1.0], [600, 700, -600, 1.2, 0.75, 0.45, 1.0]],
+            "size": 28,
+            "radius": 650,
+            "shadow": 0.7,
+            "characterShadow": 0.45,
+            "outsideDarkness": 0.7,
+            "outsideEdge": 450,
+            // [x, y, z, intensity, range, r, g, b]
+            "glows": [[0, 700, 2300, 1.2, 1500, 0.6, 0.35, 1.0]]
+        }
+    ]
+}

@@ -1,0 +1,60 @@
+{
+  "format": "aki-conversion",
+  "format_version": 1,
+  "id": "aki_starter_kit",
+  "name": "AKI Starter Kit",
+  "version": "1.0.0",
+  "authors": [
+    "AKI recomp project"
+  ],
+  "game": "nomercy",
+  "base_rom": {
+    "sha1": "91CEE3D096F4A76644D8B35B9AEAD6448909ABD1",
+    "revision": "nomercy-rev1"
+  },
+  "description": "The example conversion from the AKI starter kit: a code change, codes, an RT light rig, a seed save, a texture package and eight custom wrestler models, all original or CC0.",
+  "credits": "Kit by the AKI recomp project. Wrestler models by Quaternius (CC0), the robot modified by Don McCurdy (CC0). Textures, rig, codes, save edit and code: original, CC0.",
+  "permission": "CC0 1.0: copy, change and share it freely, no permission needed.",
+  "license": "CC0-1.0",
+  "links": [
+    "https://github.com/jessetbh/AkiMods/tree/main/examples/starter-nomercy"
+  ],
+  "thumb": "icon.png",
+  "components": {
+    "patch": {
+      "file": "patch.nrm",
+      "mod_id": "aki_starter_kit"
+    },
+    "codes": {
+      "file": "codes.txt",
+      "format": "aki-codes",
+      "rom": "nomercy-rev1"
+    },
+    "rt": {
+      "lights": "rt_lights.json"
+    },
+    "saves": [
+      {
+        "file": "saves/wwf.nomercy.us.bin",
+        "kind": "flash",
+        "mode": "seed"
+      }
+    ],
+    "textures": {
+      "package": "AKI-Starter_Kit_Textures",
+      "version": "1.0.0",
+      "sha256": "@TEXTURES_SHA256@",
+      "naming": "rt64",
+      "optional": false
+    },
+    "models": {
+      "dir": "models",
+      "format": 2,
+      "roster": "models/roster.json",
+      "slots": "@SLOTS@"
+    }
+  },
+  "source": {
+    "mode": "original"
+  }
+}

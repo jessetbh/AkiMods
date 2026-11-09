@@ -4,11 +4,13 @@ The mod holds only a BPS patch against the stock ROM (no ROM data): players inst
 any other mod, and the runtime applies the patch to their own ROM when the game starts.
 
 Run it from the game's repository root (it reads that game's RecompiledFuncs/), usually through
-the game's own tools/romhack/make_patch_mod.py, which forwards here:
+the game's own tools/romhack/make_patch_mod.py, which forwards here, or anywhere with --layout
+(the game's layouts/<game>.json next to this file: addresses only, no RecompiledFuncs needed):
 
     python tools/romhack/make_patch_mod.py --base vpw2.z64 --hack hack.z64 \\
         --game-id vpw2 --id my_hack --name "My Hack" --version 1.0.0 --author me \\
         --out my_hack.nrm
+    python make_patch_mod.py --layout auto --base vpw2.z64 --hack hack.z64 ... --out my_hack.nrm
 
 Both ROMs must be big-endian .z64 (the byte order the runtime stores ROMs in).
 
@@ -18,7 +20,9 @@ functions) work on any runtime that supports ROM-patch mods. Changed functions n
 runtime that recompiles them from the patched ROM at load time (the wcw-romhack runtime
 does); a plain runtime silently keeps running the stock code for them.
 """
-import argparse, io, json, re, sys, zipfile, zlib
+import argparse, glob, hashlib, io, json, os, re, sys, zipfile, zlib
+
+LAYOUTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'layouts')
 
 
 # ---------------------------------------------------------------------------- BPS encoder
@@ -227,6 +231,76 @@ def load_sections(overlays_inl):
     return sections
 
 
+def layout_sections(layout):
+    """load_sections' tables from a derelink layout (a dict, or the path of layouts/<game>.json): every section's
+    recompiled range is text..data, and the stock code a segment keeps in its data area (extra_code) is a section of
+    its own. Functions are named func_<vram>, as the recompiler names functions without a symbol."""
+    if not isinstance(layout, dict):
+        with open(layout, encoding='utf-8') as f:
+            layout = json.load(f)
+    out = []
+    for s in layout['sections']:
+        out.append((s['name'], s['rom'], s['text'], s['data'] - s['text'],
+                    [('func_%08X' % (s['text'] + off), off, size) for off, size in s['funcs']]))
+    for i, x in enumerate(layout.get('extra_code', [])):
+        out.append(('%s_extra_%X' % (x['section'], x['rom']), x['rom'], x['ram'], x['size'],
+                    [('func_%08X' % (x['ram'] + off), off, size) for off, size in x['funcs']]))
+    return out
+
+
+def find_layout(base, layouts_dir=None):
+    """The layouts/*.json whose base_sha1 is this ROM's (big-endian .z64 bytes), or None."""
+    sha1 = hashlib.sha1(base).hexdigest()
+    for path in sorted(glob.glob(os.path.join(layouts_dir or LAYOUTS_DIR, '*.json'))):
+        layout = _read_layout(path)
+        if layout and str(layout.get('base_sha1', '')).lower() == sha1:
+            return path
+    return None
+
+
+def _read_layout(path):
+    """A layout's JSON, or None for a file that isn't one (unreadable, not an object)."""
+    try:
+        with open(path, encoding='utf-8') as f:
+            layout = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return layout if isinstance(layout, dict) and 'sections' in layout else None
+
+
+def resolve_layout(spec, base, layouts_dir=None):
+    """--layout's value -> a layout path: 'auto' (the one for the base ROM), a game name (layouts/<game>.json) or a
+    file. Raises PatchModError when there's none, or when it is for another ROM than base."""
+    d = layouts_dir or LAYOUTS_DIR
+    if spec == 'auto':
+        path = find_layout(base, d)
+        if path is None:
+            raise PatchModError('no layout in %s is for this base ROM (it must be the ROM the port uses)' % d)
+        return path
+    # A file when it looks like one (a .json name or a path), else a game: layouts/<game>.json.
+    is_file = spec.lower().endswith('.json') or os.sep in spec or '/' in spec
+    path = spec if is_file else os.path.join(d, spec + '.json')
+    layout = _read_layout(path) if os.path.isfile(path) else None
+    if layout is None:
+        raise PatchModError('no layout %s' % spec)
+    want = str(layout.get('base_sha1', '')).lower()
+    if not want:
+        raise PatchModError('%s names no base_sha1: it can\'t be checked against --base' % os.path.basename(path))
+    if want != hashlib.sha1(base).hexdigest():
+        raise PatchModError('%s is for another ROM (SHA-1 %s); --base must be the ROM the port uses' % (
+            os.path.basename(path), want))
+    return path
+
+
+def repaired_by_vram(repaired, overlays_inl):
+    """The repaired list (recompiled symbol names) as func_<vram> names, as layout_sections names functions, through
+    recomp_overlays.inl's tables; names it doesn't find stay as they are."""
+    if not repaired or not os.path.isfile(overlays_inl):
+        return repaired
+    vram = {func: ram + off for _, rom, ram, size, fs in load_sections(overlays_inl) for func, off, _ in fs}
+    return {('func_%08X' % vram[n]) if n in vram else n for n in repaired}
+
+
 def changed_functions(sections, base, hack):
     """Functions whose ROM bytes differ, plus changed bytes in code sections outside any function."""
     funcs, loose = [], 0
@@ -280,9 +354,92 @@ def escaping_branches(sections, hack, funcs):
     return out
 
 
+# ------------------------------------------------------------------------------------ build
+
+class PatchModError(Exception):
+    """The mod can't be written (the hack needs a full recompile, or the patch would carry too many literal bytes)."""
+
+
+def make_mod(base, hack, sections, repaired, game_id, mod_id, name, version='1.0.0', authors=(), description='',
+             minimum_recomp_version='0.1.0', force=False, max_target_read_mb=2.0, build=True, log=print):
+    """The report (printed through log) and, with build, the .nrm bytes. Returns (nrm bytes or None, report dict).
+    Raises PatchModError when it won't write the mod. Both ROMs are big-endian .z64 bytes."""
+    for label, rom in (('base', base), ('hack', hack)):
+        if rom[:4] != b'\x80\x37\x12\x40':
+            raise PatchModError('%s ROM is not big-endian .z64 (starts %s)' % (label, rom[:4].hex()))
+    funcs, loose = changed_functions(sections, base, hack)
+    code_bytes = sum(s[3] for s in sections)
+    diff = sum(1 for a, b in zip(base, hack) if a != b) + abs(len(base) - len(hack))
+    log('ROM: %d bytes -> %d bytes, %d bytes differ' % (len(base), len(hack), diff))
+    log('code: %d sections, %d bytes; %d changed function(s), %d changed byte(s) outside functions'
+        % (len(sections), code_bytes, len(funcs), loose))
+    repaired = set(repaired or ())
+    for section, func, vram, size, words in funcs:
+        log('  %-12s %-28s 0x%08X  %5d bytes, %d word(s) changed%s' % (section, func, vram, size, words,
+            '  [REPAIRED by the pipeline: recompiling it at load drops the repair]' if func in repaired else ''))
+    risky = [f for f in funcs if f[1] in repaired]
+    if risky:
+        log('WARNING: %d changed function(s) carry pipeline repairs or hand-edits; test them closely.' % len(risky))
+    escapes = escaping_branches(sections, hack, funcs)
+    for func, pc, target, kind in escapes[:20]:
+        log('  ESCAPES: %s %s at 0x%08X -> 0x%08X (not in the function or a known function start)' % (func, kind, pc, target))
+    if escapes:
+        log('BLOCKED: %d branch(es)/call(s) leave their function: the hack restructures code across'
+            ' function boundaries or calls code it added, so it needs a full recompile.' % len(escapes))
+    if escapes or loose:
+        log('-> needs a full recompile of the hacked ROM; a patch mod would not run it correctly.')
+    elif funcs:
+        log('-> changes code: needs a runtime that recompiles changed functions from the patch.')
+    else:
+        log('-> data-only: works with any runtime that supports ROM-patch mods.')
+    report = {'changed_functions': len(funcs), 'loose_bytes': loose, 'escapes': len(escapes),
+              'repaired_changed': sorted(f[1] for f in risky)}
+    if not build:
+        return None, report
+    if (escapes or loose) and not force:
+        raise PatchModError('the hack needs a full recompile (use --force to write it anyway)')
+
+    stats = {}
+    try:
+        patch = bps_encode(base, hack, max_target_read=int(max_target_read_mb * 1024 * 1024), stats=stats)
+    except TooMuchTargetRead as e:
+        raise PatchModError('%s. Bytes the stock ROM does not have go into the patch as they are,'
+                            ' so this mod could carry ROM data (or the hack is mostly new data). Check that --base is the'
+                            ' ROM the hack was made from; if the hack really adds that much of its own data, raise'
+                            ' --max-target-read. See %s' % (e, ISSUE))
+    assert bps_apply(base, patch) == hack, 'BPS round trip failed'
+    log('patch: %d bytes read in place, %d copied from elsewhere in the stock ROM, %d new (literal)'
+        % (stats['source_read'], stats['source_copy'], stats['target_read']))
+    report['patch'] = dict(stats, size=len(patch))
+    manifest = {
+        'game_id': game_id,
+        'id': mod_id,
+        'display_name': name,
+        'description': description or ('ROM hack patch: %s.' % name),
+        'short_description': 'ROM hack (patches your own ROM when the game starts).',
+        'version': version,
+        'authors': list(authors) or ['unknown'],
+        'minimum_recomp_version': minimum_recomp_version,
+    }
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
+        z.writestr('mod.json', json.dumps(manifest, indent=4))
+        z.writestr('patch.bps', patch)
+    return buf.getvalue(), report
+
+
+def load_repaired(path):
+    """Function names in repaired_functions.txt, or None when there's no such file."""
+    try:
+        with open(path, encoding='utf-8') as f:
+            return {l.strip() for l in f if l.strip() and not l.startswith('#')}
+    except FileNotFoundError:
+        return None
+
+
 # ------------------------------------------------------------------------------------ main
 
-def main():
+def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--base', required=True, help='stock ROM (.z64)')
     ap.add_argument('--hack', required=True, help='hacked ROM (.z64)')
@@ -294,83 +451,48 @@ def main():
     ap.add_argument('--description', default='')
     ap.add_argument('--minimum-recomp-version', default='0.1.0')
     ap.add_argument('--overlays', default='RecompiledFuncs/recomp_overlays.inl', help='generated section tables for the report')
+    ap.add_argument('--layout', help="read the tables from a derelink layout instead of RecompiledFuncs: 'auto' (the "
+                                     "one for --base), a game (layouts/<game>.json) or a file")
     ap.add_argument('--repaired', default='RecompiledFuncs/repaired_functions.txt',
                     help='functions the post-recompile pipeline changed (tools/romhack/list_repaired_functions.py)')
     ap.add_argument('--out', help='output .nrm (omit to only print the report)')
     ap.add_argument('--force', action='store_true', help='write the mod even when the report says it needs a full recompile')
     ap.add_argument('--max-target-read', type=float, default=2.0, metavar='MB',
                     help='refuse when the patch would carry more than this many MB of literal bytes (default 2)')
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     base = open(args.base, 'rb').read()
     hack = open(args.hack, 'rb').read()
-    for label, rom in (('base', base), ('hack', hack)):
-        if rom[:4] != b'\x80\x37\x12\x40':
-            sys.exit('%s ROM is not big-endian .z64 (starts %s)' % (label, rom[:4].hex()))
-
-    sections = load_sections(args.overlays)
-    funcs, loose = changed_functions(sections, base, hack)
-    code_bytes = sum(s[3] for s in sections)
-    diff = sum(1 for a, b in zip(base, hack) if a != b) + abs(len(base) - len(hack))
-    print('ROM: %d bytes -> %d bytes, %d bytes differ' % (len(base), len(hack), diff))
-    print('code: %d sections, %d bytes; %d changed function(s), %d changed byte(s) outside functions'
-          % (len(sections), code_bytes, len(funcs), loose))
-    repaired = set()
-    try:
-        repaired = {l.strip() for l in open(args.repaired, encoding='utf-8') if l.strip() and not l.startswith('#')}
-    except FileNotFoundError:
-        print('(no %s: run tools/romhack/list_repaired_functions.py to check for pipeline repairs)' % args.repaired)
-    for section, func, vram, size, words in funcs:
-        print('  %-12s %-28s 0x%08X  %5d bytes, %d word(s) changed%s' % (section, func, vram, size, words,
-              '  [REPAIRED by the pipeline: recompiling it at load drops the repair]' if func in repaired else ''))
-    risky = [f for f in funcs if f[1] in repaired]
-    if risky:
-        print('WARNING: %d changed function(s) carry pipeline repairs or hand-edits; test them closely.' % len(risky))
-    escapes = escaping_branches(sections, hack, funcs)
-    for func, pc, target, kind in escapes[:20]:
-        print('  ESCAPES: %s %s at 0x%08X -> 0x%08X (not in the function or a known function start)' % (func, kind, pc, target))
-    if escapes:
-        print('BLOCKED: %d branch(es)/call(s) leave their function: the hack restructures code across'
-              ' function boundaries or calls code it added, so it needs a full recompile.' % len(escapes))
-    if escapes or loose:
-        print('-> needs a full recompile of the hacked ROM; a patch mod would not run it correctly.')
-    elif funcs:
-        print('-> changes code: needs a runtime that recompiles changed functions from the patch.')
+    if args.layout:
+        try:
+            layout = resolve_layout(args.layout, base)
+        except PatchModError as e:
+            sys.exit(str(e))
+        sections = layout_sections(layout)
+        print('tables: %s' % layout)
     else:
-        print('-> data-only: works with any runtime that supports ROM-patch mods.')
-
-    if not args.out:
-        return
-    if (escapes or loose) and not args.force:
-        sys.exit('not writing %s: the hack needs a full recompile (use --force to write it anyway)' % args.out)
-
-    stats = {}
+        sections = load_sections(args.overlays)
+    repaired = load_repaired(args.repaired)
+    if repaired is None:
+        print('(no %s: run tools/romhack/list_repaired_functions.py to check for pipeline repairs)' % args.repaired)
+    elif args.layout:
+        # Layout functions are func_<vram>; the list names the port's symbols. Map them through the inl, if it's here.
+        if os.path.isfile(args.overlays):
+            repaired = repaired_by_vram(repaired, args.overlays)
+        else:
+            print('(%s names symbols and there is no %s to map them to addresses: repaired functions are not flagged)'
+                  % (args.repaired, args.overlays))
+            repaired = set()
     try:
-        patch = bps_encode(base, hack, max_target_read=int(args.max_target_read * 1024 * 1024), stats=stats)
-    except TooMuchTargetRead as e:
-        sys.exit('not writing %s: %s. Bytes the stock ROM does not have go into the patch as they are,'
-                 ' so this mod could carry ROM data (or the hack is mostly new data). Check that --base is the'
-                 ' ROM the hack was made from; if the hack really adds that much of its own data, raise'
-                 ' --max-target-read. See %s' % (args.out, e, ISSUE))
-    assert bps_apply(base, patch) == hack, 'BPS round trip failed'
-    print('patch: %d bytes read in place, %d copied from elsewhere in the stock ROM, %d new (literal)'
-          % (stats['source_read'], stats['source_copy'], stats['target_read']))
-    manifest = {
-        'game_id': args.game_id,
-        'id': args.id,
-        'display_name': args.name,
-        'description': args.description or ('ROM hack patch: %s.' % args.name),
-        'short_description': 'ROM hack (patches your own ROM when the game starts).',
-        'version': args.version,
-        'authors': args.author or ['unknown'],
-        'minimum_recomp_version': args.minimum_recomp_version,
-    }
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
-        z.writestr('mod.json', json.dumps(manifest, indent=4))
-        z.writestr('patch.bps', patch)
-    open(args.out, 'wb').write(buf.getvalue())
-    print('wrote %s (patch %d bytes, mod %d bytes)' % (args.out, len(patch), len(buf.getvalue())))
+        nrm, report = make_mod(base, hack, sections, repaired, args.game_id, args.id, args.name, args.version, args.author,
+                          args.description, args.minimum_recomp_version, args.force, args.max_target_read,
+                          build=bool(args.out))
+    except PatchModError as e:
+        sys.exit('not writing %s: %s' % (args.out, e) if args.out else str(e))
+    if nrm is None:
+        return
+    open(args.out, 'wb').write(nrm)
+    print('wrote %s (patch %d bytes, mod %d bytes)' % (args.out, report['patch']['size'], len(nrm)))
 
 
 if __name__ == '__main__':

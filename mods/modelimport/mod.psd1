@@ -1,0 +1,88 @@
+# aki_modelimport (aki-roadmap#130): imported models replace wrestlers. Shared core (src\core.c) + one adapter per
+# game (src\adapters\<game>.c, picked in src\adapter.c). Needs the game's model host exports (aki_log,
+# aki_models_read, aki_models_list): No Mercy / VPW2 feat/130-model-host, in their feat/fullconv-b. Bundled on the
+# fullconv line (stage.ps1 -RepoSuffix -fullconv), off by default: the mod isn't enabled until the player turns it on,
+# and the starter packs (packs\, aki-roadmap#145) only replace a wrestler once picked in the Model packs dialog.
+@{
+    Id      = 'aki_modelimport'
+    Sources = @('src\core.c', 'src\adapter.c')
+    Games   = @('nomercy', 'vpw2', 'wm2k', 'revenge', 'vpw64', 'wt')
+    Bundle  = $true
+    EnabledByDefault = $false           # a new install stays off until the player turns it on (build.ps1)
+    Packs   = 'packs'                   # packs\<game>\: starter packs + their HD textures, shipped by stage.ps1
+    Values  = @{}
+    PerGame = @{
+        # WWF No Mercy (USA, Rev 1). These mirror the "runtime" block of AkiTools model-templates/profiles/nomercy.json.
+        nomercy = @{
+            Defines = @(
+                '-DMI_ACTORS=0x80091CC0u',       # part actors: + slot*0x1810 + part*0xDC
+                '-DMI_WRESTLER_IDS=0x80076264u', # s16 per slot: the wrestler id (func_800140B4)
+                '-DMI_COSTUMES_U8=0x8007626Cu',  # u8 per slot: the costume (func_800140B4's third argument)
+                '-DMI_MEM_BASE=0x80400000u',     # packs load here: Expansion RAM No Mercy doesn't use...
+                '-DMI_MEM_SIZE=0x00387C00u',     # ...up to 0x807C0000
+                '-DMI_SCRATCH=0x807C0000u'       # the core's lists and models.txt (32 KB; below 8 MB so RT64 reads it)
+            )
+        }
+        # Virtual Pro Wrestling 2 (Japan). These mirror AkiTools model-templates/profiles/vpw2.json.
+        vpw2 = @{
+            Defines = @(
+                '-DMI_ACTORS=0x80092900u',       # part actors: + slot*0x157C + part*0xDC (func_80014730)
+                '-DMI_WRESTLER_IDS=0x8007F430u', # s16 per slot: the wrestler id (func_80014730)
+                '-DMI_COSTUMES=0x80079EBCu',     # s16 per slot: the costume the slot was built with (func_80014730)
+                '-DMI_MEM_BASE=0x80400000u',     # packs load here: Expansion RAM no VPW2 code addresses...
+                '-DMI_MEM_SIZE=0x00387C00u',     # ...up to 0x807C0000
+                '-DMI_SCRATCH=0x807C0000u'       # the core's lists and models.txt (32 KB; below 8 MB so RT64 reads it)
+            )
+        }
+        # WWF WrestleMania 2000 (USA). aki-roadmap#160/#161 (runtime-confirmed: actors, ids, costumes, Expansion RAM
+        # free in a match). These mirror AkiTools model-templates/profiles/wm2k.json.
+        wm2k = @{
+            Defines = @(
+                '-DMI_ACTORS=0x80088460u',       # part actors: + slot*0x157C + part*0xDC
+                '-DMI_WRESTLER_IDS=0x80073800u', # s16 per slot: the wrestler id
+                '-DMI_COSTUMES=0x8006E288u',     # s16 per slot: the costume
+                '-DMI_MEM_BASE=0x80400000u',     # packs load here: Expansion RAM WM2000 doesn't use (0/1024 pages)...
+                '-DMI_MEM_SIZE=0x00387C00u',     # ...up to 0x807C0000
+                '-DMI_SCRATCH=0x807C0000u'       # the core's lists and models.txt (32 KB; below 8 MB so RT64 reads it)
+            )
+        }
+        # WCW/nWo Revenge (USA). aki-roadmap#160/#162 (ids and costumes from the slot setup at 0x8000CB00; Expansion RAM
+        # free in a match). These mirror AkiTools model-templates/profiles/revenge.json.
+        revenge = @{
+            Defines = @(
+                '-DMI_ACTORS=0x800651A0u',       # part actors: + slot*0x13C4 + part*0xDC
+                '-DMI_WRESTLER_IDS=0x8006A2A4u', # s16 per slot: the wrestler id (group << 8 | index + 1)
+                '-DMI_COSTUMES=0x8007DFB0u',     # s16 per slot: the costume (clamped to the wrestler's count)
+                '-DMI_MEM_BASE=0x80400000u',     # packs load here: Expansion RAM Revenge doesn't use (0/1024 pages)...
+                '-DMI_MEM_SIZE=0x00387C00u',     # ...up to 0x807C0000
+                '-DMI_SCRATCH=0x807C0000u'       # the core's lists and models.txt (32 KB; below 8 MB so RT64 reads it)
+            )
+        }
+        # Virtual Pro Wrestling 64 (Japan), F3DEX 1.x. aki-roadmap#160/#163. These mirror AkiTools
+        # model-templates/profiles/vpw64.json.
+        vpw64 = @{
+            Defines = @(
+                '-DMI_F3DEX1',                   # the lists in F3DEX 1.x (gbi.h)
+                '-DMI_ACTORS=0x8005D090u',       # part actors: + slot*0x13C4 + part*0xDC
+                '-DMI_WRESTLER_IDS=0x80068C80u', # s16 per slot: the wrestler id (group << 8 | index + 1)
+                '-DMI_COSTUMES=0x80068CA8u',     # s16 per slot: the costume (live: 0 and 1 in a mirror match)
+                '-DMI_MEM_BASE=0x80400000u',     # packs load here: Expansion RAM no VPW64 code addresses...
+                '-DMI_MEM_SIZE=0x00387C00u',     # ...up to 0x807C0000
+                '-DMI_SCRATCH=0x807C0000u'       # the core's lists, models.txt and the depth clear (below 8 MB so RT64 reads it)
+            )
+        }
+        # WCW vs. nWo World Tour (USA), F3DEX 1.x. aki-roadmap#160/#164. These mirror AkiTools
+        # model-templates/profiles/wt.json.
+        wt = @{
+            Defines = @(
+                '-DMI_F3DEX1',                   # the lists in F3DEX 1.x (gbi.h)
+                '-DMI_ACTORS=0x8004B8C0u',       # part actors: + slot*0x13C4 + part*0xDC
+                '-DMI_WRESTLER_IDS=0x800574B0u', # s16 per slot: the wrestler id (group << 8 | index + 1)
+                '-DMI_COSTUMES=0x800574D0u',     # s16 per slot: the costume (live: 0 and 1 in a mirror match)
+                '-DMI_MEM_BASE=0x80400000u',     # packs load here: Expansion RAM World Tour doesn't use (0/1024 pages)...
+                '-DMI_MEM_SIZE=0x00387C00u',     # ...up to 0x807C0000
+                '-DMI_SCRATCH=0x807C0000u'       # the core's lists, models.txt and the depth clear (below 8 MB so RT64 reads it)
+            )
+        }
+    }
+}
