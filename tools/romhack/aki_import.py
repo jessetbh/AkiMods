@@ -668,7 +668,10 @@ def remove_tree(path):
         except OSError:
             pass
     if os.path.isdir(path):
-        shutil.rmtree(path, onerror=clear_and_retry)
+        if sys.version_info >= (3, 12):            # onerror is deprecated there (a warning in the worker log)
+            shutil.rmtree(path, onexc=clear_and_retry)
+        else:
+            shutil.rmtree(path, onerror=clear_and_retry)
 
 
 STALE_UNPACK_SECONDS = 6 * 3600
@@ -715,7 +718,7 @@ def expand_7z(path, job, sources, notes):
         job['_unpacks'].append(out)
     if not os.path.isfile(marker):
         if os.path.isdir(out):
-            shutil.rmtree(out, ignore_errors=True)
+            remove_tree(out)
         unpack = load_unpack()
         if unpack is not None:   # romhack/unpack.py: size cap, path checks, unpacked aside and renamed into out
             try:
@@ -730,7 +733,7 @@ def expand_7z(path, job, sources, notes):
             r = subprocess.run([exe, 'x', '-y', '-bd', '-snl-', '-o' + out, path], stdout=subprocess.PIPE,
                                stderr=subprocess.STDOUT)
         if r is not None and r.returncode != 0:
-            shutil.rmtree(out, ignore_errors=True)
+            remove_tree(out)
             notes.append(dict(item=path, status='failed', why='7zr exit %d' % r.returncode))
             return
         with open(marker, 'w') as f:
@@ -1469,7 +1472,7 @@ class Builder:
 
     def cleanup(self):
         """The batch's build temp folder (a byte-swapped port ROM's .z64 copy among others) goes at the end."""
-        shutil.rmtree(os.path.join(work_dir(self.job), 'build'), ignore_errors=True)
+        remove_tree(os.path.join(work_dir(self.job), 'build'))
 
     def target(self, game, pid, res):
         """Converted\\<game>\\<id>-<version>.zip for this item: an id another item of this batch wrote, or a package
