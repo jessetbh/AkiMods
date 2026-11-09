@@ -510,6 +510,38 @@ class Pj64Bundles(BuildBase):
         self.assertEqual((r['status'], r['game']), ('converted', 'nomercy'), r)
         self.assertFalse(os.path.exists(os.path.join(self.dir, 'work', 'build')))   # unpacked bundle removed
 
+    def test_wrapped_zipped_bundle_with_one_cheat_folder_under_another_name(self):
+        # WWF Legends: Challenge 64's shape (aki-roadmap#265): 'Ch64 - Public v2.zip' holds 'Ch64 - Public/' with the
+        # Project64 folder beside a read-me tree and a launcher exe; the cheats sit in one folder named 'WWF Legends',
+        # not like the mod. One conversion with those cheats; the read-me tree isn't unpacked (its paths can pass 260).
+        key = '00000000-00000000-C:45'
+        cht = '\n'.join(['[%s]' % key, 'Name=WWF No Mercy', 'Cheat0="WWF Legends' + BS + 'Arena",810500E8 0933', ''])
+        deep = 'Ch64 - Public/Help Files & Setup/' + '/'.join(['Troubleshooting Folder Number %d' % i for i in range(12)]) + '/x.reg'
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, 'w') as z:
+            z.writestr('Ch64 - Public/Project64/Config/Project64.cht', cht.encode('latin-1'))
+            z.writestr('Ch64 - Public/Project64/Project64.exe', b'x')
+            for i in range(6):
+                z.writestr('Ch64 - Public/Project64/Plugin/hires_texture/WWF NO MERCY/WWF NO MERCY#%08X#0#2_all.png' % i, png(i))
+            z.writestr('Ch64 - Public/Run The Mod.exe', b'x')
+            z.writestr(deep, b'x')
+        r = self.build_one([self.write('in/Ch64 - Public v2.zip', buf.getvalue())])
+        self.assertEqual((r['status'], r['converter'], r['game']), ('converted', 'import-pj64', 'nomercy'), r)
+        with zipfile.ZipFile(r['package']) as z:
+            codes = z.read('conversion/codes.txt').decode()
+            names = z.namelist()
+        self.assertIn('810500E8 0933', codes)
+        self.assertEqual(len([n for n in names if n.startswith('conversion/textures/') and n.endswith('.png')]), 6)
+        self.assertFalse(any('Help Files' in n or n.endswith('.reg') for n in names))
+        # The unpack itself leaves the read-me tree out (its paths can pass 260 characters): only Project64\ is written.
+        src = t.ai.Source('in/Ch64 - Public v2.zip', 'folder', names=[], path=self.write('in/c2.zip', buf.getvalue()))
+        src.zip_path = src.path
+        b = t.ai.Builder({'out': os.path.join(self.dir, 'out2'), 'work': os.path.join(self.dir, 'work2')}, t.ai.Roms(), {})
+        folder, unpacked = b.bundle_folder(src)
+        self.assertTrue(folder.replace('\\', '/').endswith('/Project64'), folder)
+        self.assertFalse(os.path.exists(os.path.join(unpacked, 'Help Files & Setup')))
+        self.assertTrue(os.path.exists(os.path.join(folder, 'Project64.exe')))
+
     def test_bundle_for_no_known_game_needs_one(self):
         self.write('in/Mystery/Project64.cht', b'[12345678-9ABCDEF0-C:45]\nName=Something\n')
         for i in range(6):
@@ -717,19 +749,20 @@ class Rev0Codes(BuildBase):
     def test_no_matching_cheat_folder_says_so(self):
         root = 'in/Quiet Mod'
         self.write(root + '/Project64.cht', '\n'.join([
-            '[%s]' % REV0_KEY, 'Name=WWF No Mercy', 'Cheat0="Elsewhere' + BS + 'Arena",810500E8 0933', ''
-        ]).encode('latin-1'))
+            '[%s]' % REV0_KEY, 'Name=WWF No Mercy', 'Cheat0="Elsewhere' + BS + 'Arena",810500E8 0933',
+            'Cheat1="Another' + BS + 'Thing",8109940A FFFF', ''      # two folders, neither the mod's (aki-roadmap#265:
+        ]).encode('latin-1'))                                          # a single folder is taken as the mod's)
         for i in range(6):                                                  # something else to import
             self.write(root + '/Textures/WWF NO MERCY#%08X#0#2_all.png' % i, png(i))
         r = self.build_one([os.path.join(self.dir, *root.split('/'))], fakes={'derelink': fake_derelink()})
         self.assertEqual(r['status'], 'converted', r)
         self.assertEqual(r['codes'], "no codes taken: no cheat folder is named like the mod ('Quiet Mod'); "
-                                     "its folders: Elsewhere")
+                                     "its folders: Another, Elsewhere")
         # Cheats alone, none taken: the failure says why.
         shutil.rmtree(os.path.join(self.dir, 'in', 'Quiet Mod', 'Textures'))
         r = self.build_one([os.path.join(self.dir, *root.split('/'))], fakes={'derelink': fake_derelink()})
         self.assertEqual(r['status'], 'failed', r)
-        self.assertIn("(no cheat folder is named like the mod ('Quiet Mod'); its folders: Elsewhere)", r['why'])
+        self.assertIn("(no cheat folder is named like the mod ('Quiet Mod'); its folders: Another, Elsewhere)", r['why'])
 
     def test_without_version(self):
         for name, bare in (('Showdown 64 V6.0.4', 'Showdown 64'), ('AEW 64 (v1.2)', 'AEW 64'), ('Mod 1.0.5', 'Mod'),

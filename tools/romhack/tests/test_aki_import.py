@@ -205,6 +205,79 @@ class Patches(Base):
         self.assertEqual(r['status'], 'failed')
 
 
+class BaselessPatches(unittest.TestCase):
+    """aki-roadmap#269: an IPS / APS patch doesn't name its source ROM, so it "applies" to any of the six. The N64
+    header checksum of the result decides when the patch touched the checksummed area; else the import's game; else
+    it asks."""
+    SEED = 0xF8CA4DDC
+
+    def rom(self, salt):
+        body = bytearray(0x200000)
+        x = salt * 2654435761 & 0xFFFFFFFF
+        for i in range(0x40, len(body), 4):
+            x = (x * 1103515245 + 12345) & 0xFFFFFFFF
+            body[i:i + 4] = x.to_bytes(4, 'big')
+        return self.fix(body)
+
+    def fix(self, body):
+        c1, c2 = ai.n64_checksum(bytes(body), 6102, self.SEED)
+        body[0x10:0x14], body[0x14:0x18] = c1.to_bytes(4, 'big'), c2.to_bytes(4, 'big')
+        return bytes(body)
+
+    def ips_on(self, base, edits, header_from=None):
+        """What an IPS with these edits (and, as the hack's tools write it, the hack's header checksum) makes of base."""
+        out = bytearray(base)
+        for off, val in edits:
+            out[off] = val
+        if header_from is not None:
+            out[0x10:0x18] = header_from[0x10:0x18]
+        return bytes(out)
+
+    def test_checksum_and_cic(self):
+        a = self.rom(1)
+        self.assertEqual(ai.n64_cic_of(a), (6102, self.SEED))
+        broken = bytearray(a)
+        broken[0x3000] ^= 0xFF
+        self.assertIsNone(ai.n64_cic_of(bytes(broken)))
+        self.assertIsNone(ai.n64_checksum(b'x' * 100, 6102, self.SEED))
+
+    def test_the_base_whose_checksum_comes_out_right_wins(self):
+        a, b = self.rom(1), self.rom(2)
+        hack = self.fix(bytearray(self.ips_on(a, [(0x2000, 9)])))          # the hack as its author shipped it
+        on_b = self.ips_on(b, [(0x2000, 9)], header_from=hack)
+        on_a = self.ips_on(a, [(0x2000, 9)], header_from=hack)
+        self.assertEqual(on_a, hack)
+        # b is tried first (as the launcher's sorted list tried No Mercy first): a still wins, with any hint.
+        for hint in (None, 'game_b'):
+            self.assertEqual(ai.baseless_patch_pick([('game_b', 'B', b, on_b), ('game_a', 'A', a, on_a)], hint), (1, None))
+
+    def test_no_proof_uses_the_imports_game_else_asks(self):
+        a, b = self.rom(1), self.rom(2)
+        edits = [(0x180000, 7)]                                         # outside the checksummed area
+        applied = [('game_b', 'B', b, self.ips_on(b, edits)), ('game_a', 'A', a, self.ips_on(a, edits))]
+        i, why = ai.baseless_patch_pick(applied)
+        self.assertIsNone(i)
+        self.assertIn('fits more than one: B, A', why)
+        self.assertEqual(ai.baseless_patch_pick(applied, 'game_a'), (1, None))
+        self.assertEqual(ai.baseless_patch_pick(applied[:1]), (0, None))  # one base: that one
+        # The import's game without its ROM among the bases: say that, not "import it from that game's page".
+        v = [('game_b', 'B', False, True), ('game_a', 'A', False, True)]
+        i, why = ai.baseless_pick_from(v, 'wm2k', available={'game_a', 'game_b'})
+        self.assertIsNone(i)
+        self.assertIn("ROM isn't set up", why)
+        self.assertNotIn('pass game', why)
+
+    def test_real_stock_roms_checksums(self):
+        # The algorithm against the six real dumps' headers (not committed; skipped without the local test library).
+        lib = os.path.join(os.path.expanduser('~'), 'Downloads', 'AKI Test Library', 'stock')
+        if not os.path.isdir(lib):
+            self.skipTest('no local test library')
+        for f in sorted(os.listdir(lib)):
+            with open(os.path.join(lib, f), 'rb') as fh:
+                rom = fh.read()
+            self.assertIsNotNone(ai.n64_cic_of(rom), f)
+
+
 class Containers(Base):
     def zip_bytes(self, files):
         buf = io.BytesIO()
@@ -461,8 +534,12 @@ class Hostile(Base):
                                    PatchError=PatchError)
         hack_is_nm = self.write('in/nm.ips', b'PATCH' + bytes(3) + b'EOF')
         items, _ = self.run_job([hack_is_nm], roms={'wt': wt_path, 'nomercy': self.stock_path}, patchfmt=pf)
-        self.assertEqual(items[0]['status'], 'ready')
-        self.assertEqual(items[0]['base'], 'WCW vs. nWo World Tour')   # the first base: both games match themselves
+        # aki-roadmap#269: it used to take the first base (both games match themselves); now it asks...
+        self.assertEqual(items[0]['status'], 'needs-game')
+        self.assertIn('fits more than one', items[0]['why'])
+        # ...unless the import says which game (the launcher's Mods page does).
+        items, _ = self.run_job([hack_is_nm], roms={'wt': wt_path, 'nomercy': self.stock_path}, patchfmt=pf, game='wt')
+        self.assertEqual((items[0]['status'], items[0]['base']), ('ready', 'WCW vs. nWo World Tour'))
 
         def nm_header(patch, source):   # the result always carries No Mercy's header
             out = bytearray(source)
@@ -486,6 +563,47 @@ class Hostile(Base):
         r = self.one([self.write('in/p.bps', make_patch(REV0, [(0x2000, 1)]))], rom_dirs=[os.path.dirname(rev0)],
                      roms={}, patchfmt=pf)
         self.assertEqual((r['status'], r['base']), ('ready', 'WWF No Mercy (USA) 1.0'))
+
+    def test_bundle_wrapped_in_a_distribution_folder(self):
+        # WWF Legends: Challenge 64's shape (aki-roadmap#265): the Project64 folder sits beside read-me files and a
+        # launcher exe inside the archive's top folder. It is one bundle, not a pile of files (its ROM was built alone).
+        files = {'Ch64 - Public/Project64/Project64.exe': b'x', 'Ch64 - Public/Project64/Config/Project64.cfg': b'x',
+                 'Ch64 - Public/Project64/Config/Project64.cht': b'x', 'Ch64 - Public/Project64/Roms/Hack.z64': fake_rom(salt=9),
+                 'Ch64 - Public/Help Files & Setup/Read Me.txt': b'x', 'Ch64 - Public/Run The Mod.exe': b'x'}
+        r = self.one([self.write('in/ch.zip', self.zip_bytes(files))])
+        self.assertEqual((r['kind'], r['route']), ('pj64-bundle', 'import-pj64'))
+        # Unzipped, the same.
+        for rel, data in files.items():
+            self.write('in2/' + rel, data)
+        r = self.one([os.path.join(self.dir, 'in2', 'Ch64 - Public')])
+        self.assertEqual((r['kind'], r['route'], r['name']), ('pj64-bundle', 'import-pj64', 'Ch64 - Public'))
+        self.assertEqual(ai.bundle_root(list(files), zipped=True), 'Project64/')
+        self.assertEqual(ai.bundle_root([k.split('/', 1)[1] for k in files], zipped=True), 'Project64/')
+        self.assertEqual(ai.bundle_root([k.split('/', 1)[1] for k in files]), 'Project64/')  # files of its own beside it
+        self.assertIsNone(ai.bundle_root(['Wrapped/Project64.exe', 'Wrapped/Save/a.fla']))     # folders only: walked
+
+    def test_a_hack_beside_a_project64_folder_stays_its_own_item(self):
+        # The review case for aki-roadmap#265: a downloads folder with a hack, a patch and a texture pack next to a
+        # Project64 folder is walked (four items), not swallowed as one bundle named after the folder.
+        self.write('in/Downloads/MyHack.z64', fake_rom(salt=7))
+        self.write('in/Downloads/other.bps', b'x')
+        self.write('in/Downloads/Project64/Project64.exe', b'x')
+        self.write('in/Downloads/Project64/Config/Project64.cfg', b'x')
+        for i in range(5):
+            self.write('in/Downloads/Tex/WWF NO MERCY#%08X#0#2_all.png' % i, b'x')
+        items, _ = self.run_job([os.path.join(self.dir, 'in', 'Downloads')])
+        kinds = sorted(i.get('kind') or '' for i in items)
+        self.assertEqual(len(items), 4, items)
+        self.assertIn('pj64-bundle', kinds)
+        self.assertIn('rom', kinds)
+        self.assertIn('patch', kinds)
+        self.assertIsNone(ai.bundle_root(['Hack.z64', 'Project64/Project64.exe'], zipped=True))
+
+    def test_two_wrapped_bundles_are_not_one(self):
+        names = ['A/Project64.exe', 'A/Config/Project64.cfg', 'B/Project64.exe', 'B/Config/Project64.cfg']
+        self.assertIsNone(ai.bundle_root(names, zipped=True))
+        self.assertIsNone(ai.bundle_root(['top/x/y/Project64.exe'], zipped=True))   # two levels down: not a bundle
+        self.assertEqual(ai.bundle_root(['Project64.exe', 'Save/a.fla']), '')
 
     def test_bundle_zipped_under_one_root_folder(self):
         r = self.one([self.write('in/b.zip', self.zip_bytes({'My Mod/Project64.exe': b'x',
