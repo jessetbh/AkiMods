@@ -20,7 +20,10 @@ $root = $PSScriptRoot
 $depot = Split-Path $root -Parent
 $games = Import-PowerShellDataFile "$root\common\games.psd1"
 
-$built = Get-ChildItem "$root\build" -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne 'tests' -and ($Mod -eq 'all' -or $_.Name -eq $Mod) }
+# Only build folders of mods in mods\ (a mod.psd1 there): tests, -ModsDir builds (build\_external, e.g. the starter
+# kit's patch) and leftovers never ship.
+$built = Get-ChildItem "$root\build" -Directory -ErrorAction SilentlyContinue | Where-Object {
+    $_.Name -ne 'tests' -and (Test-Path "$root\mods\$($_.Name)\mod.psd1") -and ($Mod -eq 'all' -or $_.Name -eq $Mod) }
 if (-not $built) { throw "Nothing built for '$Mod'; run .\build.ps1 first" }
 
 # The model packs staging will copy (the same set: packs\<game>\*.akimodel for each game the mod is built for),

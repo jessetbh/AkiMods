@@ -1,0 +1,23 @@
+# The mod's manifest. AkiMods build.ps1 fills the {{...}} values (MOD_ID, GAME_ID, SYMS) and RecompModTool packs
+# mod.elf + this manifest into <id>.nrm.
+
+[manifest]
+id = "{{MOD_ID}}"
+version = "1.0.0"
+display_name = "AKI Starter Kit: code change"
+short_description = "Starter kit sample: the attract demo starts sooner, in the Raw arena."
+description = """
+The code change of the AKI Starter Kit conversion (CC0): on the title screen the attract demo starts after about 5 seconds, and every demo match is in the Raw arena."""
+authors = [ "AKI recomp project" ]
+game_id = "{{GAME_ID}}"
+minimum_recomp_version = "0.1.0"
+dependencies = []
+optional_dependencies = []
+native_libraries = []
+
+[inputs]
+elf_path = "mod.elf"
+mod_filename = "{{MOD_ID}}"
+func_reference_syms_file = "{{SYMS}}"
+data_reference_syms_files = []
+additional_files = []

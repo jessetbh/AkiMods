@@ -1,0 +1,19 @@
+{
+  "_comment": [
+    "Which starter model pack replaces which stock wrestler. kit.py writes these into aki.json (components.models.slots)",
+    "and writes models/roster.json from them. Ids are the game's own wrestler ids (the aki_modelimport mod's 'Log",
+    "wrestler ids' option prints them). Labels are neutral on purpose: the kit names no real wrestlers.",
+    "The first six are the wrestlers of the kit's tag team attract demo in Raw (found with 'Log wrestler ids',",
+    "2026-11-08); the last two are their neighbours in the id table. No costume = every costume of that wrestler."
+  ],
+  "slots": [
+    { "wrestler": "0x0404", "label": "Demo wrestler A", "pack": "q-robot" },
+    { "wrestler": "0x0405", "label": "Demo wrestler B", "pack": "q-warrior" },
+    { "wrestler": "0x0503", "label": "Demo wrestler C", "pack": "q-wizard" },
+    { "wrestler": "0x0504", "label": "Demo wrestler D", "pack": "q-cleric" },
+    { "wrestler": "0x0406", "label": "Demo wrestler E", "pack": "q-monk" },
+    { "wrestler": "0x0407", "label": "Demo wrestler F", "pack": "q-ranger" },
+    { "wrestler": "0x0501", "label": "Demo wrestler G", "pack": "q-rogue" },
+    { "wrestler": "0x0502", "label": "Demo wrestler H", "pack": "q-human" }
+  ]
+}
