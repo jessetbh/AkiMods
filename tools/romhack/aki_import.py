@@ -756,7 +756,85 @@ def classify_rom(rom, order, res, roms, catalog, base_game=None):
     return res.update(status='ready', game=game, route='survey', tier='untested')
 
 
-def classify_patch(data, fmt, res, roms, catalog, patchfmt, keep=False):
+# --- N64 header checksum (aki-roadmap#269) ---------------------------------------------------------------------------
+# A patch format that doesn't record its source ROM (IPS, APS) applies to any ROM. The header's CRC1/CRC2 (0x10..0x17)
+# is the boot code's checksum of 0x1000..0x100FFF: a hack that changed bytes there carries the checksum of its own
+# bytes, so it is valid only on the base it was made from. The seed and the final mix depend on the cartridge's CIC.
+N64_CRC_START, N64_CRC_LEN = 0x1000, 0x100000
+N64_CIC_SEEDS = ((6102, 0xF8CA4DDC), (6105, 0xDF26F436), (6103, 0xA3886759), (6106, 0x1FEA617A))
+BASELESS_PATCHES = ('ips', 'aps')
+
+
+def n64_checksum(rom, cic, seed):
+    """(CRC1, CRC2) the boot code computes for a z64 image (the standard CIC 6101/6102/6103/6105/6106 sum)."""
+    if len(rom) < N64_CRC_START + N64_CRC_LEN:
+        return None
+    m = 0xFFFFFFFF
+    t1 = t2 = t3 = t4 = t5 = t6 = seed
+    words = memoryview(rom)[N64_CRC_START:N64_CRC_START + N64_CRC_LEN].cast('B')
+    data = [int.from_bytes(words[i:i + 4], 'big') for i in range(0, N64_CRC_LEN, 4)]
+    tail = [int.from_bytes(rom[0x750 + k:0x754 + k], 'big') for k in range(0, 0x100, 4)] if cic == 6105 else None
+    for n, d in enumerate(data):
+        if (t6 + d) & m < t6:
+            t4 = (t4 + 1) & m
+        t6 = (t6 + d) & m
+        t3 ^= d
+        sh = d & 0x1F
+        r = ((d << sh) | (d >> (32 - sh))) & m if sh else d
+        t5 = (t5 + r) & m
+        t2 = t2 ^ r if t2 > d else t2 ^ t6 ^ d
+        t1 = (t1 + (tail[n & 0x3F] ^ d if cic == 6105 else t5 ^ d)) & m
+    if cic == 6103:
+        return ((t6 ^ t4) + t3) & m, ((t5 ^ t2) + t1) & m
+    if cic == 6106:
+        return (t6 * t4 + t3) & m, (t5 * t2 + t1) & m
+    return t6 ^ t4 ^ t3, t5 ^ t2 ^ t1
+
+
+def n64_stored_checksum(rom):
+    return int.from_bytes(rom[0x10:0x14], 'big'), int.from_bytes(rom[0x14:0x18], 'big')
+
+
+_CIC_CACHE = {}
+
+
+def n64_cic_of(rom):
+    """The (cic, seed) whose checksum the ROM's header holds, or None (a ROM whose checksum was never fixed)."""
+    key = hashlib.sha1(rom[:N64_CRC_START + N64_CRC_LEN]).digest()
+    if key not in _CIC_CACHE:
+        stored = n64_stored_checksum(rom)
+        _CIC_CACHE[key] = next(((c, s) for c, s in N64_CIC_SEEDS if n64_checksum(rom, c, s) == stored), None)
+    return _CIC_CACHE[key]
+
+
+def baseless_patch_pick(applied, hint=None):
+    """Which base a patch without a source check (IPS, APS) was made for. applied: [(game, name, base, out)].
+    Returns (index, None) or (None, why). A base is proven when the patch changed its checksummed area or header
+    checksum and the result's checksum is valid with the base's CIC (on any other base the sum is wrong). Else the
+    game the import is for (hint) decides, else a single base; more than one possible base asks instead of guessing."""
+    proven = []
+    for i, (game, name, base, out) in enumerate(applied):
+        lo, hi = N64_CRC_START, N64_CRC_START + N64_CRC_LEN
+        if out[0x10:0x18] == base[0x10:0x18] and out[lo:hi] == base[lo:hi]:
+            continue                                   # nothing checksummed changed: no proof either way
+        cic = n64_cic_of(base)
+        if cic and n64_checksum(out, *cic) == n64_stored_checksum(out):
+            proven.append(i)
+    if len(proven) == 1:
+        return proven[0], None
+    pool = proven or list(range(len(applied)))
+    if hint:
+        for i in pool:
+            if applied[i][0] == hint:
+                return i, None
+    if len(pool) == 1:
+        return pool[0], None
+    names = ', '.join(applied[i][1] for i in pool)
+    return None, ("this patch doesn't say which ROM it is for and fits more than one: %s. Import it from that game's "
+                  "Mods page (or pass game)" % names)
+
+
+def classify_patch(data, fmt, res, roms, catalog, patchfmt, keep=False, hint=None):
     sha1 = hashlib.sha1(data).hexdigest().upper()
     res.update(kind='patch', format=fmt, sha1=sha1)
     if fmt in ('ppf', 'rup'):
@@ -767,6 +845,8 @@ def classify_patch(data, fmt, res, roms, catalog, patchfmt, keep=False):
     # Every base is tried: formats without a source check (IPS, APS) "apply" to anything, so the result whose header
     # names the base's own game wins, else the first that applied.
     tried, errors, needs, found = [], [], None, None
+    baseless = fmt in BASELESS_PATCHES
+    applied = []                                       # (game, name, base, out, info) for baseless formats
     for game, name, base in roms.candidates():
         try:
             target, info = patchfmt.apply(data, base)
@@ -783,11 +863,21 @@ def classify_patch(data, fmt, res, roms, catalog, patchfmt, keep=False):
         if out is None:
             errors.append('%s: the result is not an N64 ROM' % name)
             continue
+        if baseless:                                   # aki-roadmap#269: decided below, from every base it fits
+            applied.append((game, name, base, out, info))
+            continue
         out_game, _ = game_for_code(rom_header(out)['code'])
         if found is None or (out_game == game and found[3] != found[0]):
             found = (game, name, (out, info), out_game)
         if out_game == game:
             break
+    if baseless and applied:
+        i, why = baseless_patch_pick([a[:4] for a in applied], hint)
+        if i is None:
+            return res.update(status='needs-game', why=why,
+                              candidates=sorted({a[0] for a in applied if a[0] in GAMES}))
+        game, name, _, out, info = applied[i]
+        found = (game, name, (out, info), game)
     if found is None:
         if errors and not tried:
             return res.update(status='failed', why='; '.join(errors))
@@ -926,7 +1016,7 @@ def classify_file(src, res, roms, catalog, patchfmt, keep=False):
         fmt = patch_format(data, patchfmt)
         if not fmt:
             return res.update(kind='patch', status='failed', why='%s file without a patch header' % ext)
-        return classify_patch(data, fmt, res, roms, catalog, patchfmt, keep)
+        return classify_patch(data, fmt, res, roms, catalog, patchfmt, keep, hint)
     if ext in SAVE_EXTS:
         return res.update(kind='save', save=SAVE_EXTS[ext], status='unsupported',
                           why='a save on its own: import it with the conversion it belongs to')
@@ -936,7 +1026,7 @@ def classify_file(src, res, roms, catalog, patchfmt, keep=False):
     return res.update(kind='unknown', status='unsupported', why='not a ROM, patch, mod, bundle or texture pack')
 
 
-def classify(src, roms, catalog, ledger, patchfmt, taken, keep=False):
+def classify(src, roms, catalog, ledger, patchfmt, taken, keep=False, hint=None):
     res = {'item': src.label}
     try:
         if src.kind_hint == 'folder':
@@ -1910,7 +2000,8 @@ def run_job(job, emit, patchfmt=None):
             counts[n['status']] = counts.get(n['status'], 0) + 1
             emit(dict(n, event='item'))
         for s in sources:
-            res, key = classify(s, roms, catalog, ledger, patchfmt, taken, keep=builder is not None)
+            res, key = classify(s, roms, catalog, ledger, patchfmt, taken, keep=builder is not None,
+                                hint=job.get('game'))
             if key and key in seen:
                 res = dict(item=s.label, status='have-it', key=key, why='same input as another item in this batch')
             if key:
