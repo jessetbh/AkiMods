@@ -16,7 +16,7 @@ Subcommands (python aki_import.py <cmd> -h):
 
 What an item can be (kind): rom, patch, nrm (a patch mod), package (aki-package.json / aki.json), pj64-bundle (a
 Project64 folder with the mod's cheats, save and textures), texture-pack (rt64 / rice / jabo / hts naming), save,
-codes, unknown. Archives (zip read in memory; 7z unpacked once by 7zr) are opened and their contents sorted.
+codes, archive (a RAR: extract it first), unknown. Archives (zip read in memory; 7z unpacked once by 7zr) are opened and their contents sorted.
 
 Result status per item:
   ready        identified; `route` says which converter builds it (survey -> make_patch_mod / derelink, import-pj64,

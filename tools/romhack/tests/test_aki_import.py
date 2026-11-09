@@ -295,6 +295,7 @@ class Containers(Base):
         items, _ = self.run_job([rar, outer])
         rars = [i for i in items if i.get('kind') == 'archive']
         self.assertEqual(len(rars), 2, items)
+        self.assertEqual(len(items), 2, items)          # readme.txt makes no item
         for i in rars:
             self.assertEqual(i['status'], 'unsupported')
             self.assertIn('7-Zip', i['why'])
