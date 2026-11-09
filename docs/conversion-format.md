@@ -179,7 +179,7 @@ A complete example (every component is optional; use only the ones you need):
 | `version` | string | Use `x.y.z`. `aki_import.py` refuses anything else; the launcher only shows this one and checks the `aki-package.json` version. |
 | `authors` | list of strings | At least one name. The tools write `["unknown"]` when none is given. |
 | `game` | string | The game key: `wt`, `revenge`, `wm2k`, `vpw64`, `nomercy`, `vpw2`. (Note: `aki-package.json` uses the runtime id instead.) |
-| `base_rom.sha1` | string, or list of strings | SHA-1 of the ROM (in `.z64` byte order) the conversion runs on. The Mods page and Play as... accept either form; the install path without `aki-package.json` checks only a single string (a list skips the check). With no `sha1`, the launcher treats every ROM as a match. |
+| `base_rom.sha1` | string, or list of strings | SHA-1 of the ROM (in `.z64` byte order) the conversion runs on. The Mods page, Play as... and both install paths accept either form (any one matches). With no `sha1`, the launcher treats every ROM as a match. |
 | `base_rom.revision` | string | The revision tag of that ROM, e.g. `nomercy-rev1`. The ports run `nomercy-rev1`, `wt-rev0`, `revenge-rev0`, `wm2k-rev0`, `vpw64-rev0` and `vpw2-rev0`. |
 | `requires.patch` | object | Written by `import-pj64` only, when a mod's patch needs a ROM the player hasn't given yet: `{format: "ninja2-rup", base, source_md5, note}`. Rerun the import with that ROM to replace it with a real `patch` component. |
 | `source.mode` | string | `byo` ("bring your own" ROM). It is the only mode. The tools add `imported_from` (`project64-bundle`, `rom` or `patch`) to record what they built from. |
@@ -667,5 +667,3 @@ Where these disagree, the code (listed first) wins.
 14. **`format` / `format_version`.** The Mods page and Play as... check neither, and the launch list checks only
     `format`. The launcher can offer a conversion the game then refuses (which stops the game). Only the install
     path without `aki-package.json` checks both.
-15. **`base_rom.sha1` as a list** is skipped by the install path without `aki-package.json` (see
-    [The package around it](#the-package-around-it)).
