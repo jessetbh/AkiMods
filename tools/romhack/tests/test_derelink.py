@@ -1184,6 +1184,84 @@ class EntryPassTests(unittest.TestCase):
         self.assertEqual(A.extras, [])
 
 
+class _ChainMap:
+    """The address map discover_extra_code reads: identity, no data ranges."""
+    def __init__(self, names):
+        self.main, self.ovl, self.priority = [], {n: [] for n in names}, []
+
+    def translate(self, a):
+        return a
+
+    def finish(self):
+        pass
+
+
+def fake_hook_chain(extra_main=(), extra_ovl_b=()):
+    """VPW64 Deluxe v1.1's match-load chain in miniature (jessetbh/aki-roadmap#222), hack layout = stock layout:
+    ovl_b's changed function at 0x80100000 does `j 0x80000480` (a hook in main's text) at 0x80100010; that hook does
+    `j 0x80100024`, into ovl_a's reshaped chunk 0x80100020-0x80100040; that does `j 0x80100054`, into ovl_a's reshaped
+    chunk 0x80100050-0x80100070, which comes back with `j 0x80100018` into ovl_b's function."""
+    import types
+    hack = bytearray(0x5000)
+    secs = [d.Section('main', 0x1000, 0x80000400, 0x80000800, 0x80000900, 0x80000900, [(0x80, 0x10)]),
+            d.Section('ovl_a', 0x2000, 0x80100000, 0x80100100, 0x80100100, 0x80100100, [(0, 0x20), (0x20, 0x20), (0x50, 0x20)], slot=0x80100000),
+            d.Section('ovl_b', 0x3000, 0x80100000, 0x80100100, 0x80100100, 0x80100100, [(0, 0x40)], slot=0x80100000)]
+    by = {s.name: s for s in secs}
+    words = {('main', 0x80000480): [j(0x80100024), NOP] + list(extra_main),
+             ('ovl_a', 0x80100024): [addiu(V0, 0, 1), j(0x80100054), NOP],
+             ('ovl_a', 0x80100054): [addiu(V1, 0, 2), j(0x80100018), NOP],
+             ('ovl_b', 0x80100000): [addiu(29, 29, -0x18), NOP, NOP, NOP, j(0x80000480), NOP,
+                                     addiu(V0, 0, 3), addiu(29, 29, 0x18), jr(RA), NOP] + list(extra_ovl_b)}
+    for (name, v), ws in words.items():
+        put(hack, by[name].rom_of(v), ws)
+    A = types.SimpleNamespace(
+        base=bytes(hack), hack=bytes(hack), secs=secs, byname=by, layout={'extra_code': []},
+        place={s.name: (s.rom, s.text, s.data, s.data, s.bss) for s in secs},
+        reshaped=[('ovl_a', 0x80100020, 0x80100040, 0x80100020, 0x80100040),
+                  ('ovl_a', 0x80100050, 0x80100070, 0x80100050, 0x80100070)],
+        units={'main': [(0x80000480, 0x80000480, 0x10)], 'ovl_b': [(0x80100000, 0x80100000, 0x40)]},
+        map=_ChainMap(['ovl_a', 'ovl_b']))
+    A.hack_rom_of = lambda name, v: by[name].rom_of(v)
+    return A
+
+
+class HookChainTests(unittest.TestCase):
+    def test_main_jump_into_an_overlay_chunk_enters_it(self):
+        # main's hook jumps into ovl_a's reshaped chunk: the target is an entry of the chunk, so its code is traced and
+        # rewritten (before: copied raw, its `j 0x800FC29C` reached the stock function there)
+        extras = d.discover_extra_code(fake_hook_chain())
+        got = {(x.kind, x.hack_vram, x.section) for x in extras if x.kind == 'reshaped'}
+        self.assertIn(('reshaped', 0x80100024, 'ovl_a'), got)
+        self.assertIn(('reshaped', 0x80100054, 'ovl_a'), got)
+
+    def test_return_point_behind_a_main_hook_gets_its_function(self):
+        # the chain back runs through main's text, which reach doesn't follow: the `j` out at 0x80100010 owns
+        # 0x80100018 (before: 'mid-unowned', no entry, and the hook's return ended the main thread)
+        extras = d.discover_extra_code(fake_hook_chain())
+        mids = [(x.hack_vram, x.vram, x.size, x.section, x.problems) for x in extras if x.kind == 'mid']
+        self.assertEqual(mids, [(0x80100018, 0x80100018, 0x28, 'ovl_b', [])])
+
+    def test_main_jump_back_to_another_overlays_hook_site_is_no_entry(self):
+        # ovl_b's function hooks out right before 0x80100024 (`j` at 0x8010001C): main's `j 0x80100024` is that hook
+        # coming back, not an entry of ovl_a's chunk (No Mercy Plus V3 / BTBW: caves return into ovl_b/c/e where ovl_d
+        # has a reshaped chunk; those return points stay mid entries of their own functions)
+        A = fake_hook_chain()
+        hack = bytearray(A.hack)
+        put(hack, A.byname['ovl_b'].rom_of(0x8010001C), [j(0x80000490)])
+        A.hack = bytes(hack)
+        extras = d.discover_extra_code(A)
+        self.assertNotIn(0x80100024, {x.hack_vram for x in extras if x.kind == 'reshaped'})
+
+    def test_a_local_jump_before_the_point_owns_nothing(self):
+        # `j` at t - 8 that stays inside its own function (a branch around code, VPW64 Deluxe's 0x8014267C) is no hook
+        A = fake_hook_chain()
+        hack = bytearray(A.hack)
+        put(hack, A.byname['ovl_b'].rom_of(0x80100010), [j(0x80100030)])
+        A.hack = bytes(hack)
+        mids = [(x.hack_vram, x.section, x.problems) for x in d.discover_extra_code(A) if x.kind == 'mid']
+        self.assertEqual(mids, [(0x80100018, None, [('mid-unowned', 0x80100018)])])
+
+
 class ViHookTests(unittest.TestCase):
     """The hack hooks the VI manager thread the port replaces: the hook has to run from the retrace thread."""
     THREAD, SITE, BACK, CAVE = 0x80000440, 0x80000410, 0x80000450, d.NEW_CODE_VRAM

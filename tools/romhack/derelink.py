@@ -1407,12 +1407,41 @@ def discover_extra_code(A):
                 return r
         return None
 
+    def hook_out_units(t):
+        """The changed functions holding t whose word at t - 8 is a `j` out of them: the hack's `j hook; slot` before
+        the point the hook returns to."""
+        found = set()
+        for name, units in A.units.items():
+            srom, stext = A.place[name][:2]
+            for s, h, z in units:
+                if h + 8 <= t < h + z:
+                    w = word(A.hack, srom + (t - 8 - stext))
+                    if w >> 26 == 2 and not (h <= mips.jump_target(w, t - 8) < h + z):
+                        found.add((name, s, h, z))
+        return found
+
+    def entry_region(a, src=None):
+        """region_of, plus: main's text (always resident) jumping into an overlay's reshaped chunk enters that chunk when
+        only one reshaped chunk holds the address and no other overlay's changed function has a hook going out right
+        before it (then the jump is that hook coming back). Not for the caves: No Mercy Plus V3's and BTBW's caves jump
+        back into ovl_b/ovl_c/ovl_e functions at addresses where ovl_d has a reshaped chunk. VPW64 Deluxe v1.1: main's hook at 0x80010ADC
+        does `j 0x800F2ADC`, into ovl_a's chunk at 0x800F2A40; without the entry the chunk's code there was copied
+        unrewritten, so its `j 0x800FC29C` reached the stock Controller Pak function at that address instead of the
+        hook derelink moved to the new-code area (jessetbh/aki-roadmap#222)."""
+        r = region_of(a, src)
+        if r is None and src == 'main':
+            rs = [r_ for r_ in regions if r_[0] == 'reshaped' and r_[1] <= a < r_[2]]
+            if len(rs) == 1 and not any(name != rs[0][4] for name, s, h, z in hook_out_units(a)):
+                return rs[0]
+        return r
+
     work = []                                   # (address, source section or None)
     for name, (srom, stext, stext_end, _, _) in A.place.items():
         words = [word(A.hack, srom + 4 * i) for i in range((stext_end - stext) // 4)]
         for i, kind, t in mips.jumps(words, stext):
-            if region_of(t, name) and t not in skip:
-                work.append((t, name))
+            r = entry_region(t, name)
+            if r and t not in skip:
+                work.append((t, r[4] if r[0] == 'reshaped' else name))
     # seeds from data: jump-table cases and function pointers the hack pointed at its own code
     # (the stock word at the same place is a code address)
     stock_text = [(st.text, st.data) for st in A.secs]
@@ -1604,6 +1633,15 @@ def discover_extra_code(A):
                     for b in reach(hw, name):
                         if h < b < h + z:
                             owners[b].add((name, s, h, z))
+    def hook_out_owner(t):
+        """The changed function a return point belongs to, when the chain back to it isn't traceable (it runs through
+        hooks in main's text, which reach doesn't follow): the one function hook_out_units finds. VPW64 Deluxe v1.1:
+        ovl_b's 0x801211A0 does `j 0x80010ADC` at 0x80123A7C, and the chain (main 0x80010ADC, ovl_a 0x800F2ADC and
+        0x800FC29C) comes back at 0x80123A84; with no entry there the hook's return ended the main thread
+        (jessetbh/aki-roadmap#222)."""
+        found = hook_out_units(t)
+        return found if len(found) == 1 else None
+
     starts = {h for units in A.units.values() for s, h, z in units}
     stock_starts = {st.text + o for st in A.secs for o, z in st.funcs}
     resh_ranges = [(lo, hi) for k, sec, lo, hi, nv in A.new_blocks if k == 'reshaped']
@@ -1614,7 +1652,7 @@ def discover_extra_code(A):
             continue
         if t not in owners and A.map.translate(t) in stock_starts:
             continue        # a tail call to a function the map knows (e.g. inside resized code)
-        own = owners.get(t)
+        own = owners.get(t) or hook_out_owner(t)
         if not own:
             if any(lo <= t < hi for lo, hi in resh_ranges):
                 continue    # into a reshaped chunk from code that can't say which overlay: no entry
