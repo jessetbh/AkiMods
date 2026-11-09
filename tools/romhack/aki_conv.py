@@ -17,6 +17,7 @@ import glob
 import hashlib
 import importlib.util
 import io
+import itertools
 import json
 import os
 import re
@@ -206,6 +207,9 @@ def translate_codes(text, ranges, overlays=None, guard=None):
     the same result, and each version is emitted behind a 16-bit conditional on a halfword that tells its group's
     code is loaded (D1 = equal; with two groups and one guard the other version gets D3 = not equal). A conditional
     governs the whole next unit in the port's engine, so the guard stacks with the unit's own conditionals.
+    A unit whose addresses lie in two overlays that are loaded together (a condition on No Mercy's ovl_b/c/d and a
+    write into ovl_a on the menus) is translated per set of overlays loaded together instead (coresident_versions),
+    each version behind one guard per overlay it needs.
     Returns (text, translated codes, dropped lines); the split counts are in translate_codes.last."""
     out, done, bad = [], 0, []
     split = 0
@@ -216,10 +220,12 @@ def translate_codes(text, ranges, overlays=None, guard=None):
             out += new_lines
             done += count(unit)
             continue
-        versions = guarded_versions(unit, overlays, guard) if overlays and guard else []
+        versions = []
+        if overlays and guard:
+            versions = guarded_versions(unit, overlays, guard) or coresident_versions(unit, overlays, guard)
         if versions:
-            for g, lines in versions:
-                out += [g] + lines
+            for gs, lines in versions:
+                out += gs + lines
             done += count(unit)
             split += 1
             continue
@@ -230,7 +236,7 @@ def translate_codes(text, ranges, overlays=None, guard=None):
 
 
 def guarded_versions(unit, overlays, guard):
-    """[(guard line, translated lines)] for a unit only overlay-specific maps can place, or [] when they can't (some
+    """[([guard line], translated lines)] for a unit only overlay-specific maps can place, or [] when they can't (some
     group has no guard, or no overlay maps it)."""
     groups = {}
     for name in sorted(overlays):
@@ -253,7 +259,71 @@ def guarded_versions(unit, overlays, guard):
             out.append(('D3%06X %04X' % (g[0] & 0xFFFFFF, g[1]), list(missing[0][0]), g))
         else:
             return []
-    return [(gl, lines) for gl, lines, _ in out]
+    return [([gl], lines) for gl, lines, _ in out]
+
+
+def coresident_sets(names, coresident):
+    """The largest sets of overlays that can be loaded at the same time (each pair coresident(a, b)), sorted."""
+    names = sorted(names)
+    sets = []
+    for mask in range(1, 1 << len(names)):
+        s = [n for i, n in enumerate(names) if mask >> i & 1]
+        if all(coresident(a, b) for i, a in enumerate(s) for b in s[i + 1:]):
+            sets.append(frozenset(s))
+    return sorted((s for s in sets if not any(s < t for t in sets)), key=sorted)
+
+
+def coresident_versions(unit, overlays, guard):
+    """[([guard lines], translated lines)] for a unit whose addresses lie in overlays loaded at the same time, or []
+    (aki-roadmap#246). guarded_versions translates a unit with one overlay at a time, so a unit with a condition in one
+    overlay and its write in another (Legends' Exhibition Match Types text: a condition on ovl_b/c/d's RAM, the write
+    on ovl_a's "Single Match" string; both are loaded on the menus) has no single-overlay translation and was dropped.
+    Here each set of overlays that can be loaded together (from guard.coresident, overlay_guard's layout) translates
+    the unit, every line through the one overlay of the set that places it. Sets that give the same lines form a
+    group, and a version is emitted for each smallest set of overlays X whose loaded sets are all in that group,
+    behind one D1 guard per overlay in X saying that overlay is loaded (guard((x,), the overlays sharing its RAM))."""
+    coresident = getattr(guard, 'coresident', None)
+    if coresident is None:
+        return []
+    names = sorted(overlays)
+    sets = coresident_sets(names, coresident)
+    if all(len(s) < 2 for s in sets):
+        return []
+    result = {}
+    for s in sets:
+        lines = []
+        for line in unit:
+            got = {tuple(t) for t in (translate_unit([line], overlays[n]) for n in sorted(s)) if t is not None}
+            if len(got) != 1:
+                lines = None  # nothing in this set places the line, or two of its overlays disagree
+                break
+            lines += list(got.pop())
+        if lines is not None:
+            result[s] = tuple(lines)
+    if not result:
+        return []
+    out = []
+    for lines in sorted(set(result.values()), key=lambda ls: min(sorted(s) for s in result if result[s] == ls)):
+        group = [s for s in sets if result.get(s) == lines]
+        covered = set()
+        for s in group:
+            if s in covered:
+                continue
+            for k in range(1, len(s) + 1):
+                xs = [frozenset(x) for x in itertools.combinations(sorted(s), k)
+                      if all(result.get(t) == lines for t in sets if frozenset(x) <= t)]
+                if xs:
+                    break
+            x = xs[0]
+            covered |= {t for t in sets if x <= t}
+            gs = []
+            for n in sorted(x):
+                g = guard((n,), tuple(o for o in names if o != n and not coresident(n, o)))
+                if g is None:
+                    return []
+                gs.append('D1%06X %04X' % (g[0] & 0xFFFFFF, g[1]))
+            out.append((gs, list(lines)))
+    return out
 
 
 def overlay_ranges(m):
@@ -267,7 +337,8 @@ def overlay_guard(layout, port_rom, patched_rom=None):
     names it returns (RAM address, halfword) at the first even address the `in` overlays all cover with the same
     nonzero halfword, which every `out` overlay covering it differs from. Overlay code is DMA'd into RDRAM as it is in
     the ROM, so the halfword is there when that overlay is loaded. With `patched_rom` (the conversion's own patch
-    applied, same layout) the halfword must also be unchanged by the patch."""
+    applied, same layout) the halfword must also be unchanged by the patch. guard.coresident(a, b) says whether two
+    overlays can be loaded at the same time (their RAM doesn't overlap), for coresident_versions."""
     secs = {s['name']: s for s in layout['sections'] if s.get('slot') is not None}
     cache = {}
 
@@ -307,6 +378,14 @@ def overlay_guard(layout, port_rom, patched_rom=None):
         if key not in cache:
             cache[key] = find(list(ins), list(outs))
         return cache[key]
+
+    def coresident(a, b):
+        # Two overlays can be loaded at the same time when their RAM (text to the end of bss) doesn't overlap.
+        if a not in secs or b not in secs:
+            return False
+        sa, sb = secs[a], secs[b]
+        return sa.get('end', sa['data']) <= sb['text'] or sb.get('end', sb['data']) <= sa['text']
+    guard.coresident = coresident
     return guard
 
 

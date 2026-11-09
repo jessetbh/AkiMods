@@ -169,6 +169,62 @@ class OverlayGuard(unittest.TestCase):
         self.assertIsNone(guard(('ovl_x',), ('ovl_y',)))
 
 
+class CoresidentOverlays(unittest.TestCase):
+    """aki-roadmap#246: slot A holds ovl_a or ovl_e, slot B ovl_b or ovl_c, and ovl_e is big enough to cover both slots
+    (No Mercy's layout). ovl_a is loaded with ovl_b or ovl_c (the menus), so a unit can have its condition in slot B and
+    its write in slot A: no single overlay places it (synthetic data)."""
+    FILL = {'ovl_a': 0x0C030000, 'ovl_e': 0x3C010000, 'ovl_b': 0x27BD0000, 'ovl_c': 0x24020000}
+
+    def setUp(self):
+        secs = [('ovl_a', 0x1000, 0x80100000, 0x80100800, 0x80101000, 0x80100000),
+                ('ovl_e', 0x2000, 0x80100000, 0x80102800, 0x80103000, 0x80100000),
+                ('ovl_b', 0x5000, 0x80102000, 0x80102800, 0x80103000, 0x80102000),
+                ('ovl_c', 0x6000, 0x80102000, 0x80102800, 0x80103000, 0x80102000)]
+        rom = bytearray(0x7000)
+        self.sections = [{'name': 'main', 'rom': 0x100, 'text': 0x80000400, 'data': 0x80000800, 'slot': None}]
+        for name, off, text, data, end, slot in secs:
+            for i in range(0, data - text, 4):
+                rom[off + i:off + i + 4] = (self.FILL[name] | i & 0xFFFF).to_bytes(4, 'big')
+            self.sections.append({'name': name, 'rom': off, 'text': text, 'data': data, 'end': end, 'slot': slot})
+        self.rom = bytes(rom)
+        self.overlays = {'ovl_a': [[0x80100000, 0x80101000, -0x30, 'data']],
+                         'ovl_e': [[0x80100000, 0x80103000, -0x10, 'data']],
+                         'ovl_b': [[0x80102000, 0x80103000, -0x20, 'data']],
+                         'ovl_c': [[0x80102000, 0x80103000, -0x40, 'data']]}
+
+    def translate(self, names, text):
+        m = {'main': [[0x80000400, 0x80080000, 0, 'data']], 'overlays': {n: self.overlays[n] for n in names}}
+        layout = {'sections': [s for s in self.sections if s['slot'] is None or s['name'] in names]}
+        guard = aki_conv.overlay_guard(layout, self.rom)
+        out, done, bad = aki_conv.translate_codes(text, aki_conv.map_from_derelink(m), aki_conv.overlay_ranges(m), guard)
+        return [l for l in out.splitlines() if l], done, bad
+
+    def test_a_condition_in_one_overlay_and_a_write_in_another(self):
+        # The Legends menu text: a condition on ovl_b's RAM, the write on ovl_a's string. ovl_a + ovl_b is one version
+        # (behind "ovl_a is loaded"), ovl_e alone the other.
+        lines, done, bad = self.translate(('ovl_a', 'ovl_e', 'ovl_b'), 'D0102100 0001\n81100104 1234\n')
+        self.assertEqual((done, bad), (2, []))
+        self.assertEqual(lines, ['D1100000 0C03', 'D01020E0 0001', '811000D4 1234',
+                                 'D1100000 3C01', 'D01020F0 0001', '811000F4 1234'])
+
+    def test_overlays_sharing_a_slot_that_disagree_get_their_own_guards(self):
+        # ovl_b and ovl_c place the condition differently: each version says which of them is loaded.
+        lines, done, bad = self.translate(('ovl_a', 'ovl_e', 'ovl_b', 'ovl_c'), 'D0102100 0001\n81100104 1234\n')
+        self.assertEqual(bad, [])
+        self.assertEqual(lines, ['D1102000 27BD', 'D01020E0 0001', '811000D4 1234',
+                                 'D1102000 2402', 'D01020C0 0001', '811000D4 1234',
+                                 'D1100000 3C01', 'D01020F0 0001', '811000F4 1234'])
+
+    def test_single_overlay_units_keep_their_one_guard(self):
+        lines, done, bad = self.translate(('ovl_a', 'ovl_e', 'ovl_b'), '81100104 1234\n')
+        self.assertEqual(lines, ['D1100000 0C03', '811000D4 1234', 'D1100000 3C01', '811000F4 1234'])
+
+    def test_coresident_sets(self):
+        co = aki_conv.overlay_guard({'sections': self.sections}, self.rom).coresident
+        self.assertEqual(aki_conv.coresident_sets(['ovl_a', 'ovl_b', 'ovl_c', 'ovl_e'], co),
+                         [frozenset({'ovl_a', 'ovl_b'}), frozenset({'ovl_a', 'ovl_c'}), frozenset({'ovl_e'})])
+
+
 class BundleParts(unittest.TestCase):
     def test_byte_orders(self):
         z = bytes([0x80, 0x37, 0x12, 0x40, 1, 2, 3, 4])
