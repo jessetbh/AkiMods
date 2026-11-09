@@ -416,7 +416,11 @@ class Hostile(Base):
         # A stand-in 7zr: copies the "archive"'s payload (after the 7z magic) to <out>/inner.z64.
         script = self.write('tools/fake7z.py', (
             'import sys, os\n'
-            'out = [a[2:] for a in sys.argv if a.startswith("-o")][0]\n'
+            'if sys.argv[1] == "l":\n'   # unpack.py lists first: one entry, with its real size
+            '    n = os.path.getsize(sys.argv[-1]) - 6\n'
+            '    print("--\\n----------\\nPath = inner.z64\\nSize = %d\\nFolder = -\\n" % n)\n'
+            '    sys.exit(0)\n'
+            'out =[a[2:] for a in sys.argv if a.startswith("-o")][0]\n'
             'data = open(sys.argv[-1], "rb").read()[6:]\n'
             'open(os.path.join(out, "inner.z64"), "wb").write(data)\n').encode())
         exe = self.write('tools/fake7zr.cmd', ('@"%s" -I "%s" %%*\r\n' % (sys.executable, script)).encode())
@@ -428,6 +432,10 @@ class Hostile(Base):
         self.assertTrue(any(f.startswith('7z-') for f in os.listdir(work)))
         items, _ = self.run_job([arc], sevenzip=exe)   # no --work: the temp unpack folder is removed
         self.assertEqual(items[0]['status'], 'ready')
+        # Through unpack.py: the size cap holds for 7z archives too.
+        items, _ = self.run_job([arc], sevenzip=exe, work=os.path.join(self.dir, 'work2'), max_unpack=1024)
+        self.assertEqual((items[0]['status'], items[0]['item']), ('unsupported', arc), items)
+        self.assertIn('more than', items[0]['why'])
 
 
 class Worker(Base):

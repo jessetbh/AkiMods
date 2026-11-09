@@ -136,3 +136,39 @@ repos) at a depot.
 
 Stdlib only. It never writes ROM bytes; tests use synthetic images
 (`python -m unittest discover -s tools/romhack/tests`).
+
+## Python on demand (pyfetch.ps1, aki-roadmap#228)
+
+Players usually have no Python, so the launcher runs `pyfetch.ps1` the first time an import needs
+it. It is PowerShell because it must run before there is a Python, and Windows PowerShell 5.1
+ships with every Windows 10 and 11:
+
+```powershell
+powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File tools\romhack\pyfetch.ps1
+```
+
+It downloads python.org's embeddable zip for Python 3.12.10 amd64 (the last 3.12 release with
+Windows binaries), checks it against the SHA-256 pinned in the script, unpacks it to a temp folder
+and renames that to `%LOCALAPPDATA%\AkiLauncher\python\3.12.10` only once it is complete and
+`python.exe` has answered with its version. Later runs reuse it without touching the network. It
+prints one JSON line: `{"ok":true,"python":"...\python.exe","version":"3.12.10","fetched":true}`
+or `{"ok":false,"error":"<kind>","message":"<player-readable>"}` with kind `no-network`,
+`download-failed`, `bad-hash`, `unpack-failed`, `not-writable`, `not-installed` (with
+`-NoDownload`, which only checks) or `failed`. Exit code 0 / 1.
+
+The embeddable Python ignores `PYTHONPATH` and the script's folder (its `._pth` file), which is
+fine for `aki_import.py`: it loads `patchfmt.py` and `unpack.py` by path.
+
+## Safe archive extraction (unpack.py, aki-roadmap#228)
+
+`unpack.extract(archive, dest, max_total=4 GB, sevenzip=None)` unpacks a zip (zipfile) or a 7z
+(7-Zip's `7z.exe`, `7za.exe` or `7zr.exe` from `sevenzip`, PATH or the 7-Zip install folder;
+7-Zip isn't bundled, and without it the error says to install it). Every name is checked before
+anything is written: absolute paths, `..`, drive letters, `:` and Windows device names are
+refused. The total is capped on the bytes actually written (zip: counted while inflating; 7z: the
+folder is watched while 7-Zip runs and checked at the end), so an archive that lies about its
+sizes is stopped part way. It unpacks into `dest.part-*` beside `dest` and renames it only on
+success; on any failure nothing is left. Errors are `UnpackError` with `kind` `bad-path`,
+`too-big`, `need-7zip`, `damaged`, `exists` or `not-writable`. `aki_import.py` uses it for 7z
+archives when it is there (job key `max_unpack` sets the cap). Command line:
+`python -I unpack.py ARCHIVE DEST [--max-mb N]` prints one JSON line.
