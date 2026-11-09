@@ -539,9 +539,10 @@ def work_dir(job):
 def expand_7z(path, job, sources, notes):
     exe = find_7zr(job)
     if not exe:
-        notes.append(dict(item=path, status='unsupported',
-                          why='a 7z archive, and 7-Zip is needed to open it: install 7-Zip (free, from 7-zip.org) and '
-                              'import it again, or extract it yourself and import the folder'))
+        why = ('--sevenzip %s not found' % job['sevenzip'] if job.get('sevenzip') else
+               'a 7z archive, and 7-Zip is needed to open it: install 7-Zip (free, from 7-zip.org) and import it again, '
+               'or extract it yourself and import the folder')
+        notes.append(dict(item=path, status='unsupported', why=why))
         return
     # Keyed by content, so a changed archive is unpacked again; a .complete marker, so a broken unpack isn't reused.
     out = os.path.join(work_dir(job), '7z-%s' % sha1_file(path)[:16])
