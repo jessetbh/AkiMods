@@ -302,10 +302,12 @@
                 '-DQM_VENUE_ADDR=0x803191DCu',       # u8 venue (also +1, +2), fixed address
                 '-DQM_VENUE_OFFSETS=0,1,2',
                 # Screens as World Tour: 0 title, 1 mode select (1 = Exhibition), 9 match type, 10 corners,
-                # 23/24 wrestlers, 17 rules, 22 handicap. Two Controller Pak / Rumble Pak prompts before the title
-                # take A (screen 0, so Start works there too). After the match: 25 results (A), 26 post-match menu
+                # 23/24 wrestlers, 17 rules, 22 handicap. Screen 0 presses A+Start: Start leaves the title, and the
+                # Controller Pak prompts that follow it are on screen 0 too. The 'create a new note?' prompt
+                # (func_800BA5B0, shown since the pak got its own backing, aki-roadmap#215) takes only A, with its
+                # cursor 0x800E61B0 left on 1 = No, so no note is written (aki-roadmap#254). After the match: 25 results (A), 26 post-match menu
                 # (+5 cursor: 9 End, 10 Rematch, ...; Rematch goes back through 22 into the same match setup).
-                '-DQM_MENU_STEPS={0,-1,0x1000},{1,1,0x8000},{9,-3,0x8000},{23,-1,0x8000},{24,-1,0x8000},{17,-1,0x8000},{22,-1,0x8000},{25,-1,0x8000},{26,10,0x8000}'
+                '-DQM_MENU_STEPS={0,-1,0x9000},{1,1,0x8000},{9,-3,0x8000},{23,-1,0x8000},{24,-1,0x8000},{17,-1,0x8000},{22,-1,0x8000},{25,-1,0x8000},{26,10,0x8000}'
             )
             Text = @{
                 SHORT_DESCRIPTION   = 'Developer tool: boot straight into a CPU-vs-CPU exhibition match in a chosen arena.'
