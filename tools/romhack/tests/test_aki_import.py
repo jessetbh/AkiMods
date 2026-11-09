@@ -471,8 +471,12 @@ class Hostile(Base):
                                    PatchError=PatchError)
         hack_is_nm = self.write('in/nm.ips', b'PATCH' + bytes(3) + b'EOF')
         items, _ = self.run_job([hack_is_nm], roms={'wt': wt_path, 'nomercy': self.stock_path}, patchfmt=pf)
-        self.assertEqual(items[0]['status'], 'ready')
-        self.assertEqual(items[0]['base'], 'WCW vs. nWo World Tour')   # the first base: both games match themselves
+        # aki-roadmap#269: it used to take the first base (both games match themselves); now it asks...
+        self.assertEqual(items[0]['status'], 'needs-game')
+        self.assertIn('fits more than one', items[0]['why'])
+        # ...unless the import says which game (the launcher's Mods page does).
+        items, _ = self.run_job([hack_is_nm], roms={'wt': wt_path, 'nomercy': self.stock_path}, patchfmt=pf, game='wt')
+        self.assertEqual((items[0]['status'], items[0]['base']), ('ready', 'WCW vs. nWo World Tour'))
 
         def nm_header(patch, source):   # the result always carries No Mercy's header
             out = bytearray(source)

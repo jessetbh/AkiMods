@@ -823,6 +823,11 @@ def baseless_patch_pick(applied, hint=None):
     if len(proven) == 1:
         return proven[0], None
     pool = proven or list(range(len(applied)))
+    # A patch that writes a cartridge code names its game: where the result's header names the base's own game while
+    # on another base it names a different one, those bases are the patch's (the header test the importer always used).
+    own = [i for i in pool if game_for_code(rom_header(applied[i][3])['code'])[0] == applied[i][0]]
+    if 0 < len(own) < len(pool):
+        pool = own
     if hint:
         for i in pool:
             if applied[i][0] == hint:
@@ -988,7 +993,7 @@ def part_of(name):
     return None
 
 
-def classify_file(src, res, roms, catalog, patchfmt, keep=False):
+def classify_file(src, res, roms, catalog, patchfmt, keep=False, hint=None):
     """By the first bytes and the extension; the whole file is read only for ROMs, patches and mods."""
     head = src.head
     ext = os.path.splitext(src.label.lower())[1]
@@ -1033,7 +1038,7 @@ def classify(src, roms, catalog, ledger, patchfmt, taken, keep=False, hint=None)
             key = folder_key(src)
             classify_folder(src, res, roms)
         else:
-            classify_file(src, res, roms, catalog, patchfmt, keep)
+            classify_file(src, res, roms, catalog, patchfmt, keep, hint)
             key = res.get('sha1')   # ROMs (.z64 order), patches, mods; loose saves and unknown files have none
     except TooBig as e:
         return dict(item=src.label, status='unsupported', why=str(e)), None
