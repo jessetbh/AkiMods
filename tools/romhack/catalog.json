@@ -581,15 +581,23 @@
   },
   {
    "id": "vpw64dx",
-   "name": "Virtual Pro Wrestling 64 Deluxe",
+   "name": "Virtual Pro Wrestling 64 Deluxe v1.1",
    "game": "vpw2",
-   "version": "1.0.0",
+   "version": "1.1.0",
    "tier": "experimental",
    "converter": "derelink",
-   "note": "Matches and entrances are unchecked against an emulator.",
+   "note": "v1.1. A new save's roster matches the original hack; singles and title matches play. Full matches are unchecked against an emulator.",
+   "inputs": {
+    "sha1": [
+     "857E51E0F7A81BF9E477269E6D0A7A322B14FF95"
+    ]
+   },
    "outputs": {
     "sha1": [
-     "E68672CBF4D2853064F885D173CF37BBBCD696AE"
+     "66FAED1241D4D0F7FF1BADBDF2DD6D1925BFC96E"
+    ],
+    "codes_sha1": [
+     "2905E8C60101B484598579D8B6EBF50300E17A0E"
     ]
    }
   },
