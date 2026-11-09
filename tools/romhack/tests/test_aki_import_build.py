@@ -254,6 +254,26 @@ class HackRoutes(BuildBase):
                          ('known-hack', sha1, ['aki-roadmap#1']))
         self.assertEqual(m['short_description'], 'Verified Mind the gap.')   # no tier texts in this catalog
 
+    def test_derelink_recipe_overrides_different_base(self):
+        # 9 Underground: World Tour rev 1 code on the rev 0 port. The survey calls it another release, but the catalog
+        # recipe for this exact ROM says derelink, as the tested pack was built; without the recipe it stays refused.
+        survey = types.SimpleNamespace(Stock=lambda **kw: None, survey_rom=lambda name, rom, stock: {
+            'tier': 'different-base', 'game': None, 'reasons': ['only 35% of the port functions found']})
+        hack = bytearray(STOCK)
+        hack[0x2000] ^= 5
+        sha1 = hashlib.sha1(bytes(hack)).hexdigest().upper()
+        entry = {'id': 'u9', 'name': 'U9', 'game': 'nomercy', 'tier': 'experimental', 'converter': 'derelink',
+                 'inputs': {'sha1': [sha1]}, 'outputs': {'sha1': [sha1]}}
+        fakes = {'aki_hack': survey, 'derelink': fake_derelink()}
+        r = self.build_one([self.write('in/u9.z64', bytes(hack))], fakes=fakes, catalog=self.catalog([entry]))
+        self.assertEqual((r['status'], r['converter'], r['survey_tier'], r['aki_tier']),
+                         ('converted', 'derelink', 'different-base', 'experimental'))
+        for other in ({'converter': 'make_patch_mod'}, {'inputs': {}}):
+            r = self.build_one([self.write('in/u9.z64', bytes(hack))], fakes=fakes,
+                               catalog=self.catalog([dict(entry, **other)]))
+            self.assertEqual(r['status'], 'failed', other)
+            self.assertIn('different-base', r['why'])
+
     def test_known_input_built_differently_is_untested_with_a_note(self):
         hack = bytearray(STOCK)
         hack[0x2000] ^= 3

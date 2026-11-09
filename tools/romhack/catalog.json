@@ -169,6 +169,11 @@
     "The attract demo can pick a different venue and teams than the original"
    ],
    "note": "Model packs do not load.",
+   "inputs": {
+    "sha1": [
+     "F0AB0CD10A967134F28D4A0B0197F9B1FD1579A4"
+    ]
+   },
    "outputs": {
     "sha1": [
      "4D6C499D20DFCF54B593E71C05546075678278F8"
@@ -190,6 +195,11 @@
     "The attract demo can pick a different venue and teams than the original"
    ],
    "note": "Model packs do not load.",
+   "inputs": {
+    "sha1": [
+     "F6885CC298A78AEDB2389B1AD60E069F1BB13E3D"
+    ]
+   },
    "outputs": {
     "sha1": [
      "64264DC78F0CA9693F98526E0FB043263A64CF56"
@@ -346,6 +356,11 @@
    "version": "1.0.0",
    "tier": "verified",
    "converter": "derelink",
+   "inputs": {
+    "sha1": [
+     "0B84155F0696727B34F4E616DEF0D7B2E44E7AD1"
+    ]
+   },
    "outputs": {
     "sha1": [
      "AE739389A41185BD06051A8127AF8AAF205AC4D8"
@@ -380,6 +395,11 @@
     "Entrance pyro never varies"
    ],
    "note": "Entrance pyro never varies.",
+   "inputs": {
+    "sha1": [
+     "32EB5EB1F13AC7F2A97FD0EF8D0E1E2506C8D83A"
+    ]
+   },
    "outputs": {
     "sha1": [
      "31EDDB60B81220639132A8605774E172E8C17758"
@@ -470,6 +490,11 @@
    "version": "1.0.0",
    "tier": "verified",
    "converter": "derelink",
+   "inputs": {
+    "sha1": [
+     "B84585D0CFE3F1313D049DC67A484C413D2D8A03"
+    ]
+   },
    "outputs": {
     "sha1": [
      "C1EF1AEF8D9840536F4B28A4718D0FB6F7338C49"
@@ -678,6 +703,11 @@
     "Can crash about 10 seconds in"
    ],
    "note": "Plays, but the hack's own roster and arenas are unchecked.",
+   "inputs": {
+    "sha1": [
+     "4936CD0718D4DF176190EF377DC397483BAEA076"
+    ]
+   },
    "outputs": {
     "sha1": [
      "869F65C454EA6CFE16338E03FC78FD2C4F653A54"
