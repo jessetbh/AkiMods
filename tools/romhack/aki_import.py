@@ -946,6 +946,16 @@ def revision_label(tag):
     return 'Rev %s' % tag.rsplit('-rev', 1)[1] if '-rev' in tag else tag
 
 
+VERSION_SUFFIX = re.compile(r'[\s._-]+[\(\[]?\s*v(?:er(?:sion)?)?\.?\s*\d+(?:\.\d+)*[a-z]?\s*[\)\]]?\s*$'
+                            r'|[\s_-]+[\(\[]?\d+(?:\.\d+)+[a-z]?[\)\]]?\s*$', re.I)
+
+
+def without_version(name):
+    """'Showdown 64 V6.0.4' -> 'Showdown 64', 'AEW 64 (v1.2)' -> 'AEW 64', 'Mod 1.0.5' -> 'Mod'. A bare number
+    stays ('TNA No Mercy 2015', 'Showdown 64')."""
+    return VERSION_SUFFIX.sub('', name).strip()
+
+
 class BuildError(Exception):
     """One item couldn't be built (the message says why); the batch goes on."""
 
@@ -1467,9 +1477,9 @@ class Builder:
         raise NeedsGame('which game this Project64 bundle is for (%s; pass "game")' % (
             'its cheats name ' + ', '.join(sorted(found)) if found else 'no cheats or ROM in it name a game'))
 
-    def bundle_code_tag(self, folder, conv, game, name, include):
-        """The revision tag of the cheat section import-pj64 will take (the first, in its order, with the mod's
-        cheats: e.g. 'nomercy-rev0'), or None. A bundle's other sections (a full Project64.cht) don't count."""
+    def game_cheat_sections(self, folder, conv, game):
+        """[(revision tag, section)]: the bundle's cheat sections for `game`, in import-pj64's order."""
+        out = []
         for d, _, fs in os.walk(folder):
             for f in fs:
                 p = os.path.join(d, f)
@@ -1481,9 +1491,36 @@ class Builder:
                                 tag = PORT_TAGS[game]
                             if tag is None or conv.GAME_OF_TAG.get(tag, tag.split('-rev')[0]) != game:
                                 continue
-                            if conv.mod_cheats(sec, name, include):
-                                return tag
+                            out.append((tag, sec))
+        return out
+
+    def bundle_code_tag(self, folder, conv, game, name, include):
+        """The revision tag of the cheat section import-pj64 will take (the first, in its order, with the mod's
+        cheats: e.g. 'nomercy-rev0'), or None. A bundle's other sections (a full Project64.cht) don't count."""
+        for tag, sec in self.game_cheat_sections(folder, conv, game):
+            if conv.mod_cheats(sec, name, include):
+                return tag
         return None
+
+    def bundle_cheats(self, folder, conv, game, name, include):
+        """(cheat folder name, revision tag, None) for the mod's own cheats, or (name, None, why none). The cheats sit
+        in a top-level folder named like the mod; a bundle folder often carries a version the cheat folder doesn't
+        ("Showdown 64 V6.0.4" -> "Showdown 64\\..."), so the name without it is tried next."""
+        tries = [name]
+        bare = without_version(name)
+        if include is None and bare and bare != name:
+            tries.append(bare)
+        for n in tries:
+            tag = self.bundle_code_tag(folder, conv, game, n, include)
+            if tag:
+                return n, tag, None
+        tops = sorted({c['name'].split(conv.BS)[0] for _, sec in self.game_cheat_sections(folder, conv, game)
+                       for c in sec['cheats']})
+        if not tops:
+            return name, None, None
+        shown = ', '.join(tops[:6]) + (', ...' if len(tops) > 6 else '')
+        return name, None, ('no cheat folder is named like the mod (%s); its folders: %s' %
+                            (' or '.join(repr(n) for n in tries) if include is None else 'include %r' % include, shown))
 
     def bundle_dump(self, folder, game, dump):
         """A stock dump named `dump` inside the bundle (Showdown 64 ships its unpatched cartridge), .z64 bytes, or None."""
@@ -1598,8 +1635,8 @@ class Builder:
             shutil.rmtree(out, ignore_errors=True)
             os.makedirs(out)
             # Codes for another revision than the port's (No Mercy Rev 0) are translated through that revision's map.
-            cheat_name = entry.get('cheat_name') or name
-            tag = self.bundle_code_tag(folder, conv, game, cheat_name, entry.get('include'))
+            cheat_name, tag, cheats_why = self.bundle_cheats(folder, conv, game, entry.get('cheat_name') or name,
+                                                             entry.get('include'))
             map_path = map_from = map_why = None
             map_range = []
             if tag and tag != PORT_TAGS[game]:
@@ -1626,11 +1663,13 @@ class Builder:
                 if 'pass --port-rom' in last:
                     raise NeedsRom('the %s ROM the port uses (the bundle has a ROM or patch to build)' %
                                    GAMES[game]['title'])
-                raise BuildError('import-pj64: %s' % last)
+                raise BuildError('import-pj64: %s%s' % (last, ' (%s)' % cheats_why if cheats_why else ''))
             at = log.rfind('\n{\n')
             report = json.loads(log[at + 1:] if at >= 0 else log[log.index('{'):]) if '{' in log else {}
             res.update(game=game, converter='import-pj64', parts=sorted(report.get('parts', {})))
             self.codes_outcome(res, game, report.get('parts', {}), map_from, map_why)
+            if cheats_why and 'codes' not in res:
+                res['codes'] = 'no codes taken: %s' % cheats_why
             self.repack_pj64(res, game, cid, name, out, report)
         finally:
             if unpacked:
@@ -1638,12 +1677,13 @@ class Builder:
             shutil.rmtree(self.tmp('pj64-%s' % package_id(res.get('id') or 'x')), ignore_errors=True)
 
     def repack_pj64(self, res, game, cid, name, out, report):
-        """import-pj64's Thunderstore-shaped zips -> #154 packages: a conversion (aki.json + its files under
-        conversion/) and, when the bundle had textures, a texture-pack package the conversion requires."""
+        """import-pj64's Thunderstore-shaped zips -> one #154 conversion package (aki.json + its files under
+        conversion/). The bundle's textures go inside it, at conversion/textures/ (components.textures.dir): the game
+        reads a conversion's textures from its own folder or conversions\\_packages\\, while a separate texture-pack
+        package installs to mods\\<id>.rtz, where the conversion never finds it (aki-roadmap#228)."""
         conv_zip = report.get('package')
         if not conv_zip or not os.path.isfile(conv_zip):
             raise BuildError('import-pj64 wrote no package')
-        requires = None
         tex_zips = [os.path.join(out, f) for f in os.listdir(out) if f.endswith('.zip') and
                     os.path.join(out, f) != conv_zip]
         with zipfile.ZipFile(conv_zip) as z:
@@ -1653,23 +1693,6 @@ class Builder:
                 if info.is_dir() or info.filename in ('aki.json', 'manifest.json'):
                     continue
                 files['conversion/' + info.filename] = z.read(info)
-        tex = aki['components'].get('textures')
-        if tex and tex_zips:
-            tid, path = self.target(game, package_id(cid + '-textures'), res)
-            with zipfile.ZipFile(tex_zips[0]) as tz:
-                ta = json.loads(tz.read('aki.json'))
-                folder = ta.get('folder', '').rstrip('/') + '/'
-                payload = {}
-                for info in tz.infolist():
-                    if not info.is_dir() and info.filename.startswith(folder):
-                        payload['textures/' + info.filename[len(folder):]] = (tz, info)   # streamed
-                man = self.package_manifest('texture-pack', game, tid, name + ' textures', {'folder': 'textures/'})
-                payload['aki-package.json'] = json.dumps(man, indent=2).encode('utf-8')
-                path = zip_write(path, payload)
-            res.setdefault('packages', []).append(path)
-            aki['components']['textures'] = {'package': tid, 'version': self.version, 'naming': tex.get('naming'),
-                                             'optional': bool(tex.get('optional'))}
-            requires = [tid]
         patch = aki['components'].get('patch')
         if patch and 'conversion/' + patch.get('file', '') in files:
             files['conversion/' + patch['file']] = nrm_with_id(files['conversion/' + patch['file']], cid)
@@ -1677,7 +1700,21 @@ class Builder:
         aki.update(id=cid, name=name, version=self.version)
         aki.setdefault('survey', {}).update(self.conversion_manifest(res, game, cid, name, 'project64-bundle')['survey'])
         aki['survey']['converter'] = 'import-pj64'
-        self.write_conversion(res, game, cid, name, aki, files, requires)
+        tex = aki['components'].get('textures')
+        if not (tex and tex_zips):
+            aki['components'].pop('textures', None)
+            self.write_conversion(res, game, cid, name, aki, files)
+            return
+        with zipfile.ZipFile(tex_zips[0]) as tz:      # open while the conversion is written: its members stream
+            ta = json.loads(tz.read('aki.json'))
+            folder = ta.get('folder', '').rstrip('/') + '/'
+            for info in tz.infolist():
+                if not info.is_dir() and info.filename.startswith(folder):
+                    files['conversion/textures/' + info.filename[len(folder):]] = (tz, info)
+            # import-pj64 wrote the pack's rt64.json (autoPath for its naming); the game writes one if it's missing.
+            aki['components']['textures'] = {'dir': 'textures', 'naming': tex.get('naming'),
+                                             'optional': bool(tex.get('optional'))}
+            self.write_conversion(res, game, cid, name, aki, files)
 
 
 def package_input(path):

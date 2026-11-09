@@ -9,6 +9,7 @@ import io
 import json
 import os
 import re
+import shutil
 import sys
 import types
 import unittest
@@ -53,6 +54,12 @@ def check_package(test, path, kind):
             test.assertTrue(re.match(r'^[0-9a-f]{40}$', m['base_rom']['sha1'][0]))
             aki = json.loads(z.read(folder + 'aki.json'))
             test.assertEqual((aki['format'], aki['format_version'], aki['id']), ('aki-conversion', 1, m['id']))
+            tex = aki['components'].get('textures')
+            if tex:
+                # The game reads a conversion's textures from its own folder (dir) or conversions\_packages\ (package);
+                # the launcher installs a texture-pack package to mods\, so a conversion never names one.
+                test.assertNotIn('package', tex)
+                test.assertTrue([n for n in names if n.startswith(folder + tex['dir'] + '/')])
             patch = aki['components'].get('patch')
             if patch:
                 nrm = zipfile.ZipFile(io.BytesIO(z.read(folder + patch['file'])))
@@ -397,19 +404,21 @@ class Pj64Bundles(BuildBase):
             self.write(root + '/Textures/WWF NO MERCY#%08X#0#2_all.png' % i, png(i))
         return os.path.join(self.dir, *root.split('/'))
 
-    def test_bundle_builds_a_conversion_and_its_texture_package(self):
+    def test_bundle_builds_one_conversion_with_its_textures_inside(self):
         r = self.build_one([self.bundle()])
         self.assertEqual((r['status'], r['converter'], r['game'], r['id']), ('converted', 'import-pj64', 'nomercy', 'my-mod'),
                          r)
-        self.assertEqual(len(r['packages']), 2)
-        tex = [p for p in r['packages'] if 'textures' in os.path.basename(p)][0]
-        check_package(self, tex, 'texture-pack')
+        self.assertEqual(r['packages'], [r['package']])
         m, aki, _ = check_package(self, r['package'], 'conversion')
-        self.assertEqual(m['requires']['packages'], ['my-mod-textures'])
-        self.assertEqual(aki['components']['textures']['package'], 'my-mod-textures')
+        self.assertNotIn('requires', m)
+        self.assertEqual(aki['components']['textures'], {'dir': 'textures', 'naming': 'rice', 'optional': False})
         self.assertEqual(aki['survey']['converter'], 'import-pj64')
         with zipfile.ZipFile(r['package']) as z:
             codes = z.read('conversion/codes.txt').decode()
+            names = z.namelist()
+            rt64 = json.loads(z.read('conversion/textures/rt64.json'))
+        self.assertEqual(rt64['configuration']['autoPath'], 'rice')
+        self.assertEqual(len([n for n in names if n.startswith('conversion/textures/') and n.endswith('.png')]), 6)
         self.assertIn('810500E8 0933', codes)          # the mod's own cheat
         self.assertNotIn('8109940A', codes)            # not the database's other cheats
 
@@ -436,6 +445,12 @@ class Pj64Bundles(BuildBase):
 class Rev0Codes(BuildBase):
     """aki-roadmap#228: a bundle's codes for No Mercy Rev 0 are translated to the port's Rev 1 through the derelink
     map (a shipped one, else made from a stock Rev 0 ROM), with the hand-made packs' --map-range."""
+
+    def setUp(self):
+        super().setUp()
+        # The real maps/nomercy-rev0.json ships: these tests start without one, as a batch without it would.
+        saved, ai.MAPS_DIR = ai.MAPS_DIR, os.path.join(self.dir, 'no-maps')
+        self.addCleanup(setattr, ai, 'MAPS_DIR', saved)
 
     def bundle(self, root='in/My Mod', rom=None):
         mod = root.rsplit('/', 1)[-1].replace(' ', '')     # the cheats' folder is the mod's name
@@ -515,6 +530,59 @@ class Rev0Codes(BuildBase):
         self.assertEqual(r['codes_translation']['map'], 'maps/nomercy-rev0.json')
         self.assertIn('81050058 0933', self.codes(r)[0])
         self.assertEqual(dl.calls, [])
+
+    def test_a_versioned_bundle_folder_finds_the_cheat_folder(self):
+        # Showdown 64 V6.0.4\Config\Project64.cht keeps its cheats under "Showdown 64\..." (real bundle, 2026-11-08).
+        root = 'in/Show Mod V6.0.4'
+        self.write(root + '/Project64.cht', '\n'.join([
+            '[%s]' % REV0_KEY, 'Name=WWF No Mercy',
+            'Cheat0="Show Mod' + BS + 'Arena",810500E8 0933', 'Cheat1="Optional' + BS + 'Other",810500E8 0001', ''
+        ]).encode('latin-1'))
+        self.write('more/nm10.z64', t.REV0)
+        r = self.build_one([os.path.join(self.dir, *root.split('/'))], fakes={'derelink': fake_derelink()},
+                           rom_dirs=[os.path.join(self.dir, 'more')])
+        self.assertEqual(r['status'], 'converted', r)
+        self.assertTrue(r['codes'].startswith('codes translated from Rev 0 (1 of 1 lines'), r['codes'])
+        codes = self.codes(r)[0]
+        self.assertIn('[Show Mod' + BS + 'Arena]', codes)
+        self.assertNotIn('Optional', codes)
+
+    def test_no_matching_cheat_folder_says_so(self):
+        root = 'in/Quiet Mod'
+        self.write(root + '/Project64.cht', '\n'.join([
+            '[%s]' % REV0_KEY, 'Name=WWF No Mercy', 'Cheat0="Elsewhere' + BS + 'Arena",810500E8 0933', ''
+        ]).encode('latin-1'))
+        for i in range(6):                                                  # something else to import
+            self.write(root + '/Textures/WWF NO MERCY#%08X#0#2_all.png' % i, png(i))
+        r = self.build_one([os.path.join(self.dir, *root.split('/'))], fakes={'derelink': fake_derelink()})
+        self.assertEqual(r['status'], 'converted', r)
+        self.assertEqual(r['codes'], "no codes taken: no cheat folder is named like the mod ('Quiet Mod'); "
+                                     "its folders: Elsewhere")
+        # Cheats alone, none taken: the failure says why.
+        shutil.rmtree(os.path.join(self.dir, 'in', 'Quiet Mod', 'Textures'))
+        r = self.build_one([os.path.join(self.dir, *root.split('/'))], fakes={'derelink': fake_derelink()})
+        self.assertEqual(r['status'], 'failed', r)
+        self.assertIn("(no cheat folder is named like the mod ('Quiet Mod'); its folders: Elsewhere)", r['why'])
+
+    def test_without_version(self):
+        for name, bare in (('Showdown 64 V6.0.4', 'Showdown 64'), ('AEW 64 (v1.2)', 'AEW 64'), ('Mod 1.0.5', 'Mod'),
+                           ('TNA No Mercy 2015', 'TNA No Mercy 2015'), ('Showdown 64', 'Showdown 64'),
+                           ('Revolution', 'Revolution'), ('ABCv3', 'ABCv3')):
+            self.assertEqual(ai.without_version(name), bare)
+
+    def test_the_shipped_rev0_map_holds_address_ranges_only(self):
+        # maps/nomercy-rev0.json ships with the launcher: [lo, hi, shift, kind] ranges, nothing from the ROM itself.
+        path = os.path.join(os.path.dirname(ai.__file__), 'maps', 'nomercy-rev0.json')
+        raw = json.load(open(path))
+        self.assertEqual(set(raw), {'main', 'overlays', 'identity'})
+        ranges = raw['main'] + [r for v in raw['overlays'].values() for r in v]
+        self.assertGreater(len(ranges), 1000)
+        for lo, hi, shift, kind in ranges:
+            self.assertTrue(0x80000000 <= lo < hi <= 0x80800000 and -0x400000 < shift < 0x400000, (lo, hi, shift))
+            self.assertIn(kind, ('text', 'entry', 'data', 'heap', 'save'))
+        for lo, hi in raw['identity']:
+            self.assertTrue(0x80000000 <= lo < hi <= 0x80800000)
+        self.assertLess(os.path.getsize(path), 512 << 10)
 
     def test_the_map_is_made_once_per_batch(self):
         self.write('more/nm10.z64', t.REV0)

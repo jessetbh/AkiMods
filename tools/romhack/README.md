@@ -111,7 +111,7 @@ with `package`, `converter` and `aki_tier`:
 | Input | Converter | Package |
 |---|---|---|
 | hack ROM, or a patch applied to its base | `aki_hack.survey_rom` against the port's ROM: `patch-data` / `patch-code` -> `make_patch_mod`; `rev0-layout` / `relinked` / `restructured` -> `derelink` (also when make_patch_mod refuses); `different-base` refused | conversion: `conversion/aki.json` + `conversion/patch.nrm` (its mod id is the conversion id), + `codes.txt` when derelink writes a code watch table |
-| Project64 bundle (folder or zip) | `aki_conv` import-pj64 with the item's id and name; the game from the bundle's cheat sections or a ROM in it, else `game` | conversion (codes, saves, docs, patch) + a texture-pack package it requires |
+| Project64 bundle (folder or zip) | `aki_conv` import-pj64 with the item's id and name; the game from the bundle's cheat sections or a ROM in it, else `game` | conversion (codes, saves, docs, patch, and the textures inside it at `conversion/textures/`: the game reads a conversion's textures from its own folder, while a texture-pack package installs to `mods\`) |
 | texture pack (rt64, Rice, Jabo, `.hts`) | images copied, an `rt64.json` added for Rice/Jabo (`autoPath`), `.hts` exported to Rice PNGs | texture-pack (`payload.folder: textures/`) |
 
 - Conversions are built against the port's ROM, so a build needs it (`--rom`, `--rom-dir`, or
@@ -125,8 +125,9 @@ with `package`, `converter` and `aki_tier`:
   translated the way the hand-made packs were: `import-pj64 --map` with the Rev 0 derelink map
   and `--map-range 200800,400000,-1000` (a catalog entry's `map_range` list overrides it), which
   also runs `translate-code-values` when a derelink layout matches the port's ROM. Then derelink's
-  watch codes join them. The map is `maps\nomercy-rev0.json` here when it ships (address ranges
-  only, no ROM bytes), else made once per batch with `derelink.py map` from a stock No Mercy (USA)
+  watch codes join them. The map ships as `maps\nomercy-rev0.json` (address ranges and shifts
+  only, no ROM bytes; made with `derelink.py map --base <port ROM> --hack <stock No Mercy (USA) 1.0>`);
+  without it one is made once per batch with `derelink.py map` from a stock No Mercy (USA)
   1.0 ROM: the player's (`--rom-dir`, or among the inputs) or one inside the bundle. Without one,
   the codes keep their Rev 0 tag and stay off. Each item says what happened in `codes` (for example
   `codes translated from Rev 0 (41 of 44 lines; 3 dropped); 12 values inside the code they write

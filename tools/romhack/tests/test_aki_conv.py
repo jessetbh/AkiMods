@@ -132,6 +132,23 @@ class OverlayGuard(unittest.TestCase):
                                  'D1100010 2402', 'D0107FF0 0001', '81107FF4 1234',
                                  '8100FFE0 0005'])
 
+    def test_split_units_take_the_map_range_overrides(self):
+        # Showdown 64 (aki-roadmap#228): a high-RAM write behind an overlay-RAM conditional. The plain map's high RAM
+        # doesn't move; --map-range 200800,400000,-1000 must reach both guarded versions, as it does unsplit codes.
+        m = dict(self.map, main=self.map['main'] + [[0x80200800, 0x80400000, 0, 'heap']])
+        overrides = aki_conv.parse_map_ranges(['200800,400000,-1000'])
+        ranges = overrides + aki_conv.map_from_derelink(m)
+        guard = aki_conv.overlay_guard(self.layout, self.rom)
+        text = 'D0108000 0001\n81300000 1234\n81300010 0005\n'
+        out, done, bad = aki_conv.translate_codes(
+            text, ranges, aki_conv.overlays_with_overrides(aki_conv.overlay_ranges(m), overrides), guard)
+        self.assertEqual((done, bad), (3, []))
+        self.assertEqual([l for l in out.splitlines() if l],
+                         ['D1100010 3C01', 'D0107FD0 0001', '812FF000 1234',
+                          'D1100010 2402', 'D0107FF0 0001', '812FF000 1234',
+                          '812FF010 0005'])
+        self.assertIs(aki_conv.overlays_with_overrides(None, overrides), None)
+
     def test_without_guards_the_unit_is_dropped(self):
         ranges = aki_conv.map_from_derelink(self.map)
         out, done, bad = aki_conv.translate_codes('81108004 1234\n', ranges)
@@ -175,7 +192,8 @@ class BundleParts(unittest.TestCase):
         import tempfile
         with tempfile.TemporaryDirectory() as d:
             paths = ['readme.txt', 'Moves/Sting.txt', 'Plugin/hires/WWF/Sting/notes.txt', 'Plugin/hires/WWF/Sting/a.png',
-                     'Lang/English.txt', 'Textures/Roster/list.txt', 'Textures/Roster/x.png']
+                     'Lang/English.txt', 'Textures/Roster/list.txt', 'Textures/Roster/x.png',
+                     'd3d syslog.txt', 'error log.txt', 'Changelog.txt']
             files = []
             for p in paths:
                 full = os.path.join(d, *p.split('/'))
@@ -183,8 +201,9 @@ class BundleParts(unittest.TestCase):
                 open(full, 'w').close()
                 files.append(full)
             kept, skipped = aki_conv.doc_files(files, d)
-            self.assertEqual([os.path.relpath(p, d).replace(os.sep, '/') for p in kept], ['readme.txt', 'Moves/Sting.txt'])
-            self.assertEqual(skipped, 3)
+            self.assertEqual([os.path.relpath(p, d).replace(os.sep, '/') for p in kept],
+                             ['Changelog.txt', 'readme.txt', 'Moves/Sting.txt'])
+            self.assertEqual(skipped, 5)
 
     def test_a_stray_image_doesnt_make_the_root_a_texture_folder(self):
         root = os.path.join('C:' + os.sep, 'mod')
