@@ -118,6 +118,21 @@
    }
   },
   {
+   "id": "n64modderz_mod",
+   "name": "WWF No Mercy MOD (n64modderz)",
+   "game": "nomercy",
+   "version": "1.0.0",
+   "tier": "verified",
+   "converter": "import-pj64",
+   "tier_proposed": true,
+   "note": "Textures and a save only.",
+   "outputs": {
+    "content_sha1": [
+     "373EE4CE0B745F544C17C9ABCC18C99D9E739723"
+    ]
+   }
+  },
+  {
    "id": "njpw2017",
    "name": "NJPW 2017",
    "game": "nomercy",
