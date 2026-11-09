@@ -1519,7 +1519,9 @@ class Builder:
     def content_sha1(cls, files):
         """A conversion's saves and texture images as one SHA-1 (aki-roadmap#172: a textures + save mod has no patch or
         codes to match by): SHA-1 of the sorted lines "<path> NUL <file SHA-1> LF" for conversion/saves/* and the
-        images under conversion/textures/ (not rt64.json, which the importer writes). None when there are neither."""
+        images under conversion/textures/ (not rt64.json, which the importer writes). None when there are neither.
+        A PNG's SHA-1 is of its image, not its file (png_content_sha1, aki-roadmap#273): hts-export writes PNGs with
+        Python's zlib, whose deflate bytes differ between builds (3.12 vs 3.14's zlib-ng)."""
         lines = []
         for n in sorted(files):
             low = n.lower()
@@ -1527,14 +1529,13 @@ class Builder:
                     (low.startswith('conversion/textures/') and low.endswith(TEXTURE_EXTS))):
                 continue
             v = files[n]
-            h = hashlib.sha1()
             if isinstance(v, str):
                 with open(v, 'rb') as f:
-                    for chunk in iter(lambda: f.read(1 << 20), b''):
-                        h.update(chunk)
+                    data = f.read()
             else:
-                h.update(cls.member_bytes(v))
-            lines.append(n + '\0' + h.hexdigest().upper() + '\n')
+                data = cls.member_bytes(v)
+            digest = png_content_sha1(data) if low.endswith('.png') else None
+            lines.append(n + '\0' + (digest or hashlib.sha1(data).hexdigest().upper()) + '\n')
         if not lines:
             return None
         return hashlib.sha1(''.join(lines).encode('utf-8')).hexdigest().upper()
@@ -2096,6 +2097,48 @@ class Builder:
             aki['components']['textures'] = {'dir': 'textures', 'naming': tex.get('naming'),
                                              'optional': bool(tex.get('optional'))}
             self.write_conversion(res, game, cid, name, aki, files)
+
+
+PNG_SIGNATURE = b'\x89PNG\r\n\x1a\n'
+
+
+def png_content_sha1(data):
+    """The SHA-1 of a PNG's image rather than its file (aki-roadmap#273): "png" + IHDR + PLTE + tRNS + the inflated
+    IDAT stream (the filtered scanlines). The filters are the encoder's choice; only the deflate bytes depend on the
+    zlib build, and inflating removes them. Text, time and other ancillary chunks don't count. None for anything that
+    isn't a well-formed PNG (the caller hashes the file then)."""
+    import struct
+    import zlib
+    if not data.startswith(PNG_SIGNATURE):
+        return None
+    pos, keep, idat = len(PNG_SIGNATURE), [], []
+    try:
+        while pos + 8 <= len(data):
+            size, kind = struct.unpack('>I4s', data[pos:pos + 8])
+            body = data[pos + 8:pos + 8 + size]
+            if len(body) != size:
+                return None
+            if kind in (b'IHDR', b'PLTE', b'tRNS'):
+                keep.append(kind + struct.pack('>I', size) + body)
+            elif kind == b'IDAT':
+                idat.append(body)
+            elif kind == b'IEND':
+                break
+            pos += 12 + size
+        if not keep or not keep[0].startswith(b'IHDR') or not idat:
+            return None
+        d = zlib.decompressobj()
+        h = hashlib.sha1(b'png')
+        for k in keep:
+            h.update(k)
+        for b in idat:
+            h.update(d.decompress(b))
+        h.update(d.flush())
+        if not d.eof:
+            return None
+    except (struct.error, zlib.error):
+        return None
+    return h.hexdigest().upper()
 
 
 def package_input(path):

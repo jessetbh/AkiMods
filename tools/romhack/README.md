@@ -92,7 +92,9 @@ python -I tools\romhack\aki_import.py build C:\Downloads\wrestling --rom nomercy
   only when it is the tested build: its patch makes the entry's `outputs.sha1`, else its
   `codes.txt` is `outputs.codes_sha1`, else (textures + save mods, no patch or codes) its saves and
   texture images hash to `outputs.content_sha1` (SHA-1 of the sorted `<path> NUL <file SHA-1> LF`
-  lines for `conversion/saves/*` and the images under `conversion/textures/`, not `rt64.json`).
+  lines for `conversion/saves/*` and the images under `conversion/textures/`, not `rt64.json`;
+  a PNG's SHA-1 is of its image: IHDR, PLTE, tRNS and the inflated IDAT stream, so the zlib build that
+  wrote it doesn't matter, #273).
 - **Hacks with their own game code** go to a port's game by the stock ROM a patch applied to,
   else by how much code they share with a port's ROM, else (#268) by a port's header title in
   their header name or file name (No Mercy Plus V3 Open Beta (ED): `NX4E`, "WWF No Mercy +
