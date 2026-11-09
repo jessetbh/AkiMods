@@ -7,6 +7,7 @@
 
 #include "aki_mod.h"
 #include "gbi.h"
+#include "list_room.h"
 
 // The scratch (MI_SCRATCH, 256 KB below 8 MB): the per-slot lists, the adapter's depth-clear lists, then models.txt
 // (scratch_layout.h).

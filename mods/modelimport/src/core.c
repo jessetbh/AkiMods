@@ -490,11 +490,17 @@ static u32 slot_signature(int slot) {
 }
 
 static void build_list(int slot, const MiSlot* s, const MiPack* p, u32 dl, int parity) {
-    u32* out = mi_list_open((u32*)dl);
+    u32* const start = (u32*)dl;
+    u32 tail[32];
+    const u32 tail_words = (u32)(mi_list_close(tail) - tail) + 2; // the close and the end (aki-roadmap#175)
+    u32* out = mi_list_open(start);
     // The game draws its wrestlers without depth, back faces culled. A pack with consistent winding gets the same; one
     // without it draws both sides (a rip's mixed winding would otherwise lose half its faces).
     if (p->flags & AKP1_FLAG_CULL) mi_gbi_geometry(&out, 0, MI_G_CULL_BACK);
-    for (int e = 0; e < p->count; e++) {
+    int e = 0;
+    for (; e < p->count; e++) {
+        const u32 need = p->part[e] == AKP1_WELDED ? MI_ENTRY_WORDS_WELDED : MI_ENTRY_WORDS_PART;
+        if (!mi_list_entry_fits((u32)(out - start), need, tail_words, MI_LIST_BYTES)) break;
         if (p->part[e] == AKP1_WELDED) {
             mi_gbi_segment(&out, 0xD, mi_matrix_segment(slot, parity) - 0x80000000u); // part matrices
             // Segment 0xE only for a skinned pack (the slot keeps its buffers when it changes to another pack).
@@ -509,6 +515,11 @@ static void build_list(int slot, const MiSlot* s, const MiPack* p, u32 dl, int p
         if (!node) continue;
         mi_gbi_force_matrix(&out, mi_part_matrix(node, parity) - 0x80000000u); // that part's matrix
         mi_gbi_dl(&out, p->dl[e] - 0x80000000u);
+    }
+    if (e < p->count && parity == 0) {
+        mi_log_str("slot "); mi_log_dec(slot + 1); mi_log_str(": pack "); mi_log_str(p->id);
+        mi_log_str(" has more lists than a slot list holds; drawing "); mi_log_dec(e); mi_log_str(" of ");
+        mi_log_dec(p->count); mi_log_end();
     }
     out = mi_list_close(out);
     mi_gbi_enddl(&out);

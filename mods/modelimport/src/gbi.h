@@ -84,7 +84,12 @@ static inline void mi_gbi_segment(unsigned int** out, unsigned int seg, unsigned
     mi_gbi_put(out, mi_gbi_segment_w0(seg), addr);
 }
 
-// gSPForceMatrix (addr: 64 bytes of N64 fixed-point matrix).
+// gSPForceMatrix (addr: 64 bytes of N64 fixed-point matrix): MI_GBI_FORCE_MATRIX_WORDS words.
+#ifdef MI_F3DEX1
+#define MI_GBI_FORCE_MATRIX_WORDS 8u
+#else
+#define MI_GBI_FORCE_MATRIX_WORDS 4u
+#endif
 static inline void mi_gbi_force_matrix(unsigned int** out, unsigned int addr) {
 #ifdef MI_F3DEX1
     static const unsigned int index[4] = { 0x9Eu, 0x98u, 0x9Au, 0x9Cu };   // G_MV_MATRIX_1..4
