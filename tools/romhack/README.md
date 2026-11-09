@@ -98,6 +98,12 @@ python -I tools\romhack\aki_import.py build C:\Downloads\wrestling --rom nomercy
   inflating more than 100:1 are refused. 7z needs `7zr.exe` (`bin\7zr.exe` here, PATH, or
   `--sevenzip`) and unpacks into `--work` (keyed by the archive's content), or into a temp folder
   deleted after the batch. RAR: extract first.
+- **Texture packs** stay one item however deep their folders go. An archive in a folder of the
+  pack's own images doesn't split the pack (#268): it becomes its own item (on disk), or a
+  `unsupported` note when it holds nothing to import alone (or sits in a zipped pack). An archive
+  anywhere else makes the folder a folder of items, as ROMs, patches and mods do.
+- **OS clutter** (`Thumbs.db`, `desktop.ini`, `.DS_Store`, `._*` AppleDouble files, `__MACOSX\`)
+  is skipped without a line (#268).
 - **Untrusted input:** one bad file fails alone; links and junctions aren't followed; files are
   read whole only when they look like a ROM, patch or mod, and their bytes are dropped after each
   item.

@@ -91,6 +91,10 @@ HTS_SUFFIX = '_HIRESTEXTURES.hts'
 MAX_ITEM = 128 << 20      # the biggest file read whole (N64 ROMs are 64 MB at most)
 MAX_RATIO = 100           # a zip member inflating more than this (past 16 MB) is refused as a possible zip bomb
 MAX_DEPTH = 8             # folders walked at most this deep
+ARCHIVE_EXTS = ('.zip', '.7z', '.rar')
+# OS clutter, skipped without a word (aki-roadmap#268: a Rice pack's Thumbs.db files were listed as 22 'unsupported'
+# items): Explorer thumbnails and folder settings, macOS Finder files and the AppleDouble forks zips carry.
+JUNK_NAMES = ('thumbs.db', 'ehthumbs.db', 'desktop.ini', '.ds_store')
 
 # Fallback magic when romhack/patchfmt.py isn't there: enough to say "a patch" and its format.
 PATCH_MAGIC = ((b'BPS1', 'bps'), (b'UPS1', 'ups'), (b'PATCH', 'ips'), (b'APS10', 'aps'), (b'\xd6\xc3\xc4', 'vcdiff'),
@@ -361,11 +365,41 @@ def save_bundle_rom(names, zipped=False):
     return got[2].strip()
 
 
+def is_junk(name):
+    """OS clutter (JUNK_NAMES, '._' AppleDouble files, anything under __MACOSX/): never an item."""
+    parts = name.replace('\\', '/').lower().split('/')
+    return parts[-1] in JUNK_NAMES or parts[-1].startswith('._') or '__macosx' in parts
+
+
+def is_texture_image(name):
+    base = name.replace('\\', '/').rsplit('/', 1)[-1]
+    return bool(RICE_NAME.match(base) or JABO_NAME.match(base) or RT64_NAME.match(base))
+
+
+def pack_archives(names):
+    """The archives a texture pack holds among its own images, or None when one sits elsewhere. aki-roadmap#268: TNA
+    vs ROH keeps a New_Look.zip beside Raven's shirt textures; refusing every folder above it split the pack into 77
+    packages (one per wrestler folder) and lost the loose images of the folders in between. An archive in a folder
+    with no pack images (a downloads folder with zipped hacks) still makes it a folder of items."""
+    folders = {n.rsplit('/', 1)[0] if '/' in n else '' for n in names if is_texture_image(n)}
+    archives = [n for n in names if os.path.splitext(n.lower())[1] in ARCHIVE_EXTS]
+    if any((a.rsplit('/', 1)[0] if '/' in a else '') not in folders for a in archives):
+        return None
+    return archives
+
+
 def is_texture_folder(names):
-    """Texture-named images and no ROMs, patches or archives beside them (those make it a folder of items)."""
-    if any(os.path.splitext(n.lower())[1] in ROM_EXTS + PATCH_EXTS + ('.zip', '.7z', '.rar', '.nrm') for n in names):
+    """Texture-named images and no ROMs, patches or mods beside them (those make it a folder of items); archives only
+    among the pack's own images (pack_archives)."""
+    if any(os.path.splitext(n.lower())[1] in ROM_EXTS + PATCH_EXTS + ('.nrm',) for n in names):
         return False
-    return texture_naming(names) is not None
+    return pack_archives(names) is not None and texture_naming(names) is not None
+
+
+def pack_archive_note(item, pack):
+    return dict(item=item, kind='archive', status='unsupported',
+                why='an archive inside the texture pack %s: not part of the pack and nothing in it to import on its own; '
+                    'extract it into the pack to include its images' % display_name(pack))
 
 
 def file_head(path, n=64):
@@ -378,10 +412,20 @@ def expand(path, job, sources, notes, depth=0):
     if is_link(path):
         notes.append(dict(item=path, status='unsupported', why='a link or junction: pick the folder it points to'))
         return
+    if is_junk(os.path.basename(path)):
+        return
     if os.path.isdir(path):
         names = folder_files(path, notes)
         if is_bundle(names) or save_bundle_rom(names) or is_texture_folder(names):
             sources.append(Source(path, 'folder', names=names, path=path))
+            if not (is_bundle(names) or save_bundle_rom(names)):
+                # An archive among a texture pack's images is its own item (aki-roadmap#268), or a note when it
+                # holds nothing to import alone (New_Look.zip: 4 images, too few for a pack).
+                for a in pack_archives(names):
+                    s0, n0 = len(sources), len(notes)
+                    expand(os.path.join(path, *a.split('/')), job, sources, notes, depth + 1)
+                    if len(sources) == s0 and len(notes) == n0:
+                        notes.append(pack_archive_note(os.path.join(path, *a.split('/')), path))
             return
         if depth >= MAX_DEPTH:
             return
@@ -468,9 +512,14 @@ def expand_zip_members(label, fh, opener, origin, sources, notes, depth, blob):
         else:
             src.zip_blob = whole
         sources.append(src)
+        if not (is_bundle(names, zipped=True) or save_bundle_rom(names, zipped=True)):
+            for a in pack_archives(names):     # aki-roadmap#268: not unpacked here, said instead
+                notes.append(pack_archive_note('%s!%s' % (label, a), label.split('!')[-1]))
         return
     for m in members:
         member_label = '%s!%s' % (label, m.filename)
+        if is_junk(m.filename):
+            continue
         ext = os.path.splitext(m.filename.lower())[1]
         why = member_problem(m)
         try:

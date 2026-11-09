@@ -219,6 +219,20 @@ class Containers(Base):
         self.assertEqual(r['rom_name'], 'WWF NO MERCY')
         self.assertEqual(r['game'], 'nomercy')   # matched against the port ROM's header name (case-insensitive)
 
+    def test_os_junk_files_are_skipped_silently(self):
+        # aki-roadmap#268: Thumbs.db and friends were listed as 'unsupported' items.
+        hack = bytearray(STOCK)
+        hack[0x2000] = 6
+        self.write('in/dl/Hack.z64', bytes(hack))
+        for junk in ('Thumbs.db', 'desktop.ini', '.DS_Store', '._Hack.z64', 'sub/Thumbs.db', '__MACOSX/._Hack.z64'):
+            self.write('in/dl/' + junk, b'\x80\x37\x12\x40junk')
+        items, _ = self.run_job([os.path.join(self.dir, 'in', 'dl')])
+        self.assertEqual([os.path.basename(i['item']) for i in items], ['Hack.z64'], items)
+        z = self.write('in/z.zip', self.zip_bytes({'Hack.z64': bytes(hack), '__MACOSX/._Hack.z64': b'\x80\x37\x12\x40',
+                                                   '._Other.z64': b'\x80\x37\x12\x40', 'Thumbs.db': b'x'}))
+        items, _ = self.run_job([z])
+        self.assertEqual([i['item'].split('!')[-1] for i in items], ['Hack.z64'], items)
+
     def test_package_and_nrm_install_as_is(self):
         r = self.one([self.write('in/a.zip', self.zip_bytes({'aki-package.json': b'{}'}))])
         self.assertEqual((r['kind'], r['route']), ('package', 'install'))

@@ -391,6 +391,51 @@ class TexturePacks(BuildBase):
             self.assertEqual(cfg['configuration']['autoPath'], 'rice')
             self.assertNotIn('textures/readme.txt', z.namelist())
 
+    def test_nested_archive_keeps_the_pack_whole(self):
+        # aki-roadmap#268 (TNA vs ROH): a small zip among a wrestler's shirt textures split the pack into one package
+        # per wrestler folder and lost the loose images of the folders above it (Raven\Attire 3).
+        rice = 'in/TNA/Pack/%s/WWF No Mercy#%08X#2#1#0C292BE7_ciByRGBA.png'
+        n = 0
+        for folder, count in (('Abyss', 6), ('Raven/Attire 3', 3), ('Raven/Attire 3/T-Shirts/New look', 2),
+                              ('Raven/Attire 3/T-Shirts/clockwork', 4)):
+            for _ in range(count):
+                self.write(rice % (folder, n), png(n))
+                n += 1
+        inner = io.BytesIO()
+        with zipfile.ZipFile(inner, 'w') as z:
+            for i in range(4):
+                z.writestr('WWF No Mercy#%08X#2#1#00000000_ciByRGBA.png' % (100 + i), png(i))
+        self.write('in/TNA/Pack/Raven/Attire 3/T-Shirts/New look/New_Look.zip', inner.getvalue())
+        self.write('in/TNA/Pack/Raven/Attire 3/Thumbs.db', b'x')
+        items, _ = self.build([os.path.join(self.dir, 'in', 'TNA')])
+        packs = [i for i in items if i.get('kind') == 'texture-pack']
+        self.assertEqual(len(packs), 1, items)
+        self.assertEqual((packs[0]['status'], packs[0]['images']), ('converted', n))
+        with zipfile.ZipFile(packs[0]['package']) as z:
+            self.assertEqual(sum(x.endswith('.png') for x in z.namelist()), n)   # every image, at every level
+        rest = [i for i in items if i is not packs[0]]
+        self.assertEqual([(os.path.basename(i['item']), i['status']) for i in rest], [('New_Look.zip', 'unsupported')])
+        self.assertIn('inside the texture pack', rest[0]['why'])
+        # A zip among the pack's images that is a pack itself becomes its own item.
+        with zipfile.ZipFile(inner, 'a') as z:
+            z.writestr('WWF No Mercy#%08X#2#1#00000000_ciByRGBA.png' % 200, png(9))
+        self.write('in/TNA/Pack/Raven/Attire 3/T-Shirts/New look/New_Look.zip', inner.getvalue())
+        shutil.rmtree(self.out)
+        items, _ = self.build([os.path.join(self.dir, 'in', 'TNA')])
+        self.assertEqual(sorted((i['kind'], i['status'], i.get('images')) for i in items),
+                         [('texture-pack', 'converted', 5), ('texture-pack', 'converted', n)])
+        # Zipped, the inner archive is named in a note; an archive outside the images still makes a folder of items.
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, 'w') as z:
+            for i in range(6):
+                z.writestr('P/a/WWF No Mercy#%08X#2#1#00000000_ciByRGBA.png' % i, png(i))
+            z.writestr('P/a/x.zip', inner.getvalue())
+        items, _ = self.run_job([self.write('in/zp.zip', buf.getvalue())])
+        self.assertEqual(sorted((i.get('kind'), i['status']) for i in items),
+                         [('archive', 'unsupported'), ('texture-pack', 'ready')])
+        self.assertFalse(ai.is_texture_folder(['hacks/h.zip'] + ['tex/WWF No Mercy#%08X#2#1_all.png' % i
+                                                                  for i in range(6)]))
+
     def test_jabo_pack_needs_a_game_then_builds(self):
         for i in range(5):
             self.write('in/jabo/%032x.png' % i, png(i))
