@@ -54,6 +54,12 @@ def check_package(test, path, kind):
             test.assertTrue(re.match(r'^[0-9a-f]{40}$', m['base_rom']['sha1'][0]))
             aki = json.loads(z.read(folder + 'aki.json'))
             test.assertEqual((aki['format'], aki['format_version'], aki['id']), ('aki-conversion', 1, m['id']))
+            tex = aki['components'].get('textures')
+            if tex:
+                # The game reads a conversion's textures from its own folder (dir) or conversions\_packages\ (package);
+                # the launcher installs a texture-pack package to mods\, so a conversion never names one.
+                test.assertNotIn('package', tex)
+                test.assertTrue([n for n in names if n.startswith(folder + tex['dir'] + '/')])
             patch = aki['components'].get('patch')
             if patch:
                 nrm = zipfile.ZipFile(io.BytesIO(z.read(folder + patch['file'])))
@@ -398,19 +404,21 @@ class Pj64Bundles(BuildBase):
             self.write(root + '/Textures/WWF NO MERCY#%08X#0#2_all.png' % i, png(i))
         return os.path.join(self.dir, *root.split('/'))
 
-    def test_bundle_builds_a_conversion_and_its_texture_package(self):
+    def test_bundle_builds_one_conversion_with_its_textures_inside(self):
         r = self.build_one([self.bundle()])
         self.assertEqual((r['status'], r['converter'], r['game'], r['id']), ('converted', 'import-pj64', 'nomercy', 'my-mod'),
                          r)
-        self.assertEqual(len(r['packages']), 2)
-        tex = [p for p in r['packages'] if 'textures' in os.path.basename(p)][0]
-        check_package(self, tex, 'texture-pack')
+        self.assertEqual(r['packages'], [r['package']])
         m, aki, _ = check_package(self, r['package'], 'conversion')
-        self.assertEqual(m['requires']['packages'], ['my-mod-textures'])
-        self.assertEqual(aki['components']['textures']['package'], 'my-mod-textures')
+        self.assertNotIn('requires', m)
+        self.assertEqual(aki['components']['textures'], {'dir': 'textures', 'naming': 'rice', 'optional': False})
         self.assertEqual(aki['survey']['converter'], 'import-pj64')
         with zipfile.ZipFile(r['package']) as z:
             codes = z.read('conversion/codes.txt').decode()
+            names = z.namelist()
+            rt64 = json.loads(z.read('conversion/textures/rt64.json'))
+        self.assertEqual(rt64['configuration']['autoPath'], 'rice')
+        self.assertEqual(len([n for n in names if n.startswith('conversion/textures/') and n.endswith('.png')]), 6)
         self.assertIn('810500E8 0933', codes)          # the mod's own cheat
         self.assertNotIn('8109940A', codes)            # not the database's other cheats
 
