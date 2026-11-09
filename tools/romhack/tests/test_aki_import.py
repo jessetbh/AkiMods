@@ -140,6 +140,17 @@ class Roms(Base):
         self.assertEqual(r['status'], 'unsupported')
         self.assertIn('not one of the six', r['why'])
 
+    def test_renamed_code_with_a_port_title_goes_to_that_game(self):
+        # aki-roadmap#268: No Mercy Plus V3 Open Beta (ED) is 'NX4E' "WWF No Mercy + V3-B5", relinked so far that
+        # its code shares almost no words with the port's: the title says the game. Untested, never refused.
+        r = self.one([self.write('in/ed.z64', fake_rom(code='NX4E', title='WWF No Mercy + V3-B5', salt=5))])
+        self.assertEqual((r['status'], r['game'], r['tier']), ('ready', 'nomercy', 'untested'))
+        self.assertIn('NX4E', r['header_note'])
+        r = self.one([self.write('in/WWF No Mercy (ED).z64', fake_rom(code='NX4E', title='ED', salt=5))])
+        self.assertEqual((r['status'], r['game']), ('ready', 'nomercy'))      # the file name says it
+        r = self.one([self.write('in/War Zone.z64', fake_rom(code='NWWE', title='WWF WAR ZONE', salt=5))])
+        self.assertEqual(r['status'], 'unsupported')
+
     def test_other_stock_revision_is_stock(self):
         r = self.one([self.write('in/nm10.z64', REV0)])
         self.assertEqual(r['status'], 'stock')
@@ -291,6 +302,20 @@ class Containers(Base):
         self.assertEqual((r['kind'], r['naming'], r['images'], r['route']), ('texture-pack', 'rice', 6, 'wrap-rice'))
         self.assertEqual(r['rom_name'], 'WWF NO MERCY')
         self.assertEqual(r['game'], 'nomercy')   # matched against the port ROM's header name (case-insensitive)
+
+    def test_os_junk_files_are_skipped_silently(self):
+        # aki-roadmap#268: Thumbs.db and friends were listed as 'unsupported' items.
+        hack = bytearray(STOCK)
+        hack[0x2000] = 6
+        self.write('in/dl/Hack.z64', bytes(hack))
+        for junk in ('Thumbs.db', 'desktop.ini', '.DS_Store', '._Hack.z64', 'sub/Thumbs.db', '__MACOSX/._Hack.z64'):
+            self.write('in/dl/' + junk, b'\x80\x37\x12\x40junk')
+        items, _ = self.run_job([os.path.join(self.dir, 'in', 'dl')])
+        self.assertEqual([os.path.basename(i['item']) for i in items], ['Hack.z64'], items)
+        z = self.write('in/z.zip', self.zip_bytes({'Hack.z64': bytes(hack), '__MACOSX/._Hack.z64': b'\x80\x37\x12\x40',
+                                                   '._Other.z64': b'\x80\x37\x12\x40', 'Thumbs.db': b'x'}))
+        items, _ = self.run_job([z])
+        self.assertEqual([i['item'].split('!')[-1] for i in items], ['Hack.z64'], items)
 
     def test_package_and_nrm_install_as_is(self):
         r = self.one([self.write('in/a.zip', self.zip_bytes({'aki-package.json': b'{}'}))])
@@ -649,14 +674,29 @@ class Hostile(Base):
 
 class Worker(Base):
     def test_worker_is_one_process_streaming_json_lines(self):
-        job = {'paths': [self.stock_path, self.write('in/x.z64', fake_rom(code='NZLE'))], 'no_patchfmt': True}
+        job = {'paths': [self.stock_path, self.write('in/x.z64', fake_rom(code='NZLE', title='ZELDA'))], 'no_patchfmt': True}
         r = subprocess.run([sys.executable, '-I', os.path.join(ROOT, 'aki_import.py'), 'worker'],
                            input=json.dumps(job).encode(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
         self.assertEqual(r.returncode, 0, r.stderr.decode())
         lines = [json.loads(l) for l in r.stdout.decode().splitlines()]
         self.assertEqual([l['event'] for l in lines], ['item', 'item', 'done'])
-        # The real SHA-1 table: a synthetic "No Mercy" is a hack of it, the other header isn't an AKI game.
-        self.assertEqual(sorted(l['status'] for l in lines[:2]), ['ready', 'unsupported'])
+        # The real SHA-1 table: a synthetic "No Mercy" is a hack of it (needs-rom: the port's ROM isn't given,
+        # aki-roadmap#268), the other header isn't an AKI game.
+        self.assertEqual(sorted(l['status'] for l in lines[:2]), ['needs-rom', 'unsupported'])
+
+
+class SourceHygiene(unittest.TestCase):
+    def test_tools_compile_without_warnings(self):
+        # aki-roadmap#268: under the launcher's Python 3.12 an invalid escape ('\$' in a docstring) logged a
+        # SyntaxWarning on every run (3.11 calls it a DeprecationWarning); warnings as errors catch both.
+        import warnings
+        for name in sorted(os.listdir(ROOT)):
+            if name.endswith('.py'):
+                with open(os.path.join(ROOT, name), encoding='utf-8') as f:
+                    text = f.read()
+                with warnings.catch_warnings():
+                    warnings.simplefilter('error')
+                    compile(text, name, 'exec')
 
 
 if __name__ == '__main__':

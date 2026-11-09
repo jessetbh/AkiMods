@@ -24,9 +24,10 @@ Result status per item:
   converted    (build) built: `package` (and `packages` when a bundle also made a texture package), `converter`,
                `aki_tier` (the catalog's tier, else "untested"), `survey_tier` for hacks
   stock        the unmodified game: nothing to convert
-  have-it      the ledger already has this exact input
-  needs-rom    a patch whose base ROM isn't among the ROMs given (`needs` names it when the patch says which); in a
-               build, also a hack whose port ROM wasn't given (conversions are built against it)
+  have-it      the ledger already has this exact input; or the batch builds the same ROM from another item
+               (`duplicate_of`), or a sibling patch in its archive is the catalog's build of it (`alternative_of`)
+  needs-rom    a patch whose base ROM isn't among the ROMs given (`needs` names it when the patch says which);
+               also a hack whose port ROM wasn't given (conversions are built against it)
   needs-game   a texture pack or bundle (build) that doesn't say its game, or an IPS / APS patch that fits more
                than one game's ROM with nothing to tell them apart (aki-roadmap#269): pass "game"
   unsupported  not one of the six AKI games, another region, a format we don't read yet (`why`)
@@ -92,6 +93,10 @@ HTS_SUFFIX = '_HIRESTEXTURES.hts'
 MAX_ITEM = 128 << 20      # the biggest file read whole (N64 ROMs are 64 MB at most)
 MAX_RATIO = 100           # a zip member inflating more than this (past 16 MB) is refused as a possible zip bomb
 MAX_DEPTH = 8             # folders walked at most this deep
+ARCHIVE_EXTS = ('.zip', '.7z', '.rar')
+# OS clutter, skipped without a word (aki-roadmap#268: a Rice pack's Thumbs.db files were listed as 22 'unsupported'
+# items): Explorer thumbnails and folder settings, macOS Finder files and the AppleDouble forks zips carry.
+JUNK_NAMES = ('thumbs.db', 'ehthumbs.db', 'desktop.ini', '.ds_store')
 
 # Fallback magic when romhack/patchfmt.py isn't there: enough to say "a patch" and its format.
 PATCH_MAGIC = ((b'BPS1', 'bps'), (b'UPS1', 'ups'), (b'PATCH', 'ips'), (b'APS10', 'aps'), (b'\xd6\xc3\xc4', 'vcdiff'),
@@ -393,11 +398,41 @@ def save_bundle_rom(names, zipped=False):
     return got[2].strip()
 
 
+def is_junk(name):
+    """OS clutter (JUNK_NAMES, '._' AppleDouble files, anything under __MACOSX/): never an item."""
+    parts = name.replace('\\', '/').lower().split('/')
+    return parts[-1] in JUNK_NAMES or parts[-1].startswith('._') or '__macosx' in parts
+
+
+def is_texture_image(name):
+    base = name.replace('\\', '/').rsplit('/', 1)[-1]
+    return bool(RICE_NAME.match(base) or JABO_NAME.match(base) or RT64_NAME.match(base))
+
+
+def pack_archives(names):
+    """The archives a texture pack holds among its own images, or None when one sits elsewhere. aki-roadmap#268: TNA
+    vs ROH keeps a New_Look.zip beside Raven's shirt textures; refusing every folder above it split the pack into 77
+    packages (one per wrestler folder) and lost the loose images of the folders in between. An archive in a folder
+    with no pack images (a downloads folder with zipped hacks) still makes it a folder of items."""
+    folders = {n.rsplit('/', 1)[0] if '/' in n else '' for n in names if is_texture_image(n)}
+    archives = [n for n in names if os.path.splitext(n.lower())[1] in ARCHIVE_EXTS]
+    if any((a.rsplit('/', 1)[0] if '/' in a else '') not in folders for a in archives):
+        return None
+    return archives
+
+
 def is_texture_folder(names):
-    """Texture-named images and no ROMs, patches or archives beside them (those make it a folder of items)."""
-    if any(os.path.splitext(n.lower())[1] in ROM_EXTS + PATCH_EXTS + ('.zip', '.7z', '.rar', '.nrm') for n in names):
+    """Texture-named images and no ROMs, patches or mods beside them (those make it a folder of items); archives only
+    among the pack's own images (pack_archives)."""
+    if any(os.path.splitext(n.lower())[1] in ROM_EXTS + PATCH_EXTS + ('.nrm',) for n in names):
         return False
-    return texture_naming(names) is not None
+    return pack_archives(names) is not None and texture_naming(names) is not None
+
+
+def pack_archive_note(item, pack):
+    return dict(item=item, kind='archive', status='unsupported',
+                why='an archive inside the texture pack %s: not part of the pack (not opened here); extract it and '
+                    'import it on its own, or into the pack to include its images' % display_name(pack))
 
 
 def file_head(path, n=64):
@@ -410,10 +445,20 @@ def expand(path, job, sources, notes, depth=0):
     if is_link(path):
         notes.append(dict(item=path, status='unsupported', why='a link or junction: pick the folder it points to'))
         return
+    if is_junk(os.path.basename(path)):
+        return
     if os.path.isdir(path):
         names = folder_files(path, notes)
         if is_bundle(names) or save_bundle_rom(names) or is_texture_folder(names):
             sources.append(Source(path, 'folder', names=names, path=path))
+            if not (is_bundle(names) or save_bundle_rom(names)):
+                # An archive among a texture pack's images is its own item (aki-roadmap#268), or a note when it
+                # holds nothing to import alone (New_Look.zip: 4 images, too few for a pack).
+                for a in pack_archives(names):
+                    s0, n0 = len(sources), len(notes)
+                    expand(os.path.join(path, *a.split('/')), job, sources, notes, depth + 1)
+                    if len(sources) == s0 and len(notes) == n0:
+                        notes.append(pack_archive_note(os.path.join(path, *a.split('/')), path))
             return
         if depth >= MAX_DEPTH:
             return
@@ -500,9 +545,14 @@ def expand_zip_members(label, fh, opener, origin, sources, notes, depth, blob):
         else:
             src.zip_blob = whole
         sources.append(src)
+        if not (is_bundle(names, zipped=True) or save_bundle_rom(names, zipped=True)):
+            for a in pack_archives(names):     # aki-roadmap#268: not unpacked here, said instead
+                notes.append(pack_archive_note('%s!%s' % (label, a), label.split('!')[-1]))
         return
     for m in members:
         member_label = '%s!%s' % (label, m.filename)
+        if is_junk(m.filename):
+            continue
         ext = os.path.splitext(m.filename.lower())[1]
         why = member_problem(m)
         try:
@@ -769,6 +819,24 @@ def similar_game(rom, roms, threshold=0.3):
     return best[1]
 
 
+# The ports' header names (0x20), for a hack with its own game code that kept the title (aki-roadmap#268: No Mercy
+# Plus V3 Open Beta (ED) is 'NX4E' "WWF No Mercy + V3-B5", relinked too far for similar_game). The VPW titles are
+# Japanese, so those two aren't matched by name.
+HEADER_TITLES = {'wt': 'WCWvs.NWO:World Tour', 'revenge': 'WCW / nWo  REVENGE', 'wm2k': 'WRESTLEMANIA 2000',
+                 'nomercy': 'WWF No Mercy'}
+
+
+def game_by_title(*names):
+    """The one port whose header title is inside the first of names that holds one (letters and digits only,
+    any case), else None: the hack's header name first, then its file name."""
+    for n in names:
+        squashed = re.sub(r'[^a-z0-9]+', '', (n or '').lower())
+        hits = [g for g, t in HEADER_TITLES.items() if re.sub(r'[^a-z0-9]+', '', t.lower()) in squashed]
+        if len(hits) == 1:
+            return hits[0]
+    return None
+
+
 def classify_rom(rom, order, res, roms, catalog, base_game=None):
     """Fill res for a ROM image (z64 bytes). base_game: the game of the stock ROM a patch made it from."""
     sha1 = hashlib.sha1(rom).hexdigest().upper()
@@ -792,7 +860,7 @@ def classify_rom(rom, order, res, roms, catalog, base_game=None):
             region, GAMES[game]['title'], GAMES[game]['code'][-1] == 'E' and 'USA' or 'Japanese'))
     if not game:
         # A hack may rename its header (Freem: "NVFE"): the base a patch applied to, or the code, says the game.
-        game = base_game or similar_game(rom, roms)
+        game = base_game or similar_game(rom, roms) or game_by_title(hdr['name'], display_name(res.get('item', '')))
         if not game:
             return res.update(status='unsupported', why='header %r (%s) is not one of the six AKI games' % (
                 hdr['code'], hdr['name']))
@@ -1255,6 +1323,7 @@ class Builder:
         if not VERSION.match(self.version):
             raise ImportError_('version %r is not x.y.z (the launcher refuses other versions)' % self.version)
         self.written = {}                           # (game, id) -> input key, for this batch
+        self.taken = set()                          # ids the ledger and this batch hold (run_job shares its set)
         self.authors = job.get('authors') or ['unknown']
         self.repos = job.get('repos') or {}        # game -> a game repo root (developers: its RecompiledFuncs)
         self.game_hint = job.get('game')
@@ -1299,7 +1368,7 @@ class Builder:
         """(path or None, z64 bytes) of the port's ROM, or BuildError."""
         got = self.roms.by_game.get(game)
         if not got:
-            raise NeedsRom('the %s ROM the port uses (the conversion is built against it)' % GAMES[game]['title'])
+            raise NeedsRom(port_rom_needed(game))
         return got
 
     def port_file(self, game):
@@ -1413,17 +1482,26 @@ class Builder:
         return UNTESTED, None, None
 
     def catalog_identity(self, res, game, cid, name, aki, files, entry):
-        """(id, name, files) for a build the catalog matched by its saves and textures alone (aki-roadmap#172): the
-        entry's id and name instead of the ones taken from the archive's folder ("WWF MOD - Public Master V1.0" ->
-        "WWF No Mercy MOD (n64modderz)"). Builds with a patch or codes keep theirs: the catalog named those already
-        from the input's hash, and a patch carries its id inside."""
+        """(id, name, files) for a build the catalog matched by what it built, not by the input's SHA-1: the entry's
+        id and name instead of the ones taken from the file or folder name. aki-roadmap#172: a textures + save mod by
+        its saves and textures ("WWF MOD - Public Master V1.0" -> "WWF No Mercy MOD (n64modderz)"); aki-roadmap#268:
+        a hack by its output alone (nmp_v21, starrcade and wmx64 have no inputs.sha1, so the id was
+        "wcw-nwo-revenge-starrcade-edition-usa-v1-01"). An input the catalog named already keeps that id. An id the
+        ledger or this batch holds gets a -2 suffix (unique_id); the patch's mod id follows the new id."""
         new_id, new_name = entry.get('id'), entry.get('name')
-        if not (new_id or new_name) or not entry.get('outputs', {}).get('content_sha1'):
-            return cid, name, files
-        if 'conversion/patch.nrm' in files or 'conversion/codes.txt' in files:
+        if not (new_id or new_name) or res.get('catalog') == new_id:
             return cid, name, files
         if new_id and package_id(new_id) != cid:
-            cid, _ = self.target(game, package_id(new_id), res)
+            taken = self.taken
+            taken.discard(cid)
+            want = package_id(new_id)
+            cid, _ = self.target(game, unique_id(want, taken), res)
+            taken.add(cid)
+            patch = aki.get('components', {}).get('patch')
+            if patch and isinstance(files.get('conversion/' + patch.get('file', '')), bytes):
+                files = dict(files)
+                files['conversion/' + patch['file']] = nrm_with_id(files['conversion/' + patch['file']], cid)
+                patch['mod_id'] = cid
         if new_name and new_name != name:
             files = dict(files)
             readme = files.get('conversion/README.md')
@@ -1576,6 +1654,11 @@ class Builder:
             cid, name, files = self.catalog_identity(res, game, cid, name, aki, files, entry)
         survey = aki.setdefault('survey', {})
         survey.update(aki_tier=tier, aki_tier_label=TIER_LABELS.get(tier, tier), catalog=(entry or {}).get('id'))
+        # The result's tier is what was built (aki-roadmap#268: it said untested next to aki_tier verified for a hack
+        # matched by its output alone, the classify step's guess).
+        res['tier'] = tier
+        if entry and tier != UNTESTED:
+            res['catalog'] = entry.get('id')
         for k in ('output_sha1', 'codes_sha1', 'content_sha1'):
             if res.get(k):
                 survey[k] = res[k]
@@ -2031,6 +2114,21 @@ class NeedsRom(Exception):
     pass
 
 
+def port_rom_needed(game):
+    """What a hack of `game` needs when the port's ROM wasn't given (plan and build say the same, aki-roadmap#268)."""
+    return 'the %s ROM the port uses (the conversion is built against it)' % GAMES[game]['title']
+
+
+def archive_of(src):
+    """The archive a member came from ('a.zip!x.bps' -> 'a.zip'), or None for a file on disk."""
+    return src.label.rsplit('!', 1)[0] if '!' in src.label else None
+
+
+def is_patch_source(src):
+    return src.kind_hint == 'file' and (looks_like_patch(src.head) or
+                                        os.path.splitext(src.label.lower())[1] in PATCH_EXTS)
+
+
 class NeedsGame(Exception):
     pass
 
@@ -2062,6 +2160,8 @@ def run_job(job, emit, patchfmt=None):
     builder = Builder(job, roms, catalog) if job.get('build') else None
     ledger = Ledger(job.get('ledger')) if job.get('ledger') else None
     taken = ledger.ids() if ledger else set()
+    if builder is not None:
+        builder.taken = taken
     sources, notes = [], []
     try:
         for p in job.get('paths', []):
@@ -2079,9 +2179,50 @@ def run_job(job, emit, patchfmt=None):
                 finally:
                     s.release()
         counts, seen = {}, set()
+        outputs = {}        # hack ROM SHA-1 -> the result of the item that built (or would build) it
+        matched = {}        # (archive, base, game) -> the result of a catalog-named patch from that archive
+        record = job.get('record') or builder is not None
         for n in notes:
             counts[n['status']] = counts.get(n['status'], 0) + 1
             emit(dict(n, event='item'))
+
+        def finish(s, res, key):
+            out = res.get('result_sha1') or (res.get('sha1') if res.get('kind') == 'rom' else None)
+            first = outputs.get(out) if out and res.get('status') == 'ready' else None
+            if first is not None:
+                # aki-roadmap#268: the same hack twice (Badd Blood's ROM and its xdelta + base) is one conversion.
+                res = dict(item=s.label, status='have-it', key=key, kind=res.get('kind'), game=first.get('game'),
+                           id=first.get('id'), name=first.get('name'), duplicate_of=first['item'],
+                           why='the same conversion as %s in this batch (it builds the same ROM)' % first['item'])
+                if ledger is not None and record and key:
+                    ledger.record(key, dict(first, item=s.label))     # a rerun of this input is have-it too
+            if res.get('status') == 'ready' and res.get('kind') in ('rom', 'patch') and \
+                    res.get('game') in GAMES and res['game'] not in roms.by_game:
+                # Conversions are built against the port's ROM: plan says so as build does (aki-roadmap#268).
+                need = port_rom_needed(res['game'])
+                res.update(status='needs-rom', needs=need, why='needs %s' % need)
+            if builder is not None and res.get('status') == 'ready':
+                builder.build(s, res)
+            res = {k: v for k, v in res.items() if not k.startswith('_')}
+            if out and first is None and res['status'] in ('ready', 'converted'):
+                outputs[out] = res
+            if res.get('kind') == 'patch' and res.get('catalog') and res['status'] in ('ready', 'converted'):
+                matched.setdefault((archive_of(s), res.get('base'), res.get('game')), res)
+            counts[res['status']] = counts.get(res['status'], 0) + 1
+            if ledger is not None and record and key and res['status'] in ('ready', 'converted'):
+                if builder is None or res['status'] == 'converted':
+                    ledger.record(key, res)
+            emit(dict(res, event='item'))
+
+        # aki-roadmap#268: a zip of several patches for one hack (VPW64 Deluxe: Summercart and Emulator_over64MB
+        # xdeltas, both on the VPW2 stock). A patch the catalog doesn't know, from an archive holding other patches,
+        # waits until the others are done; when a sibling on the same base matched the catalog, it is that hack's
+        # other build and is skipped, else it is classified again and built as usual.
+        patches = {}
+        for s in sources:
+            if archive_of(s) and is_patch_source(s):
+                patches[archive_of(s)] = patches.get(archive_of(s), 0) + 1
+        deferred = []
         for s in sources:
             res, key = classify(s, roms, catalog, ledger, patchfmt, taken, keep=builder is not None,
                                 hint=job.get('game'))
@@ -2089,15 +2230,27 @@ def run_job(job, emit, patchfmt=None):
                 res = dict(item=s.label, status='have-it', key=key, why='same input as another item in this batch')
             if key:
                 seen.add(key)
-            if builder is not None and res.get('status') == 'ready':
-                builder.build(s, res)
-            res = {k: v for k, v in res.items() if not k.startswith('_')}
-            counts[res['status']] = counts.get(res['status'], 0) + 1
-            record = job.get('record') or builder is not None
-            if ledger is not None and record and key and res['status'] in ('ready', 'converted'):
-                if builder is None or res['status'] == 'converted':
-                    ledger.record(key, res)
-            emit(dict(res, event='item'))
+            # Only an archive of exactly two patches (one hack's two builds, VPW64 Deluxe's Summercart / emulator pair):
+            # in a collection zip of several hacks of one game every unknown hack would hide behind the catalog one.
+            if res.get('status') == 'ready' and res.get('kind') == 'patch' and not res.get('catalog') and \
+                    patches.get(archive_of(s), 0) == 2:
+                taken.discard(res.get('id'))      # its id is chosen again if it is built
+                deferred.append((s, {k: v for k, v in res.items() if not k.startswith('_')}))
+                continue
+            finish(s, res, key)
+        for s, res in deferred:
+            sibling = matched.get((archive_of(s), res.get('base'), res.get('game')))
+            if sibling is not None:
+                label = sibling.get('name') or sibling.get('id')
+                res = dict(item=s.label, status='have-it', key=res.get('key'), kind='patch', game=res.get('game'),
+                           base=res.get('base'), name=res.get('name'), alternative_of=sibling['item'],
+                           why='another build of %s: skipped; import it alone to build it' % label)
+                counts[res['status']] = counts.get(res['status'], 0) + 1
+                emit(dict(res, event='item'))
+                continue
+            res, key = classify(s, roms, catalog, ledger, patchfmt, taken, keep=builder is not None,
+                                hint=job.get('game'))
+            finish(s, res, key)
         if ledger is not None and (job.get('record') or builder is not None):
             ledger.save()
     finally:

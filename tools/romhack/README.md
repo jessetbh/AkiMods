@@ -77,20 +77,35 @@ python -I tools\romhack\aki_import.py build C:\Downloads\wrestling --rom nomercy
 
 - **Status per item:** `ready` (with a `route`: `survey` for hack ROMs, which `aki-hack survey`
   sends to make_patch_mod or derelink; `import-pj64`; `wrap-rice` / `wrap-jabo` / `hts-export` /
-  `install`), `stock`, `have-it`, `needs-rom` (`needs` names the base when the patch says which),
-  `unsupported` (`why`), `failed` (`why`).
+  `install`), `stock`, `have-it`, `needs-rom` (`needs` names the base when the patch says which;
+  also a hack whose port ROM wasn't given, in `plan` as in `build`), `needs-game` (`build`: a
+  texture pack or bundle that doesn't say its game; pass `--game`), `unsupported` (`why`),
+  `failed` (`why`).
+- **One conversion per hack in a batch** (#268): an item that builds the same ROM as an earlier
+  one (a hack ROM and its patch) is `have-it` with `duplicate_of`, and the ledger records its input
+  too. In an archive holding exactly two patches, the one the catalog doesn't know, when its sibling (same
+  base) matched a catalog entry is that hack's other build (VPW64 Deluxe's Emulator_over64MB
+  xdelta beside the Summercart one): `have-it` with `alternative_of`, not built; imported alone
+  it builds as usual.
 - **Tiers:** a hack that matches the recipe catalog (`--catalog`, by SHA-1) gets that entry's id,
   name, route and tier; any other hack is `untested` (#224, #172). A built package keeps the tier
   only when it is the tested build: its patch makes the entry's `outputs.sha1`, else its
   `codes.txt` is `outputs.codes_sha1`, else (textures + save mods, no patch or codes) its saves and
   texture images hash to `outputs.content_sha1` (SHA-1 of the sorted `<path> NUL <file SHA-1> LF`
   lines for `conversion/saves/*` and the images under `conversion/textures/`, not `rt64.json`).
+- **Hacks with their own game code** go to a port's game by the stock ROM a patch applied to,
+  else by how much code they share with a port's ROM, else (#268) by a port's header title in
+  their header name or file name (No Mercy Plus V3 Open Beta (ED): `NX4E`, "WWF No Mercy +
+  V3-B5"), and are `untested`. Other games stay `unsupported`.
 - **Patches** are applied with `patchfmt.py` in this folder (`detect(patch)`,
   `apply(patch, source) -> (target, info)`, `PatchError`). Every given stock ROM is tried as the
   base, port ROMs first; stock ROMs among the inputs count too. `.rup` and PPF files are refused
   by name (a Project64 bundle's `.rup` is applied by import-pj64).
 - **Ids and names** come from the catalog, else from the file or folder name, made unique
-  against the ledger.
+  against the ledger. A build the catalog matches by what it built (its output, codes or content
+  hash; entries without `inputs.sha1` such as nmp_v21, starrcade, wmx64) takes the entry's id and
+  name too, with a `-2` suffix when the ledger or batch already holds that id (#268). After a
+  build, `tier` is the built package's tier (the same as `aki_tier`).
 - **The ledger** keys every input by content hash (a ROM in `.z64` order, a patch file, a
   folder's files), so a rerun reports `have-it` instead of building again. `plan` only reads it;
   `--record` (worker: `"record": true`) adds the items made ready.
@@ -98,6 +113,12 @@ python -I tools\romhack\aki_import.py build C:\Downloads\wrestling --rom nomercy
   inflating more than 100:1 are refused. 7z needs `7zr.exe` (`bin\7zr.exe` here, PATH, or
   `--sevenzip`) and unpacks into `--work` (keyed by the archive's content), or into a temp folder
   deleted after the batch. RAR: extract first.
+- **Texture packs** stay one item however deep their folders go. An archive in a folder of the
+  pack's own images doesn't split the pack (#268): it becomes its own item (on disk), or a
+  `unsupported` note when it holds nothing to import alone (or sits in a zipped pack). An archive
+  anywhere else makes the folder a folder of items, as ROMs, patches and mods do.
+- **OS clutter** (`Thumbs.db`, `desktop.ini`, `.DS_Store`, `._*` AppleDouble files, `__MACOSX\`)
+  is skipped without a line (#268).
 - **Untrusted input:** one bad file fails alone; links and junctions aren't followed; files are
   read whole only when they look like a ROM, patch or mod, and their bytes are dropped after each
   item.

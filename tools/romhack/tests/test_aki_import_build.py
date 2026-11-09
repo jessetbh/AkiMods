@@ -294,7 +294,18 @@ class HackRoutes(BuildBase):
         cat = self.catalog([{'id': 'other', 'name': 'Other', 'game': 'nomercy', 'tier': 'experimental',
                              'outputs': {'sha1': [sha1]}}])
         r = self.build_one([self.write('in/x.z64', bytes(hack))], catalog=cat)   # make_patch_mod: output = hack
-        self.assertEqual((r['aki_tier'], r['id']), ('experimental', 'x'))
+        # aki-roadmap#268: the entry's id and name, as an input SHA-1 match gives, and a tier that agrees with aki_tier.
+        self.assertEqual((r['aki_tier'], r['tier'], r['catalog'], r['id'], r['name']),
+                         ('experimental', 'experimental', 'other', 'other', 'Other'))
+        m, aki, _ = check_package(self, r['package'], 'conversion')     # the patch's mod id follows the new id
+        self.assertEqual((m['id'], m['display_name'], aki['name'], os.path.basename(r['package'])),
+                         ('other', 'Other', 'Other', 'other-1.0.0.zip'))
+        # An id the ledger holds (another conversion called "other") stays unique.
+        ledger = self.write('ledger.json', json.dumps({'entries': {'K': {'id': 'other'}}}).encode())
+        shutil.rmtree(self.out)
+        r = self.build_one([self.write('in/x.z64', bytes(hack))], catalog=cat, ledger=ledger)
+        self.assertEqual((r['id'], r['aki_tier']), ('other-2', 'experimental'))
+        check_package(self, r['package'], 'conversion')
 
     def test_codes_only_conversion_matches_by_codes(self):
         bundle = Pj64Bundles.bundle(self)
@@ -390,6 +401,51 @@ class TexturePacks(BuildBase):
             cfg = json.loads(z.read('textures/rt64.json'))
             self.assertEqual(cfg['configuration']['autoPath'], 'rice')
             self.assertNotIn('textures/readme.txt', z.namelist())
+
+    def test_nested_archive_keeps_the_pack_whole(self):
+        # aki-roadmap#268 (TNA vs ROH): a small zip among a wrestler's shirt textures split the pack into one package
+        # per wrestler folder and lost the loose images of the folders above it (Raven\Attire 3).
+        rice = 'in/TNA/Pack/%s/WWF No Mercy#%08X#2#1#0C292BE7_ciByRGBA.png'
+        n = 0
+        for folder, count in (('Abyss', 6), ('Raven/Attire 3', 3), ('Raven/Attire 3/T-Shirts/New look', 2),
+                              ('Raven/Attire 3/T-Shirts/clockwork', 4)):
+            for _ in range(count):
+                self.write(rice % (folder, n), png(n))
+                n += 1
+        inner = io.BytesIO()
+        with zipfile.ZipFile(inner, 'w') as z:
+            for i in range(4):
+                z.writestr('WWF No Mercy#%08X#2#1#00000000_ciByRGBA.png' % (100 + i), png(i))
+        self.write('in/TNA/Pack/Raven/Attire 3/T-Shirts/New look/New_Look.zip', inner.getvalue())
+        self.write('in/TNA/Pack/Raven/Attire 3/Thumbs.db', b'x')
+        items, _ = self.build([os.path.join(self.dir, 'in', 'TNA')])
+        packs = [i for i in items if i.get('kind') == 'texture-pack']
+        self.assertEqual(len(packs), 1, items)
+        self.assertEqual((packs[0]['status'], packs[0]['images']), ('converted', n))
+        with zipfile.ZipFile(packs[0]['package']) as z:
+            self.assertEqual(sum(x.endswith('.png') for x in z.namelist()), n)   # every image, at every level
+        rest = [i for i in items if i is not packs[0]]
+        self.assertEqual([(os.path.basename(i['item']), i['status']) for i in rest], [('New_Look.zip', 'unsupported')])
+        self.assertIn('inside the texture pack', rest[0]['why'])
+        # A zip among the pack's images that is a pack itself becomes its own item.
+        with zipfile.ZipFile(inner, 'a') as z:
+            z.writestr('WWF No Mercy#%08X#2#1#00000000_ciByRGBA.png' % 200, png(9))
+        self.write('in/TNA/Pack/Raven/Attire 3/T-Shirts/New look/New_Look.zip', inner.getvalue())
+        shutil.rmtree(self.out)
+        items, _ = self.build([os.path.join(self.dir, 'in', 'TNA')])
+        self.assertEqual(sorted((i['kind'], i['status'], i.get('images')) for i in items),
+                         [('texture-pack', 'converted', 5), ('texture-pack', 'converted', n)])
+        # Zipped, the inner archive is named in a note; an archive outside the images still makes a folder of items.
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, 'w') as z:
+            for i in range(6):
+                z.writestr('P/a/WWF No Mercy#%08X#2#1#00000000_ciByRGBA.png' % i, png(i))
+            z.writestr('P/a/x.zip', inner.getvalue())
+        items, _ = self.run_job([self.write('in/zp.zip', buf.getvalue())])
+        self.assertEqual(sorted((i.get('kind'), i['status']) for i in items),
+                         [('archive', 'unsupported'), ('texture-pack', 'ready')])
+        self.assertFalse(ai.is_texture_folder(['hacks/h.zip'] + ['tex/WWF No Mercy#%08X#2#1_all.png' % i
+                                                                  for i in range(6)]))
 
     def test_jabo_pack_needs_a_game_then_builds(self):
         for i in range(5):
@@ -824,6 +880,72 @@ class Rev0Codes(BuildBase):
         r = self.build_one([Pj64Bundles.bundle(self)])
         self.assertEqual(r['codes'], "codes for the port's revision (1 lines)")
         self.assertNotIn('codes_translation', r)
+
+
+class ImportPolish(BuildBase):
+    """aki-roadmap#268: one conversion per hack in a batch, plan agreeing with build."""
+
+    def hack(self, offset, val=7):
+        rom = bytearray(STOCK)
+        rom[offset] ^= val
+        return bytes(rom)
+
+    def zip_of(self, rel, files):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, 'w') as z:
+            for name, data in files.items():
+                z.writestr(name, data)
+        return self.write(rel, buf.getvalue())
+
+    def test_same_output_twice_builds_one_conversion(self):
+        # Badd Blood: the hack ROM and its patch (applied to the stock ROM) build the same ROM.
+        rom = self.write('in/Hack.z64', self.hack(0x2000))
+        patch = self.write('in/hack.xdelta', t.make_patch(STOCK, [(0x2000, self.hack(0x2000)[0x2000])]))
+        ledger = os.path.join(self.dir, 'ledger.json')
+        items, _ = self.build([rom, patch], ledger=ledger)
+        by = {os.path.basename(i['item']): i for i in items}
+        self.assertEqual(by['Hack.z64']['status'], 'converted')
+        self.assertEqual((by['hack.xdelta']['status'], by['hack.xdelta']['duplicate_of'], by['hack.xdelta']['id']),
+                         ('have-it', rom, 'hack'))
+        self.assertEqual(os.listdir(os.path.join(self.out, 'nomercy')), ['hack-1.0.0.zip'])
+        items, _ = self.build([patch], ledger=ledger)        # the ledger knows the second input too
+        self.assertEqual(items[0]['status'], 'have-it')
+
+    def catalog_for(self, rom, **entry):
+        sha1 = hashlib.sha1(rom).hexdigest().upper()
+        e = dict(id='deluxe', name='Deluxe v1.1', game='nomercy', tier='experimental',
+                 inputs={'sha1': [sha1]}, outputs={'sha1': [sha1]}, **entry)
+        return self.write('catalog.json', json.dumps({'entries': [e]}).encode())
+
+    def test_sibling_patch_of_a_catalog_hack_is_an_alternative(self):
+        # VPW64 Deluxe v1.1: two xdeltas of one hack in one zip; the catalog knows one build.
+        known, other = self.hack(0x2000), self.hack(0x2004)
+        z = self.zip_of('in/deluxe.zip', {
+            'Deluxe_Emulator.xdelta': t.make_patch(STOCK, [(0x2004, other[0x2004])]),   # first in the zip
+            'Deluxe_Summercart.xdelta': t.make_patch(STOCK, [(0x2000, known[0x2000])])})
+        items, _ = self.build([z], catalog=self.catalog_for(known))
+        by = {i['item'].split('!')[-1]: i for i in items}
+        self.assertEqual((by['Deluxe_Summercart.xdelta']['status'], by['Deluxe_Summercart.xdelta']['id'],
+                          by['Deluxe_Summercart.xdelta']['aki_tier']), ('converted', 'deluxe', 'experimental'))
+        alt = by['Deluxe_Emulator.xdelta']
+        self.assertEqual((alt['status'], alt['alternative_of']), ('have-it', z + '!Deluxe_Summercart.xdelta'))
+        self.assertIn('another build of Deluxe v1.1', alt['why'])
+        self.assertEqual(os.listdir(os.path.join(self.out, 'nomercy')), ['deluxe-1.0.0.zip'])
+        # Alone (not in that zip) it builds, Untested.
+        r = self.build_one([self.write('in/Deluxe_Emulator.xdelta', t.make_patch(STOCK, [(0x2004, other[0x2004])]))],
+                           catalog=self.catalog_for(known))
+        self.assertEqual((r['status'], r['aki_tier']), ('converted', 'untested'))
+        # Without a catalog match in the zip, both build.
+        shutil.rmtree(self.out)
+        items, _ = self.build([z], catalog='')
+        self.assertEqual(sorted(i['status'] for i in items), ['converted', 'converted'])
+
+    def test_plan_says_needs_rom_as_build_does(self):
+        rom = self.write('in/Hack.z64', self.hack(0x2000))
+        plan = self.one([rom], roms={})
+        build = self.build_one([rom], roms={})
+        self.assertEqual((plan['status'], plan['needs']), (build['status'], build['needs']))
+        self.assertEqual(plan['needs'], 'the WWF No Mercy ROM the port uses (the conversion is built against it)')
 
 
 class ReviewFixes(BuildBase):
