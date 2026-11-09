@@ -1246,6 +1246,31 @@ class Builder:
                                      'converter?)' % TIER_LABELS.get(known.get('tier'), known.get('tier')))
         return UNTESTED, None, None
 
+    def catalog_identity(self, res, game, cid, name, aki, files, entry):
+        """(id, name, files) for a build the catalog matched by its saves and textures alone (aki-roadmap#172): the
+        entry's id and name instead of the ones taken from the archive's folder ("WWF MOD - Public Master V1.0" ->
+        "WWF No Mercy MOD (n64modderz)"). Builds with a patch or codes keep theirs: the catalog named those already
+        from the input's hash, and a patch carries its id inside."""
+        new_id, new_name = entry.get('id'), entry.get('name')
+        if not (new_id or new_name) or not entry.get('outputs', {}).get('content_sha1'):
+            return cid, name, files
+        if 'conversion/patch.nrm' in files or 'conversion/codes.txt' in files:
+            return cid, name, files
+        if new_id and package_id(new_id) != cid:
+            cid, _ = self.target(game, package_id(new_id), res)
+        if new_name and new_name != name:
+            files = dict(files)
+            readme = files.get('conversion/README.md')
+            if isinstance(readme, bytes):
+                files['conversion/README.md'] = readme.replace(name.encode('utf-8'), new_name.encode('utf-8'))
+            if isinstance(aki.get('description'), str) and not entry.get('description'):
+                aki['description'] = aki['description'].replace(name, new_name)
+            name = new_name
+        if entry.get('description'):
+            aki['description'] = entry['description']
+        aki.update(id=cid, name=name)
+        return cid, name, files
+
     @classmethod
     def content_sha1(cls, files):
         """A conversion's saves and texture images as one SHA-1 (aki-roadmap#172: a textures + save mod has no patch or
@@ -1381,6 +1406,8 @@ class Builder:
 
     def write_conversion(self, res, game, cid, name, aki, files, requires=None):
         tier, entry, note = self.judge(res, game, files)
+        if entry and tier != UNTESTED:
+            cid, name, files = self.catalog_identity(res, game, cid, name, aki, files, entry)
         survey = aki.setdefault('survey', {})
         survey.update(aki_tier=tier, aki_tier_label=TIER_LABELS.get(tier, tier), catalog=(entry or {}).get('id'))
         for k in ('output_sha1', 'codes_sha1', 'content_sha1'):
@@ -1711,6 +1738,7 @@ class Builder:
     def build_bundle(self, src, res):
         conv = self.mod('aki_conv')
         folder, unpacked = self.bundle_folder(src)
+        out = None
         try:
             game = self.bundle_game(folder, conv, res.get('game'))
             entry = self.catalog_entry(res) or {}
@@ -1761,7 +1789,8 @@ class Builder:
         finally:
             if unpacked:
                 shutil.rmtree(unpacked, ignore_errors=True)
-            shutil.rmtree(self.tmp('pj64-%s' % package_id(res.get('id') or 'x')), ignore_errors=True)
+            if out:     # by the id it was made under: a catalog match can rename the conversion (catalog_identity)
+                shutil.rmtree(out, ignore_errors=True)
 
     def repack_pj64(self, res, game, cid, name, out, report):
         """import-pj64's Thunderstore-shaped zips -> one #154 conversion package (aki.json + its files under

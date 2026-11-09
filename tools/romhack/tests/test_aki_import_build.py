@@ -508,6 +508,25 @@ class TexturesSave(BuildBase):
                              'outputs': {'content_sha1': [first['content_sha1']]}}])
         r = self.build_one([self.mod()], catalog=cat)
         self.assertEqual((r['aki_tier'], r['note']), ('verified', 'N'))
+        # The entry names it, not the archive's folder (aki-roadmap#172).
+        self.assertEqual((r['id'], r['name']), ('n64m', 'Mod'))
+        self.assertEqual(os.path.basename(r['package']), 'n64m-1.0.0.zip')
+        m, aki, _ = check_package(self, r['package'], 'conversion')
+        self.assertEqual((m['id'], m['display_name'], aki['id'], aki['name']), ('n64m', 'Mod', 'n64m', 'Mod'))
+        self.assertNotIn('WWF MOD', aki['description'])
+        with zipfile.ZipFile(r['package']) as z:
+            readme = z.read('conversion/README.md').decode('utf-8')
+        self.assertIn('Mod', readme)
+        self.assertNotIn('WWF MOD', readme)
+        self.assertFalse(os.path.exists(os.path.join(self.dir, 'work', 'build')))   # import-pj64's temp folder went
+
+    def test_untested_build_keeps_the_folder_name(self):
+        first = self.build_one([self.mod()])
+        self.assertEqual((first['id'], first['name']), ('wwf-mod', 'WWF MOD'))
+        cat = self.catalog([{'id': 'n64m', 'name': 'Mod', 'game': 'nomercy', 'tier': 'verified',
+                             'outputs': {'content_sha1': [first['content_sha1']]}}])
+        r = self.build_one([self.mod('in2/WWF MOD', fla=2)], catalog=cat)
+        self.assertEqual((r['aki_tier'], r['id'], r['name']), ('untested', 'wwf-mod-2', 'WWF MOD'))
 
     def test_other_save_is_untested(self):
         first = self.build_one([self.mod()])
