@@ -249,6 +249,12 @@ class BaselessPatches(unittest.TestCase):
         self.assertIn('fits more than one: B, A', why)
         self.assertEqual(ai.baseless_patch_pick(applied, 'game_a'), (1, None))
         self.assertEqual(ai.baseless_patch_pick(applied[:1]), (0, None))  # one base: that one
+        # The import's game without its ROM among the bases: say that, not "import it from that game's page".
+        v = [('game_b', 'B', False, True), ('game_a', 'A', False, True)]
+        i, why = ai.baseless_pick_from(v, 'wm2k', available={'game_a', 'game_b'})
+        self.assertIsNone(i)
+        self.assertIn("ROM isn't set up", why)
+        self.assertNotIn('pass game', why)
 
     def test_real_stock_roms_checksums(self):
         # The algorithm against the six real dumps' headers (not committed; skipped without the local test library).

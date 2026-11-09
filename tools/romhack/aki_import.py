@@ -27,7 +27,8 @@ Result status per item:
   have-it      the ledger already has this exact input
   needs-rom    a patch whose base ROM isn't among the ROMs given (`needs` names it when the patch says which); in a
                build, also a hack whose port ROM wasn't given (conversions are built against it)
-  needs-game   (build) a texture pack or bundle that doesn't say its game: pass "game"
+  needs-game   a texture pack or bundle (build) that doesn't say its game, or an IPS / APS patch that fits more
+               than one game's ROM with nothing to tell them apart (aki-roadmap#269): pass "game"
   unsupported  not one of the six AKI games, another region, a format we don't read yet (`why`)
   failed       something broke (`why`)
 
@@ -807,36 +808,48 @@ def n64_cic_of(rom):
     return _CIC_CACHE[key]
 
 
+def baseless_verdict(game, base, out):
+    """(proven, names its own game) for one base a base-less patch applied to (baseless_patch_pick)."""
+    lo, hi = N64_CRC_START, N64_CRC_START + N64_CRC_LEN
+    proven = False
+    if out[0x10:0x18] != base[0x10:0x18] or out[lo:hi] != base[lo:hi]:
+        cic = n64_cic_of(base)
+        proven = bool(cic) and n64_checksum(out, *cic) == n64_stored_checksum(out)
+    return proven, game_for_code(rom_header(out)['code'])[0] == game
+
+
+def baseless_pick_from(verdicts, hint=None, available=None):
+    """baseless_patch_pick on precomputed verdicts: [(game, name, proven, own)]. available: the games whose ROMs were
+    given (for the message when the import's game isn't among them)."""
+    proven = [i for i, v in enumerate(verdicts) if v[2]]
+    if len(proven) == 1:
+        return proven[0], None
+    pool = proven or list(range(len(verdicts)))
+    own = [i for i in pool if verdicts[i][3]]
+    if 0 < len(own) < len(pool):
+        pool = own
+    if hint:
+        for i in pool:
+            if verdicts[i][0] == hint:
+                return i, None
+    if len(pool) == 1:
+        return pool[0], None
+    names = ', '.join(verdicts[i][1] for i in pool)
+    if hint and hint in GAMES and (available is None or hint not in available):
+        return None, ("this patch doesn't say which ROM it is for, and the %s ROM isn't set up: set it on the game's "
+                      "card and import again (the patch also fits: %s)" % (GAMES[hint]['title'], names))
+    return None, ("this patch doesn't say which ROM it is for and fits more than one: %s. Import it from that game's "
+                  "Mods page" % names)
+
+
 def baseless_patch_pick(applied, hint=None):
     """Which base a patch without a source check (IPS, APS) was made for. applied: [(game, name, base, out)].
     Returns (index, None) or (None, why). A base is proven when the patch changed its checksummed area or header
     checksum and the result's checksum is valid with the base's CIC (on any other base the sum is wrong). Else the
     game the import is for (hint) decides, else a single base; more than one possible base asks instead of guessing."""
-    proven = []
-    for i, (game, name, base, out) in enumerate(applied):
-        lo, hi = N64_CRC_START, N64_CRC_START + N64_CRC_LEN
-        if out[0x10:0x18] == base[0x10:0x18] and out[lo:hi] == base[lo:hi]:
-            continue                                   # nothing checksummed changed: no proof either way
-        cic = n64_cic_of(base)
-        if cic and n64_checksum(out, *cic) == n64_stored_checksum(out):
-            proven.append(i)
-    if len(proven) == 1:
-        return proven[0], None
-    pool = proven or list(range(len(applied)))
     # A patch that writes a cartridge code names its game: where the result's header names the base's own game while
     # on another base it names a different one, those bases are the patch's (the header test the importer always used).
-    own = [i for i in pool if game_for_code(rom_header(applied[i][3])['code'])[0] == applied[i][0]]
-    if 0 < len(own) < len(pool):
-        pool = own
-    if hint:
-        for i in pool:
-            if applied[i][0] == hint:
-                return i, None
-    if len(pool) == 1:
-        return pool[0], None
-    names = ', '.join(applied[i][1] for i in pool)
-    return None, ("this patch doesn't say which ROM it is for and fits more than one: %s. Import it from that game's "
-                  "Mods page (or pass game)" % names)
+    return baseless_pick_from([(game, name) + baseless_verdict(game, base, out) for game, name, base, out in applied], hint)
 
 
 def classify_patch(data, fmt, res, roms, catalog, patchfmt, keep=False, hint=None):
@@ -848,7 +861,7 @@ def classify_patch(data, fmt, res, roms, catalog, patchfmt, keep=False, hint=Non
     if patchfmt is None:
         return res.update(status='failed', why='the patch engine (patchfmt.py) is not installed')
     # Every base is tried: formats without a source check (IPS, APS) "apply" to anything, so the result whose header
-    # names the base's own game wins, else the first that applied.
+    # names the base's own game wins; IPS / APS are placed by baseless_pick_from (checksum, header, the import's game).
     tried, errors, needs, found = [], [], None, None
     baseless = fmt in BASELESS_PATCHES
     applied = []                                       # (game, name, base, out, info) for baseless formats
@@ -869,7 +882,8 @@ def classify_patch(data, fmt, res, roms, catalog, patchfmt, keep=False, hint=Non
             errors.append('%s: the result is not an N64 ROM' % name)
             continue
         if baseless:                                   # aki-roadmap#269: decided below, from every base it fits
-            applied.append((game, name, base, out, info))
+            applied.append((game, name, base) + baseless_verdict(game, base, out))
+            del out, target                            # a verdict per base, not every patched ROM, stays in memory
             continue
         out_game, _ = game_for_code(rom_header(out)['code'])
         if found is None or (out_game == game and found[3] != found[0]):
@@ -877,11 +891,14 @@ def classify_patch(data, fmt, res, roms, catalog, patchfmt, keep=False, hint=Non
         if out_game == game:
             break
     if baseless and applied:
-        i, why = baseless_patch_pick([a[:4] for a in applied], hint)
+        i, why = baseless_pick_from([(a[0], a[1], a[3], a[4]) for a in applied], hint,
+                                    available={a[0] for a in applied})
         if i is None:
             return res.update(status='needs-game', why=why,
                               candidates=sorted({a[0] for a in applied if a[0] in GAMES}))
-        game, name, _, out, info = applied[i]
+        game, name, base = applied[i][:3]
+        target, info = patchfmt.apply(data, base)
+        out, _ = to_z64(bytes(target))
         found = (game, name, (out, info), game)
     if found is None:
         if errors and not tried:
