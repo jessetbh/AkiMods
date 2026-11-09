@@ -345,7 +345,7 @@ def cmd_validate(a):
             shutil.rmtree(stage)
         os.makedirs(stage)
         pkg_zip = os.path.join(stage, '%s-%s.zip' % (CONV_ID, m['version']))
-        r = subprocess.run([sys.executable, tool, 'package', '--from', conv, '-o', pkg_zip, '--license', 'CC0-1.0',
+        r = subprocess.run([sys.executable, tool, 'package', '--from', conv, '-o', pkg_zip, '--license', m.get('license', 'CC0-1.0'),
                             '--base-name', 'WWF No Mercy (USA) (Rev 1)'], capture_output=True, text=True)
         print(r.stdout.strip())
         if r.stderr.strip():
