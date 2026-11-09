@@ -158,7 +158,30 @@ class Layout:
 
     def overlays_for(self, addr, conds):
         """The overlay names a write at `addr` under these conditions can be for, or None when that doesn't narrow it."""
-        names = {s['name'] for s in self.covering(addr) if s.get('slot') is not None}
+        return self.context(addr, conds)[0]
+
+    def overlap(self, a, b):
+        """Whether two overlays share RAM (text to the end of bss), so they're never loaded at the same time."""
+        sa = [s for s in self.secs if s['name'] == a]
+        sb = [s for s in self.secs if s['name'] == b]
+        if not sa or not sb:
+            return False
+        sa, sb = sa[0], sb[0]
+        return sa['text'] < sb.get('end', sb['data']) and sb['text'] < sa.get('end', sa['data'])
+
+    def context(self, addr, conds, written=()):
+        """(overlay names as overlays_for gives them, live) for a write at `addr` under these D1 conditions.
+
+        A condition on overlay text tells which overlay is loaded: the ones whose ROM holds the halfword (`match`).
+        That rules out the others covering the condition address and every overlay that shares RAM with all of the
+        matching ones; overlays elsewhere stay (a guard on ovl_b's text says nothing against ovl_a, loaded with it).
+        `live` is False when the port's ROM contradicts the conditions: no overlay holds a condition's halfword (and
+        the list doesn't write it itself, `written`), or none of the overlays at `addr` can be loaded under them.
+        Such a write never runs on the stock code; its names are then what the conditions that do match say, as
+        before aki-roadmap#246, and translate_values only follows a cave from it when nothing live reaches it."""
+        slot_names = [s['name'] for s in self.secs if s.get('slot') is not None]
+        own = {s['name'] for s in self.covering(addr) if s.get('slot') is not None}
+        names, live = set(own), True
         for ca, cv in conds:
             secs = [s for s in self.secs if s.get('slot') is not None and s['text'] <= ca < s['data']]
             if not secs:
@@ -168,9 +191,21 @@ class Layout:
                 w = self.rom_word(s, ca & ~3)
                 if w is not None and ((w >> 16) if not ca & 2 else w & 0xFFFF) == cv:
                     match.add(s['name'])
-            if match:
+            if not match:
+                if ca not in written:
+                    live = False
+                continue
+            if not own:
                 names = (names & match) or match
-        return sorted(names) or None
+                continue
+            out = {s['name'] for s in secs} - match
+            out |= {n for n in slot_names if n not in match and all(self.overlap(n, m) for m in match)}
+            if names - out:
+                names -= out
+            else:
+                live = False
+                names = (names & match) or match
+        return sorted(names) or None, live
 
 
 def parse(text):
@@ -281,7 +316,7 @@ def translate_values(text, mapper, layout):
         for a in sorted(run):
             if a & 2:
                 if a - 2 not in run:
-                    ctx = layout.overlays_for(a, conds)
+                    ctx, live = layout.context(a, conds, at)
                     secs = [s for s in layout.covering(a & ~3) if not ctx or s['name'] in ctx or s.get('slot') is None]
                     bases = {s['name']: layout.rom_word(s, a & ~3) for s in secs}
                     jumps = {name: b for name, b in bases.items() if b is not None and b >> 26 in (J, JAL)}
@@ -301,7 +336,7 @@ def translate_values(text, mapper, layout):
                             change_half(run[a], (n >> 2) & 0xFFFF)
                             report['low_halves'] += 1
                             if cave_word(n) is not None:
-                                roots.append((n, ctx))
+                                roots.append((n, ctx, live))
                                 report['hooks_into_caves'] += 1
                         else:
                             report['unmapped'].append('low half at %08X = %04X' % (a, run[a][2]))
@@ -315,7 +350,7 @@ def translate_values(text, mapper, layout):
                 hilo = HiLo()
             prev = a
             w = (run[a][2] << 16) | run[a + 2][2]
-            ctx = layout.overlays_for(a, conds)
+            ctx, live = layout.context(a, conds, at)
             hilo.step(a, w)
             t = jump_target(w)
             if t is not None:
@@ -326,7 +361,7 @@ def translate_values(text, mapper, layout):
                 else:
                     fix_jump(run[a], run[a + 2], w, ctx, a)
                     if cave_word(n) is not None:
-                        roots.append((n, ctx))
+                        roots.append((n, ctx, live))
                         report['hooks_into_caves'] += 1
             if w >> 26 == 0 and (w & 0x3F) == 8:    # jr: a hook built with lui + low + jr
                 reg = _rs(w)
@@ -334,14 +369,23 @@ def translate_values(text, mapper, layout):
                 if lui is not None and hilo.uses.get(lui):
                     n = mapper.map(hilo.uses[lui][-1][1], ctx)
                     if n is not None and cave_word(n) is not None:
-                        roots.append((n, ctx))
+                        roots.append((n, ctx, live))
                         report['hooks_into_caves'] += 1
         flush(hilo, run, ctx)
 
     # 2. Cave code: follow control flow from the hooks. The roots are port addresses, and so are the cave's own places;
     # the jumps and branches inside still hold old-revision addresses, which is why they're mapped before following.
+    # A cave reached from several hooks is followed once, in the overlays of all of them (the mapper then needs them to
+    # agree), not in whichever hook came last. Hooks whose conditions the ROM contradicts never run on the stock code
+    # (a version for the wrong overlay, aki-roadmap#246): they only count when nothing else reaches the cave.
+    by_entry = collections.defaultdict(lambda: ([], []))
+    for n, ctx, live in roots:
+        by_entry[n][0 if live else 1].append(ctx)
+    work = []
+    for n in sorted(by_entry, reverse=True):
+        ctxs = by_entry[n][0] or by_entry[n][1]
+        work.append((n, None if any(c is None for c in ctxs) else sorted(set().union(*ctxs))))
     seen = set()
-    work = list(roots)
     while work:
         entry, ctx = work.pop()
         if entry in seen:
