@@ -284,6 +284,31 @@ class Containers(Base):
         items, _ = self.run_job([rar, sz], sevenzip=os.path.join(self.dir, 'missing.exe'))
         self.assertEqual({i['status'] for i in items}, {'unsupported'})
 
+    def test_7z_finds_an_installed_7zip_and_says_what_to_do_without_one(self):
+        # aki-roadmap#266: the launcher ships no 7zr.exe; a player's 7-Zip install is found, and without one the
+        # message says what to do (it named bin\\7zr.exe and --sevenzip, which a player can't act on).
+        fake = self.write('pf/7-Zip/7z.exe', b'x')
+        saved = {k: os.environ.get(k) for k in ('ProgramW6432', 'ProgramFiles', 'ProgramFiles(x86)', 'PATH')}
+        try:
+            os.environ['ProgramW6432'] = os.path.join(self.dir, 'pf')
+            os.environ['PATH'] = ''
+            self.assertEqual(os.path.normcase(ai.find_7zr({})), os.path.normcase(os.path.normpath(fake)))
+            self.assertIsNone(ai.find_7zr({'sevenzip': os.path.join(self.dir, 'missing.exe')}))  # given: only that
+            for k in ('ProgramW6432', 'ProgramFiles', 'ProgramFiles(x86)'):
+                os.environ[k] = os.path.join(self.dir, 'none')
+            sz = self.write('in/b.7z', b"7z\xbc\xaf\x27\x1c\x00\x04")
+            if ai.find_7zr({}) is None:          # no 7zr beside the tools either
+                r = self.one([sz])
+                self.assertEqual(r['status'], 'unsupported')
+                self.assertIn('install 7-Zip', r['why'])
+                self.assertNotIn('--sevenzip', r['why'])
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
     def test_rar_says_how_to_extract_it(self):
         # aki-roadmap#172: N64Modderz64's WWF No Mercy MOD ships as a .rar; the player is told what to do.
         rar = self.write('in/WWF MOD - Public Master V1.0.rar', b'Rar!\x1a\x07\x01\x00' + bytes(32))
@@ -307,6 +332,13 @@ class Containers(Base):
 
 
 class LedgerAndIds(Base):
+    def test_ledger_in_a_folder_that_does_not_exist_yet(self):
+        # aki-roadmap#270: --ledger inside an --out nothing created yet (nothing built) crashed in Ledger.save.
+        ledger = os.path.join(self.dir, 'Converted', 'sub', 'L.json')
+        led = ai.Ledger(ledger)
+        led.save()
+        self.assertTrue(os.path.isfile(ledger))
+
     def test_rerun_is_have_it_and_ids_stay_unique(self):
         ledger = os.path.join(self.dir, 'ledger.json')
         h1, h2 = bytearray(STOCK), bytearray(STOCK)
