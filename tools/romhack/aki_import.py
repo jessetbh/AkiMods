@@ -329,11 +329,36 @@ def strip_root(names):
     return names
 
 
-def is_bundle(names, zipped=False):
-    """A Project64 folder: its markers at the top or in Config/ (Config/Project64.cfg), not deeper, so a
-    folder that holds several bundles isn't taken as one. A zip's single top folder doesn't count as a level."""
+def _pj64_marker(rel):
+    return rel in PJ64_MARKERS or (rel.startswith('config/') and rel[7:] in PJ64_MARKERS)
+
+
+def bundle_root(names, zipped=False):
+    """Where a Project64 bundle's own folder is, relative to the names ('' = at the top; a zip's single top folder
+    doesn't count as a level), or None for no bundle. Its markers sit at that folder's top or in its Config/
+    (Config/Project64.cfg). Distributions often wrap it once more, beside their read-me files and a launcher exe
+    (WWF Legends: Challenge 64, 'Ch64 - Public/Project64/Project64.exe', aki-roadmap#265): exactly one subfolder
+    holding the markers counts too: in a zip, or in a folder with files of its own beside it (a distribution's
+    read-me and launcher; a plain folder of folders is walked instead, so its bundle keeps its own name). Not deeper, and not two such subfolders: a folder of several bundles isn't one."""
     lower = [n.lower() for n in (strip_root(names) if zipped else names)]
-    return any(n in PJ64_MARKERS or (n.startswith('config/') and n[7:] in PJ64_MARKERS) for n in lower)
+    if any(_pj64_marker(n) for n in lower):
+        return ''
+    if not zipped and not any('/' not in n for n in lower):
+        return None  # a plain folder of folders: expand() walks in and finds the bundle at its own top
+    subs = {n.split('/', 1)[0] for n in lower if '/' in n and _pj64_marker(n.split('/', 1)[1])}
+    if len(subs) != 1:
+        return None
+    sub = subs.pop()
+    # The original spelling of that folder (names are matched lower-case).
+    for n in (strip_root(names) if zipped else names):
+        if n.split('/', 1)[0].lower() == sub:
+            return n.split('/', 1)[0] + '/'
+    return None
+
+
+def is_bundle(names, zipped=False):
+    """A Project64 bundle (bundle_root)."""
+    return bundle_root(names, zipped) is not None
 
 
 def save_stem(name):
@@ -1542,17 +1567,24 @@ class Builder:
     # -- Project64 bundles
 
     def bundle_folder(self, src):
-        """The bundle on disk: its folder, or a zipped bundle unpacked (safe names only, MAX_EXTRACT in all)."""
+        """The bundle on disk: its folder, or a zipped bundle unpacked (safe names only, MAX_EXTRACT in all). For a
+        bundle wrapped in a distribution folder (bundle_root, aki-roadmap#265), the bundle's own folder inside it."""
         if src.zip_path is None and src.zip_blob is None:
-            return src.path, None
+            sub = bundle_root(src.names) if src.names else ''
+            return (os.path.join(src.path, *sub.strip('/').split('/')) if sub else src.path), None
         dest = self.tmp('bundle-%s' % hashlib.sha1(src.label.encode('utf-8')).hexdigest()[:12])
         shutil.rmtree(dest, ignore_errors=True)
         z = zipfile.ZipFile(src.zip_path if src.zip_path is not None else io.BytesIO(src.zip_blob))
         members = [i for i in z.infolist() if not i.is_dir()]
         names = strip_root([i.filename for i in members])
+        # Only the bundle's own folder (aki-roadmap#265): a distribution's read-me tree beside it can hold paths over
+        # Windows' 260 characters once under the work folder (WWF Legends: "Help Files & Setup/Troubleshooting/...").
+        sub = bundle_root([i.filename for i in members], zipped=True) or ''
         total = 0
         for info, rel in zip(members, names):
             rel = rel.replace('\\', '/')
+            if sub and not rel.lower().startswith(sub.lower()):
+                continue
             parts = [p for p in rel.split('/') if p not in ('', '.')]
             if not parts or '..' in parts or ':' in rel or rel.startswith('/'):
                 continue
@@ -1567,7 +1599,7 @@ class Builder:
             os.makedirs(os.path.dirname(path), exist_ok=True)
             with z.open(info) as fin, open(path, 'wb') as fout:
                 shutil.copyfileobj(fin, fout, 1 << 20)
-        return dest, dest
+        return (os.path.join(dest, *sub.strip('/').split('/')) if sub else dest), dest
 
     def bundle_game(self, folder, conv, named=None):
         """The game a bundle's cheats are for (their Project64 section), else a ROM header in it, else the game its
@@ -1628,7 +1660,8 @@ class Builder:
     def bundle_cheats(self, folder, conv, game, name, include):
         """(cheat folder name, revision tag, None) for the mod's own cheats, or (name, None, why none). The cheats sit
         in a top-level folder named like the mod; a bundle folder often carries a version the cheat folder doesn't
-        ("Showdown 64 V6.0.4" -> "Showdown 64\\..."), so the name without it is tried next."""
+        ("Showdown 64 V6.0.4" -> "Showdown 64\\..."), so the name without it is tried next. With none of those,
+        a game's only cheat folder is the mod's."""
         tries = [name]
         bare = without_version(name)
         if include is None and bare and bare != name:
@@ -1641,6 +1674,12 @@ class Builder:
                        for c in sec['cheats']})
         if not tops:
             return name, None, None
+        # One cheat folder for the game, under another name than the mod's (WWF Legends: Challenge 64's bundle is
+        # 'Ch64 - Public', its cheats 'WWF Legends\\...', aki-roadmap#265): those are the mod's cheats.
+        if include is None and len(tops) == 1:
+            tag = self.bundle_code_tag(folder, conv, game, tops[0], include)
+            if tag:
+                return tops[0], tag, None
         shown = ', '.join(tops[:6]) + (', ...' if len(tops) > 6 else '')
         return name, None, ('no cheat folder is named like the mod (%s); its folders: %s' %
                             (' or '.join(repr(n) for n in tries) if include is None else 'include %r' % include, shown))
