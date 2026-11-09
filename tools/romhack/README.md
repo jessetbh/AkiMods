@@ -134,11 +134,9 @@ translate-codes, translate-code-values; with `aki_conv_values.py`) and `aki_save
 conversion; from AkiTools). They find each other in this folder; `AKI_DEPOT` points the
 developer-only lookups (stock ROMs and RecompiledFuncs in game repos) at a depot.
 
-The AkiTools copies are kept in step by hand. `akitools-sync.json` records the AkiTools git blob
-of each file at the last sync, and `tests/test_akitools_sync.py` fails when a depot AkiTools
-checkout (`AKI_TOOLS`, else `<depot>\AkiTools`) has committed past one of them, naming the commits
-to port. It skips without a checkout, or when the checkout is older than the last sync. After
-porting, put the new blobs (`git -C AkiTools rev-parse HEAD:aki-conv.py`) and commit in the file.
+These are the only copies. AkiTools' `aki-conv.py`, `aki-hack.py`, `aki_conv_bake.py` and
+`aki_conv_values.py` are thin shims that run or import the ones here (AkiTools `aki_romhack.py`
+finds this checkout), so change the tools here, and their tests in `tests/`.
 
 `translate-code-values` fixes the addresses inside the code a translated GameShark list writes
 (aki-roadmap#205): hooks, `lui`/low pairs and pointers to what the list wrote, through a derelink
