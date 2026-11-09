@@ -747,7 +747,8 @@ def cmd_import_pj64(a):
                 summary['note'] = 'not built: pass --port-rom (and --derelink) to build the patch from it'
             else:
                 nrm, how = build_patch_nrm(a, hack, cid, name)
-                summary['watch_codes'] = add_watch_codes(a, aki, pkg_files)
+                # Only derelink writes a watch list; never pick up another codes.txt in --out.
+                summary['watch_codes'] = add_watch_codes(a, aki, pkg_files) if how == 'derelink' else 0
                 summary['built_with'] = how
                 pkg_files['patch.nrm'] = nrm
                 aki['components']['patch'] = {'file': 'patch.nrm', 'mod_id': getattr(a, 'patch_mod_id', None) or cid + '_patch'}
@@ -772,7 +773,7 @@ def cmd_import_pj64(a):
             if summary['base'] != port and not a.derelink:
                 sys.exit('the patch is for %s and the port runs %s: pass --derelink' % (summary['base'], port))
             nrm, summary['built_with'] = build_patch_nrm(a, target, cid, name)
-            summary['watch_codes'] = add_watch_codes(a, aki, pkg_files)
+            summary['watch_codes'] = add_watch_codes(a, aki, pkg_files) if summary['built_with'] == 'derelink' else 0
             pkg_files['patch.nrm'] = nrm
             aki['components']['patch'] = {'file': 'patch.nrm', 'mod_id': getattr(a, 'patch_mod_id', None) or cid + '_patch'}
         else:

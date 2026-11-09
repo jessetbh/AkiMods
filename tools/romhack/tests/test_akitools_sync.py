@@ -40,7 +40,8 @@ def check(repo, path, blob):
         return 'unknown', []
     if head.strip() == blob:
         return 'same', []
-    log = git(repo, 'log', '--raw', '--no-abbrev', '--format=@%H %s', 'HEAD', '--', path) or ''
+    # -m: a merge that resolved the file gets raw lines too (one per parent), so a blob made by a merge is found.
+    log = git(repo, 'log', '-m', '--raw', '--no-abbrev', '--format=@%H %s', 'HEAD', '--', path) or ''
     newer, commit = [], None
     for line in log.splitlines():
         if line.startswith('@'):
@@ -71,6 +72,8 @@ class Drift(unittest.TestCase):
         if drifted:
             self.fail('AkiTools changed these since the copies here were synced (AkiTools %s); port the changes to '
                       'tools/romhack and update akitools-sync.json:\n  %s' % (sync['akitools_commit'], '\n  '.join(drifted)))
+        if unknown:
+            sys.stderr.write('not checked (the AkiTools checkout lacks the synced version): %s\n' % ', '.join(unknown))
         if len(unknown) == len(sync['files']):
             self.skipTest('the AkiTools checkout at %s is older than the last sync or on another line' % repo)
 
@@ -117,6 +120,24 @@ class Check(unittest.TestCase):
         # A blob the checkout never had: an older checkout, or another line of work. Not a failure.
         self.assertEqual(check(self.d, 'aki-conv.py', '0' * 40), ('unknown', []))
         self.assertEqual(check(self.d, 'missing.py', old), ('unknown', []))
+
+    def test_blob_made_by_a_merge(self):
+        # The synced blob exists only as a conflict resolution: `git log --raw` without -m shows none for merges.
+        self.commit('one\ntwo\n', 'base')
+        trunk = git(self.d, 'rev-parse', '--abbrev-ref', 'HEAD').strip()
+        self.git('checkout', '-b', 'side')
+        self.commit('one\nside\n', 'side')
+        self.git('checkout', trunk)
+        self.commit('one\nmain\n', 'main')
+        subprocess.run(['git', '-C', self.d, '-c', 'user.name=t', '-c', 'user.email=t@t', 'merge', 'side'],
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)   # conflicts; the next commit is the merge
+        merged = self.commit('one\nboth\n', 'resolved')
+        self.assertEqual(len(git(self.d, 'rev-list', '--parents', '-1', 'HEAD').split()), 3)
+        self.assertEqual(check(self.d, 'aki-conv.py', merged), ('same', []))
+        self.commit('one\nlater\n', 'later change')
+        state, newer = check(self.d, 'aki-conv.py', merged)
+        self.assertEqual(state, 'drift')
+        self.assertEqual([c.split(' ', 1)[1] for c in newer], ['later change'])
 
 
 if __name__ == '__main__':
