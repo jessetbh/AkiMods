@@ -94,6 +94,27 @@ def gpr_written(w):
     return r or None
 
 
+def regs_written(words):
+    """The GPRs a straight run of code (a hack's hook, up to its jump back) leaves changed: every register an instruction
+    writes, plus a call's clobbers (jal / jalr), minus what it puts back. A register stored to the stack before it
+    changes (`sw rX,k(sp)`) and loaded back from that slot (`lw rX,k(sp)`) counts as kept, as does sp."""
+    changed, saved = set(), {}
+    for w in words:
+        op, rs, rt = w >> 26, (w >> 21) & 31, (w >> 16) & 31
+        if op in (0x2B, 0x3F) and rs == 29 and rt not in changed:          # sw / sd rX, k(sp): the caller's value
+            saved[w & 0xFFFF] = rt
+        if op == 3 or (op == 0 and w & 0x3F == 0x09):
+            changed |= CALL_CLOBBERS
+        r = gpr_written(w)
+        if r is None or r == 29:
+            continue
+        if op in (0x23, 0x37) and rs == 29 and saved.get(w & 0xFFFF) == r:  # lw / ld rX, k(sp) from its save slot
+            changed.discard(r)
+        else:
+            changed.add(r)
+    return changed
+
+
 def hilo_state_at(words, index):
     """Registers holding a lui value when execution reaches words[index] (after its delay slot
     for a jump): {reg: hi_value}. Used to pair a hook's %lo uses with its caller's lui."""
@@ -102,11 +123,15 @@ def hilo_state_at(words, index):
     return {r: v for r, (i, v) in state.items()}
 
 
-def hilo_refs(words, base_pc=0, init=None, final_state=None):
+def hilo_refs(words, base_pc=0, init=None, final_state=None, return_writes=None):
     """Pair each %lo use with its lui. words: list of ints. Returns a list of refs
     (hi_index, lo_index, address); one lui can feed several lo uses. Linear scan over the
     function; a register keeps its lui value through `addu rd, rs, rt` (IDO indexes arrays
-    that way, hand-written hack code with `add`) and loses it when anything else writes it or a call clobbers it."""
+    that way, hand-written hack code with `add`) and loses it when anything else writes it or a call clobbers it.
+    return_writes: {address: registers} for a hack's hook return points (its `j hook` comes back there, base_pc is the
+    function's address): the registers the hook writes lose their lui value there. A relinked hack's `lui s4,0x800F; j hook`
+    has the hook do the stock `lw s4,0x6134(s4)`, so the later `addiu s4,s4,0x118` is a stride, not a %lo
+    (aki-roadmap#239). Registers the hook leaves alone keep theirs (a lui in the `j`'s delay slot, used after it)."""
     state = {r: (None, v) for r, v in (init or {}).items()}   # reg -> (hi_index, hi_value); None = caller's
     out = []
     based = set()         # lui indices already used as a load/store base
@@ -132,6 +157,10 @@ def hilo_refs(words, base_pc=0, init=None, final_state=None):
             states = incoming.pop(i)
             state = {r: v for r, v in states[0].items() if all(s.get(r) == v for s in states[1:])}
             clobber_after = None
+        if return_writes and i >= 2 and ends_flow(words[i - 2]) and (base_pc + 4 * i) in return_writes:
+            # only where nothing falls through: a return point the code before also runs into keeps that path's pairs
+            for r in return_writes[base_pc + 4 * i]:
+                state.pop(r, None)
         if clobber_after is not None and i > clobber_after:
             for r in CALL_CLOBBERS:
                 state.pop(r, None)

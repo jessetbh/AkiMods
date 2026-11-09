@@ -86,6 +86,51 @@ class HiLoTests(unittest.TestCase):
         refs = mips.hilo_refs([lui(A0, h), jal(0x80000DB0), NOP, addiu(A0, A0, l)])
         self.assertEqual(refs, [])
 
+    def test_hook_return_forgets_what_the_hook_writes(self):
+        # a relinked hack, ovl_a 0x800E347C (aki-roadmap#239): `lui s4,0x800F; j hook` where the stock code had
+        # `lw s4,0x6134(s4)`; the hook does that load and jumps back. The later `addiu s1,s1,0x46` / `addiu s4,s4,0x118`
+        # are strides through the loaded pointer, not %lo halves of 0x800F0046 / 0x800F0118.
+        S1, S4, pc = 17, 20, 0x800E3480
+        words = [lui(S4, 0x800F), j(0x80491518), NOP, addu(S1, S4, 0), addiu(S1, S1, 0x46), addiu(S4, S4, 0x118)]
+        hook = [lw(S4, 0x6134, S4), j(pc + 12), NOP]
+        writes = {pc + 12: mips.regs_written(hook)}
+        self.assertEqual(writes[pc + 12], {S4})
+        self.assertEqual(mips.hilo_refs(words, base_pc=pc, return_writes=writes), [])
+        self.assertEqual(len(mips.hilo_refs(words, base_pc=pc)), 2)     # the old reading, without the hook's writes
+
+    def test_hook_return_keeps_what_the_hook_leaves(self):
+        # `j hook; lui at,%hi` (the lui in the jump's delay slot) and `ldc1 f2,%lo(at)` after the return: the hook
+        # doesn't touch at, so the pair stays (a relinked hack's ovl_e, the case a forget-everything rule got wrong)
+        h, l = hi_lo(0x80152EE0)
+        pc = 0x80001000
+        ldc1 = (0x35 << 26) | (AT << 21) | (2 << 16) | l
+        words = [j(0x80492F20), lui(AT, h), ldc1]
+        writes = {pc + 8: mips.regs_written([lw(V0, 0x10, V1), j(pc + 8), NOP])}
+        self.assertEqual(mips.hilo_refs(words, base_pc=pc, return_writes=writes), [(1, 2, 0x80152EE0)])
+
+    def test_return_point_reached_by_fall_through_keeps_pair(self):
+        # a relinked hack, ovl_b 0x801071E4: `lui v0,0x000F; addiu v0,v0,lo` runs straight through, and a hook from elsewhere also
+        # comes back at the addiu: the fall-through path's pair stays
+        h, l = hi_lo(0x000F4C80)
+        pc = 0x80001000
+        words = [NOP, lui(V0, h), addiu(V0, V0, l)]
+        writes = {pc + 8: {V0}}
+        self.assertEqual(mips.hilo_refs(words, base_pc=pc, return_writes=writes), [(1, 2, 0x000F4C80)])
+
+    def test_regs_written_keeps_stack_saved_registers(self):
+        # a hook that saves v0/ra, calls something and restores them changes neither
+        SP = 29
+        hook = [addiu(SP, SP, -0x18), sw(V0, 0x10, SP), sw(RA, 0x14, SP), jal(0x80001000), NOP,
+                lw(V0, 0x10, SP), lw(RA, 0x14, SP), addiu(SP, SP, 0x18)]
+        got = mips.regs_written(hook)
+        self.assertNotIn(V0, got)
+        self.assertNotIn(RA, got)
+        self.assertNotIn(SP, got)
+        self.assertIn(A0, got)            # a call clobber it doesn't put back
+
+    def test_regs_written_counts_a_calls_clobbers(self):
+        self.assertTrue({V0, A0, RA} <= mips.regs_written([jal(0x80001000), NOP]))
+
     def test_overwrite_drops_hi(self):
         h, l = hi_lo(0x80057188)
         self.assertEqual(mips.hilo_refs([lui(A0, h), addiu(A0, 0, 5), addiu(A1, A0, l)]), [])
