@@ -20,18 +20,22 @@
 #include "recomp_api.h"
 #include "window_check.h"
 #include "pack_alloc.h"
+#include "rules.h"
 
 RECOMP_IMPORT("*", void aki_log(const char* str, u32 length));
 RECOMP_IMPORT("*", s32 aki_models_read(const char* path, void* dest, u32 max));
 
-#define MI_PACKS 32       // pack table entries: loaded packs and ones that failed this match (aki-roadmap#170)
+// Pack table entries: loaded packs (cached until the window needs their room) and ones that failed this match
+// (aki-roadmap#170). 64 x ~580 bytes of mod memory (above 8 MB with the mod's code, not the game's RAM); the window
+// itself (~3.5 MB) holds about 16 average packs, so the table never runs out before the window does (aki-roadmap#247).
+#define MI_PACKS 64
 #define MI_RETIRED 16     // skin buffers given up while frames in flight may still draw them
-#define MI_RETRY 30       // frames a slot waits for room before it tries its pack again
+// Frames a slot waits for room before it tries its pack again. A scene cut (the intro, a Rumble entrant) frees the
+// previous wrestlers' packs MI_IN_FLIGHT frames later, so the wait is that and one more, not half a second of stock
+// (aki-roadmap#247). A retry costs one file-size check.
+#define MI_RETRY (MI_IN_FLIGHT + 1)
 #define MI_PACK_ENTRIES 64
-#define MI_RULES 32
-#define MI_ID_LEN 32
-#define MI_TEXT (MI_SCRATCH + 2 * MI_MAX_SLOTS * MI_LIST_BYTES)
-#define MI_TEXT_MAX 0x4000
+#define MI_TEXT (MI_SCRATCH + MI_TEXT_OFFSET)
 
 // AKP1 header (big-endian, at offset 0 of model.bin; all offsets from the start of the file).
 #define AKP1_MAGIC 0x414B5031u // 'AKP1'
@@ -75,27 +79,6 @@ void mi_log_end(void) {
     line_len = 0;
 }
 
-// --- small string helpers (no libc) ------------------------------------------------------------------------------
-static int str_eq(const char* a, const char* b) {
-    while (*a && *a == *b) a++, b++;
-    return *a == *b;
-}
-
-static void str_copy(char* dst, const char* src, int max) {
-    int i = 0;
-    for (; src[i] && i < max - 1; i++) dst[i] = src[i];
-    dst[i] = 0;
-}
-
-static int valid_id(const char* id) {
-    int n = 0;
-    for (; id[n]; n++) {
-        char c = id[n];
-        if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-')) return 0;
-    }
-    return n > 0 && n < MI_ID_LEN;
-}
-
 // --- packs -------------------------------------------------------------------------------------------------------
 typedef struct {
     char id[MI_ID_LEN];
@@ -111,6 +94,11 @@ static MiPack packs[MI_PACKS];
 static MiRange retired[MI_RETIRED];
 static u32 retired_frame[MI_RETIRED];
 static u32 frame_no;          // counted by mi_core_frame
+// Working arrays, static: the mod's code runs on the game thread's own (small) stack in RDRAM.
+static MiRange used_scratch[MI_PACKS + MI_MAX_SLOTS + MI_RETIRED];
+// Load / unload counters for the log (aki-roadmap#247: the intro and Rumble churn), and the window's high water mark.
+static u32 stat_loads, stat_unloads, stat_waits, stat_peak;
+static void log_window(void);
 
 static void reset_slot_buffers(void);
 static int used_ranges(MiRange* out);
@@ -142,22 +130,24 @@ static int pack_fail(MiPack* p, const char* why) {
 }
 
 // Reads and checks <id>.akimodel/model.bin into the largest free gap of the window (unloading packs no slot shows
-// until it fits), moves its address words there. 0 loaded; -1 failed; -2 no room yet (the entry stays empty).
+// until it fits), then into the smallest gap that holds it, and moves its address words there. 0 loaded; -1 failed;
+// -2 no room yet (the entry stays empty).
 static int load_pack(MiPack* p) {
     char path[MI_ID_LEN + 24];
     int n = 0;
     for (const char* s = p->id; *s; s++) path[n++] = *s;
     for (const char* s = ".akimodel/model.bin"; *s; s++) path[n++] = *s;
     path[n] = 0;
-    MiRange used[MI_PACKS + MI_MAX_SLOTS + MI_RETIRED];
+    MiRange* used = used_scratch;
     u32 base, room;
     s32 size;
+    int nu;
     for (;;) {
-        int n = used_ranges(used);
-        base = mi_largest_gap(used, n, MI_MEM_BASE, MI_MEM_BASE + MI_MEM_SIZE, &room);
+        nu = used_ranges(used);
+        base = mi_largest_gap(used, nu, MI_MEM_BASE, MI_MEM_BASE + MI_MEM_SIZE, &room);
         size = base ? aki_models_read(path, (void*)base, room) : -2;
         if (size != -2) break;
-        if (!n) return pack_fail(p, "too big for the model memory");
+        if (!nu) return pack_fail(p, "too big for the model memory");
         if (evict_pack(-1) < 0) {
             p->state = 0;
             return -2;
@@ -165,6 +155,14 @@ static int load_pack(MiPack* p) {
     }
     if (size == -1) return pack_fail(p, "no model.bin (is the folder in mods/models?)");
     if (size < AKP1_SIZE) return pack_fail(p, "not readable");
+    // The size is known only now (the host has no size query): the file went into the largest gap; move it to the
+    // smallest gap that holds it (aki-roadmap#247), before its address words are moved. Gaps don't overlap, and both
+    // are free (nothing in flight is in a gap), so a plain copy will do.
+    u32 fit = mi_best_fit(used, nu, MI_MEM_BASE, MI_MEM_BASE + MI_MEM_SIZE, (u32)size);
+    if (fit && fit != base) {
+        for (u32 w = 0; w < ((u32)size + 3) / 4; w++) RAM32(fit + w * 4) = RAM32(base + w * 4);
+        base = fit;
+    }
     if (RAM32(base) != AKP1_MAGIC) return pack_fail(p, "no AKP1 header (convert it again with a current aki-model)");
     if ((u32)RAM16(base + 4) > AKP1_VERSION || (u16)RAM16(base + 6) < AKP1_SIZE) return pack_fail(p, "made for a newer runtime");
     if (RAM32(base + 52) > MI_RUNTIME) return pack_fail(p, "needs a newer aki_modelimport");
@@ -211,6 +209,7 @@ static int load_pack(MiPack* p) {
         p->count++;
     }
     if (!p->count) return pack_fail(p, "no usable lists");
+    stat_loads++;
     p->base = base;
     p->size = (u32)size;
     p->flags = flags;
@@ -222,6 +221,7 @@ static int load_pack(MiPack* p) {
     mi_log_hex(base, 8); mi_log_str(", "); mi_log_dec(p->count); mi_log_str((flags & AKP1_FLAG_WELDED) ? " list (welded)" : " part lists");
     if (scount) { mi_log_str(", "); mi_log_dec((s32)scount); mi_log_str(" skinned vertices"); }
     mi_log_end();
+    log_window();
     return 0;
 }
 
@@ -229,7 +229,7 @@ static int load_pack(MiPack* p) {
 static int find_pack(const char* id) {
     int pick = -1;
     for (int i = 0; i < MI_PACKS; i++) {
-        if (packs[i].state && str_eq(packs[i].id, id)) return packs[i].state == 1 ? i : -1;
+        if (packs[i].state && mi_str_eq(packs[i].id, id)) return packs[i].state == 1 ? i : -1;
         if (!packs[i].state && pick < 0) pick = i;
     }
     for (int i = 0; pick < 0 && i < MI_PACKS; i++)
@@ -237,102 +237,27 @@ static int find_pack(const char* id) {
     if (pick < 0) pick = evict_pack(-1);
     if (pick < 0) return -2;
     MiPack* p = &packs[pick];
-    str_copy(p->id, id, MI_ID_LEN);
+    mi_str_copy(p->id, id, MI_ID_LEN);
     int r = load_pack(p);
     return r == 0 ? pick : r;
 }
 
 // --- models.txt and the Mods menu --------------------------------------------------------------------------------
-enum { RULE_SLOT = 1, RULE_WRESTLER, RULE_OFF };
-typedef struct {
-    char pack[MI_ID_LEN];
-    int kind;
-    s32 a, b; // slot (0-based), or wrestler + costume (-1 = any)
-} MiRule;
-
 static MiRule rules[MI_RULES];
 static int rule_count;
 static char override_pack[MI_MAX_SLOTS][MI_ID_LEN];
 
-static int parse_int(const char* s, s32* out) {
-    int neg = 0;
-    u32 v = 0;
-    if (*s == '-') neg = 1, s++;
-    if (!*s) return 0;
-    if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
-        s += 2;
-        if (!*s) return 0;
-        for (; *s; s++) {
-            char c = *s;
-            u32 d = (c >= '0' && c <= '9') ? (u32)(c - '0') : (c >= 'a' && c <= 'f') ? (u32)(c - 'a' + 10)
-                  : (c >= 'A' && c <= 'F') ? (u32)(c - 'A' + 10) : 99;
-            if (d > 15) return 0;
-            v = v * 16 + d;
-        }
-    } else {
-        for (; *s; s++) {
-            if (*s < '0' || *s > '9') return 0;
-            v = v * 10 + (u32)(*s - '0');
-        }
-    }
-    *out = neg ? -(s32)v : (s32)v;
-    return 1;
-}
-
 static void rule_error(int line_no, const char* why) {
     mi_log_str("models.txt line "); mi_log_dec(line_no); mi_log_str(": "); mi_log_str(why); mi_log_end();
-}
-
-// One line, split into at most 6 words (the buffer is modified in place).
-static void parse_line(char* s, int line_no) {
-    char* w[6];
-    int n = 0;
-    while (*s && n < 6) {
-        while (*s == ' ' || *s == '\t') s++;
-        if (!*s || *s == '#') break;
-        w[n++] = s;
-        while (*s && *s != ' ' && *s != '\t' && *s != '#') s++;
-        if (*s == '#') { *s = 0; break; }
-        if (*s) *s++ = 0;
-    }
-    if (n == 0) return;
-    if (rule_count >= MI_RULES) { rule_error(line_no, "too many lines (32 at most), ignored"); return; }
-    MiRule* r = &rules[rule_count];
-    if (str_eq(w[0], "off")) {
-        if (n != 2 || !valid_id(w[1])) { rule_error(line_no, "expected: off <pack>"); return; }
-        str_copy(r->pack, w[1], MI_ID_LEN);
-        r->kind = RULE_OFF;
-        rule_count++;
-        return;
-    }
-    if (!valid_id(w[0])) { rule_error(line_no, "pack ids are a-z, 0-9, _ and -, at most 31"); return; }
-    str_copy(r->pack, w[0], MI_ID_LEN);
-    s32 v;
-    if (n == 3 && str_eq(w[1], "slot") && parse_int(w[2], &v) && v >= 1 && v <= mi_slots()) {
-        r->kind = RULE_SLOT;
-        r->a = v - 1;
-        rule_count++;
-    } else if ((n == 3 || n == 5) && str_eq(w[1], "wrestler") && parse_int(w[2], &v)) {
-        r->kind = RULE_WRESTLER;
-        r->a = v;
-        r->b = -1;
-        if (n == 5 && !(str_eq(w[3], "costume") && parse_int(w[4], &r->b) && r->b >= 0)) {
-            rule_error(line_no, "expected: <pack> wrestler <id> [costume <n>]");
-            return;
-        }
-        rule_count++;
-    } else {
-        rule_error(line_no, "expected: <pack> slot <1-4> | <pack> wrestler <id> [costume <n>] | off <pack>");
-    }
 }
 
 static void read_overrides(void) {
     static const char* keys[MI_MAX_SLOTS] = { "slot1_pack", "slot2_pack", "slot3_pack", "slot4_pack" };
     for (int i = 0; i < MI_MAX_SLOTS; i++) {
         char* v = recomp_get_config_string(keys[i]);
-        str_copy(override_pack[i], v ? v : "", MI_ID_LEN);
+        mi_str_copy(override_pack[i], v ? v : "", MI_ID_LEN);
         if (v) recomp_free_config_string(v);
-        if (override_pack[i][0] && !valid_id(override_pack[i])) {
+        if (override_pack[i][0] && !mi_valid_id(override_pack[i])) {
             mi_log_str("Slot "); mi_log_dec(i + 1); mi_log_str(" pack: not a pack id: "); mi_log_str(override_pack[i]);
             mi_log_end();
             override_pack[i][0] = 0;
@@ -345,31 +270,17 @@ static void read_rules(void) {
     read_overrides();
     s32 size = aki_models_read("models.txt", (void*)MI_TEXT, MI_TEXT_MAX - 1);
     if (size < 0) {
-        mi_log_str(size == -2 ? "models.txt: too big (16 KB at most)" : "models.txt: none (only the Mods menu's slot packs apply)");
+        mi_log_str(size == -2 ? "models.txt: too big (32 KB at most)" : "models.txt: none (only the Mods menu's slot packs apply)");
         mi_log_end();
         return;
     }
-    char* text = (char*)MI_TEXT;
-    text[size] = 0;
-    int line_no = 1;
-    s32 first = (size >= 3 && (u8)text[0] == 0xEF && (u8)text[1] == 0xBB && (u8)text[2] == 0xBF) ? 3 : 0; // UTF-8 BOM
-    char* start = text + first;
-    for (s32 i = first; i <= size; i++) {
-        if (text[i] == '\n' || text[i] == '\r' || text[i] == 0) {
-            char end = text[i];
-            char next = (i < size) ? text[i + 1] : 0;
-            text[i] = 0;
-            parse_line(start, line_no);
-            if (end == '\n' || (end == '\r' && next != '\n')) line_no++; // \n, \r\n and \r-only files
-            start = &text[i + 1];
-        }
-    }
+    rule_count = mi_parse_rules((char*)MI_TEXT, size, rules, mi_slots(), rule_error);
     mi_log_str("models.txt: "); mi_log_dec(rule_count); mi_log_str(" lines"); mi_log_end();
 }
 
 static int pack_is_off(const char* id) {
     for (int i = 0; i < rule_count; i++)
-        if (rules[i].kind == RULE_OFF && str_eq(rules[i].pack, id)) return 1;
+        if (rules[i].kind == RULE_OFF && mi_str_eq(rules[i].pack, id)) return 1;
     return 0;
 }
 
@@ -400,12 +311,14 @@ typedef struct {
     u32 skin_buf[2];     // the blended vertices for each frame parity (segment 0xE), or 0
     u32 skin_cap;        // vertices they hold (allocated when the slot is replaced, retired when it's restored)
     u32 retry;           // state -2: the frame it tries its pack again
+    u32 wait_start;      // state -2: the frame it started waiting (logged when it gets its pack)
     u32 skin_frame[2];   // the frame each was last computed for
     MiSavedPart saved[MI_MAX_PARTS];
 } MiSlot;
 
 static MiSlot slots[MI_MAX_SLOTS];
 static int in_match;
+static u32 match_end = 0xFFFFFF00u; // the frame the last match ended (long ago at boot)
 static u32 reload_seen;
 static s32 reload_frame = -1; // a Reload's frame while the slots sit out the frames still in flight
 
@@ -428,10 +341,24 @@ static int used_ranges(MiRange* out) {
     return n;
 }
 
+// After a load: how much of the window the packs, skin buffers and in-flight blocks use, and the most it has used.
+static void log_window(void) {
+    int n = used_ranges(used_scratch);
+    u32 bytes = 0;
+    for (int i = 0; i < n; i++) bytes += used_scratch[i].size;
+    if (bytes > stat_peak) stat_peak = bytes;
+    int resident = 0;
+    for (int i = 0; i < MI_PACKS; i++) resident += packs[i].state == 1;
+    mi_log_str("model window: "); mi_log_dec((s32)(bytes >> 10)); mi_log_str(" of "); mi_log_dec((s32)(MI_MEM_SIZE >> 10));
+    mi_log_str(" KB used (peak "); mi_log_dec((s32)(stat_peak >> 10)); mi_log_str(" KB), "); mi_log_dec(resident);
+    mi_log_str(" packs resident; "); mi_log_dec((s32)stat_loads); mi_log_str(" loads, "); mi_log_dec((s32)stat_unloads);
+    mi_log_str(" unloads, "); mi_log_dec((s32)stat_waits); mi_log_str(" waits"); mi_log_end();
+}
+
 // Unloads the least recently shown pack no slot shows (not keep) whose lists are drawn out; its index, or -1.
 static int evict_pack(int keep) {
-    int loaded[MI_PACKS], shown[MI_PACKS];
-    u32 last[MI_PACKS];
+    static int loaded[MI_PACKS], shown[MI_PACKS];
+    static u32 last[MI_PACKS];
     for (int i = 0; i < MI_PACKS; i++) {
         loaded[i] = packs[i].state == 1;
         shown[i] = 0;
@@ -442,7 +369,9 @@ static int evict_pack(int keep) {
     int e = mi_pick_evict(loaded, shown, last, MI_PACKS, keep, frame_no);
     if (e >= 0) {
         packs[e].state = 0;
-        mi_log_str("model pack "); mi_log_str(packs[e].id); mi_log_str(": unloaded for room"); mi_log_end();
+        stat_unloads++;
+        mi_log_str("model pack "); mi_log_str(packs[e].id); mi_log_str(": unloaded for room ("); mi_log_dec((s32)stat_loads);
+        mi_log_str(" loads, "); mi_log_dec((s32)stat_unloads); mi_log_str(" unloads)"); mi_log_end();
     }
     return e;
 }
@@ -538,7 +467,7 @@ static void skin_slot(int slot, MiSlot* s, const MiPack* p, int parity) {
 // The slot's two blended-vertex copies, from a free gap of the window (unloading packs other than pi for room).
 static int alloc_skin(MiSlot* s, const MiPack* p, int pi) {
     if (!p->skin_count) return 1;
-    MiRange used[MI_PACKS + MI_MAX_SLOTS + MI_RETIRED];
+    MiRange* used = used_scratch;
     u32 bytes = p->skin_count * 16, base;
     while (!(base = mi_first_fit(used, used_ranges(used), MI_MEM_BASE, MI_MEM_BASE + MI_MEM_SIZE, 2 * bytes)))
         if (evict_pack(pi) < 0) return 0;
@@ -606,6 +535,8 @@ static void wait_slot(int slot, MiSlot* s, int was, const char* id) {
     s->state = -2;
     s->retry = frame_no + MI_RETRY;
     if (was == -2) return;
+    stat_waits++;
+    s->wait_start = frame_no;
     mi_log_str("slot "); mi_log_dec(slot + 1); mi_log_str(": no room for pack "); mi_log_str(id);
     mi_log_str(" yet; stock until a pack can be unloaded"); mi_log_end();
 }
@@ -646,7 +577,9 @@ static void decide_slot(int slot, MiSlot* s) {
     build_list(slot, s, p, s->dl[1], 1);
     s->state = 1;
     mi_log_str("slot "); mi_log_dec(slot + 1); mi_log_str(" (wrestler "); mi_log_hex((u32)mi_slot_wrestler(slot), 4);
-    mi_log_str("): "); mi_log_str(p->id); mi_log_end();
+    mi_log_str("): "); mi_log_str(p->id);
+    if (was == -2) { mi_log_str(" (after waiting "); mi_log_dec((s32)(frame_no - s->wait_start)); mi_log_str(" frames)"); }
+    mi_log_end();
 }
 
 static void restore_all(void) {
@@ -656,14 +589,14 @@ static void restore_all(void) {
     }
 }
 
-// aki-roadmap#155: the window (packs, the adapter's depth area after them, then the scratch: lists, models.txt and
-// the adapter's clear list at MI_SCRATCH + MI_CLEAR_OFFSET) must still be all zero before the mod first writes it. A conversion that uses Expansion RAM (the relinked No Mercy hacks) fills it from boot; then model imports stay
+// aki-roadmap#155: the window (packs, the adapter's depth area after them, then the scratch: lists, the adapter's
+// clear list and models.txt, scratch_layout.h) must still be all zero before the mod first writes it. A conversion that uses Expansion RAM (the relinked No Mercy hacks) fills it from boot; then model imports stay
 // off for the session, with one log line.
 static int window_state; // 0 not checked, 1 free, -1 in use
 
 static int window_free(void) {
     if (window_state == 0) {
-        const u32 words = (MI_SCRATCH + MI_CLEAR_OFFSET + 0x1000u - MI_MEM_BASE) / 4; // through the adapter's clear list (aki_nodes.c)
+        const u32 words = (MI_SCRATCH + MI_SCRATCH_USED - MI_MEM_BASE) / 4; // through models.txt (scratch_layout.h)
         int used = mi_first_used_word((const volatile unsigned int*)MI_MEM_BASE, words);
         window_state = used < 0 ? 1 : -1;
         if (used >= 0) {
@@ -683,7 +616,7 @@ int mi_core_replacing(void) {
 void mi_core_emit(int parity) {
     int n = mi_slots();
     if (!recomp_get_config_u32("enabled")) {
-        if (in_match) restore_all(), reset_packs();
+        if (in_match) restore_all(), reset_packs(), match_end = frame_no;
         in_match = 0;
         return;
     }
@@ -691,10 +624,13 @@ void mi_core_emit(int parity) {
     for (int i = 0; i < n; i++) any |= mi_slot_active(i);
     if (!any) {
         // Between matches: everything back to stock; packs and models.txt are read again for the next match.
-        if (in_match) restore_all(), reset_packs();
+        if (in_match) restore_all(), reset_packs(), match_end = frame_no;
         in_match = 0;
         return;
     }
+    // The frames submitted before the last match ended may still draw its packs: the window is free again only after
+    // them (a scene cut can end one "match" and start the next a frame later).
+    if (!in_match && !mi_drawn_out(frame_no, match_end)) return;
     if (!window_free()) return;
     u32 reload = recomp_get_config_u32("reload");
     if (in_match && reload != reload_seen) {

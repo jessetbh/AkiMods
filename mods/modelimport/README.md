@@ -66,7 +66,9 @@ Every problem is one line in the log, starting with `[mod]`, and the wrestler st
 | `model pack X: no model.bin` | the folder isn't `mods\models\X.akimodel`, or it has no `model.bin` |
 | `... no AKP1 header` | made by an older aki-model: convert it again (or `tools\to_akp1.py`) |
 | `... built for another game` | the pack's profile isn't this game's |
-| `... too big for the memory left` | the packs in this match need more than the game's free memory (3.75 MB on No Mercy and VPW2) |
+| `... too big for the model memory` | this one pack is bigger than the whole model memory (about 3.5 MB on No Mercy and VPW2) |
+| `slot N: no room for pack X yet` | the packs on screen and the ones just left (still drawn for 2 frames) fill the model memory: stock for a few frames, then the pack loads (`... after waiting N frames`) |
+| `model pack X: unloaded for room` / `model window: ...` | not a problem: a pack no wrestler on screen uses made room for another; the window line counts loads, unloads and memory |
 | `Expansion RAM is in use at 0x...: model imports are off` | a conversion is running that keeps its own code and data in the memory packs load into (No Mercy Plus, ECW Born to be Wired); model imports stay off for that session instead of crashing it (#155) |
 | `slot N: its part matrices aren't where welded pack X needs them` | this slot's body is laid out differently (report it on #130) |
 | `models.txt line N: ...` | that line was skipped; the message says what was expected |
