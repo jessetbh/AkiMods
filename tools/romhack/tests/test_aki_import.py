@@ -462,6 +462,47 @@ class Hostile(Base):
                      roms={}, patchfmt=pf)
         self.assertEqual((r['status'], r['base']), ('ready', 'WWF No Mercy (USA) 1.0'))
 
+    def test_bundle_wrapped_in_a_distribution_folder(self):
+        # WWF Legends: Challenge 64's shape (aki-roadmap#265): the Project64 folder sits beside read-me files and a
+        # launcher exe inside the archive's top folder. It is one bundle, not a pile of files (its ROM was built alone).
+        files = {'Ch64 - Public/Project64/Project64.exe': b'x', 'Ch64 - Public/Project64/Config/Project64.cfg': b'x',
+                 'Ch64 - Public/Project64/Config/Project64.cht': b'x', 'Ch64 - Public/Project64/Roms/Hack.z64': fake_rom(salt=9),
+                 'Ch64 - Public/Help Files & Setup/Read Me.txt': b'x', 'Ch64 - Public/Run The Mod.exe': b'x'}
+        r = self.one([self.write('in/ch.zip', self.zip_bytes(files))])
+        self.assertEqual((r['kind'], r['route']), ('pj64-bundle', 'import-pj64'))
+        # Unzipped, the same.
+        for rel, data in files.items():
+            self.write('in2/' + rel, data)
+        r = self.one([os.path.join(self.dir, 'in2', 'Ch64 - Public')])
+        self.assertEqual((r['kind'], r['route'], r['name']), ('pj64-bundle', 'import-pj64', 'Ch64 - Public'))
+        self.assertEqual(ai.bundle_root(list(files), zipped=True), 'Project64/')
+        self.assertEqual(ai.bundle_root([k.split('/', 1)[1] for k in files], zipped=True), 'Project64/')
+        self.assertEqual(ai.bundle_root([k.split('/', 1)[1] for k in files]), 'Project64/')  # files of its own beside it
+        self.assertIsNone(ai.bundle_root(['Wrapped/Project64.exe', 'Wrapped/Save/a.fla']))     # folders only: walked
+
+    def test_a_hack_beside_a_project64_folder_stays_its_own_item(self):
+        # The review case for aki-roadmap#265: a downloads folder with a hack, a patch and a texture pack next to a
+        # Project64 folder is walked (four items), not swallowed as one bundle named after the folder.
+        self.write('in/Downloads/MyHack.z64', fake_rom(salt=7))
+        self.write('in/Downloads/other.bps', b'x')
+        self.write('in/Downloads/Project64/Project64.exe', b'x')
+        self.write('in/Downloads/Project64/Config/Project64.cfg', b'x')
+        for i in range(5):
+            self.write('in/Downloads/Tex/WWF NO MERCY#%08X#0#2_all.png' % i, b'x')
+        items, _ = self.run_job([os.path.join(self.dir, 'in', 'Downloads')])
+        kinds = sorted(i.get('kind') or '' for i in items)
+        self.assertEqual(len(items), 4, items)
+        self.assertIn('pj64-bundle', kinds)
+        self.assertIn('rom', kinds)
+        self.assertIn('patch', kinds)
+        self.assertIsNone(ai.bundle_root(['Hack.z64', 'Project64/Project64.exe'], zipped=True))
+
+    def test_two_wrapped_bundles_are_not_one(self):
+        names = ['A/Project64.exe', 'A/Config/Project64.cfg', 'B/Project64.exe', 'B/Config/Project64.cfg']
+        self.assertIsNone(ai.bundle_root(names, zipped=True))
+        self.assertIsNone(ai.bundle_root(['top/x/y/Project64.exe'], zipped=True))   # two levels down: not a bundle
+        self.assertEqual(ai.bundle_root(['Project64.exe', 'Save/a.fla']), '')
+
     def test_bundle_zipped_under_one_root_folder(self):
         r = self.one([self.write('in/b.zip', self.zip_bytes({'My Mod/Project64.exe': b'x',
                                                              'My Mod/Config/Project64.cfg': b'x',
