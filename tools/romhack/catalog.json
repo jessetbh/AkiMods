@@ -641,6 +641,28 @@
    }
   },
   {
+   "id": "wz_badd_blood",
+   "name": "WWF WarZone - Badd Blood",
+   "game": "wm2k",
+   "version": "1.0.0",
+   "tier": "verified",
+   "converter": "derelink",
+   "note": "Singles matches were checked; tag, the other modes and a finished match were not.",
+   "inputs": {
+    "sha1": [
+     "AA8EFEDE5A93CBD943B34FC2A46FE780A1E54825"
+    ]
+   },
+   "outputs": {
+    "sha1": [
+     "1E153A1719596F3164071602861BAFCB34482744"
+    ],
+    "codes_sha1": [
+     "1B2B427F7A098E5F0DDEB6C64E53BD49F68A178B"
+    ]
+   }
+  },
+  {
    "id": "underground9",
    "name": "WCW vs. nWo: 9 Underground",
    "game": "wt",
