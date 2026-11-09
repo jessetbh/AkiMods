@@ -1617,8 +1617,8 @@ def discover_extra_code(A):
                 rinits[t] = st if t not in rinits else {k: v for k, v in rinits[t].items() if st.get(k) == v}
                 rwrites[t] |= mips.regs_written(words[:i + 2])
     A.return_init = {t: st for t, st in rinits.items() if st}
-    # a register the hook writes holds no lui value of the function's any more when the hook comes back: a relinked hack's
-    # `lui s4,0x800F; j hook`, the hook doing the stock `lw s4,0x6134(s4)` (aki-roadmap#239)
+    # a register the hook writes holds no lui value of the function's any more when the hook comes back: a relinked
+    # hack's `lui r,%hi; j hook`, the hook doing the stock `lw r,%lo(r)` (aki-roadmap#239)
     A.return_writes = {t: frozenset(w) for t, w in rwrites.items() if w}
 
     # mid-function return points: a hook entered by a `j` from function U returns into U
@@ -1880,9 +1880,9 @@ def payload_data_owners(A, get, spans):
     A word belongs to the nearest address at or below it that payload code builds with lui + %lo (a table's base),
     within PAYLOAD_DATA_REACH, when every stretch of code building that address is entered from one overlay. Pointers
     in it are translated the way that overlay's own code sees memory: the co-resident overlays (No Mercy's ovl_b/c/d
-    beside ovl_e) give different stock addresses for one hack address. A relinked hack's hook in ovl_e's func_8012DAF0
-    walks address/value tables in the payload; translated as ovl_b/c/d data (-0x1500 instead of ovl_e's -0x1530)
-    every write landed 12 entries past its table slot and the next match crashed (aki-roadmap#223)."""
+    beside ovl_e) give different stock addresses for one hack address. A relinked hack's hook in an ovl_e function
+    can walk address/value tables in the payload; translated as ovl_b/c/d data (-0x1500 instead of ovl_e's -0x1530)
+    every write lands 12 entries past its table slot and the game crashes (aki-roadmap#223)."""
     p = A.payload
     ctx_of = getattr(A, 'region_ctx', {})
     in_code = lambda a: any(lo <= a < hi for lo, hi in spans)
@@ -2604,7 +2604,7 @@ def fix_unreachable_lo(A, D, area, report):
     a scratch register: the store's own base register, else $at, whichever the code after it overwrites before
     reading. The store takes the first candidate address, like rewrite() does for the uses it could encode.
     Left alone, the store kept its old %lo under the new %hi and wrote to an unrelated address
-    (a relinked hack patches an ovl_d immediate this way; the stray write corrupted a store in another
+    (a relinked hack can patch an ovl_d immediate this way; the stray write corrupts a store in another
     function, aki-roadmap#223)."""
     p = A.payload
     if not p:

@@ -134,8 +134,8 @@ def hilo_refs(words, base_pc=0, init=None, final_state=None, return_writes=None)
     function; a register keeps its lui value through `addu rd, rs, rt` (IDO indexes arrays
     that way, hand-written hack code with `add`) and loses it when anything else writes it or a call clobbers it.
     return_writes: {address: registers} for a hack's hook return points (its `j hook` comes back there, base_pc is the
-    function's address): the registers the hook writes lose their lui value there. A relinked hack's `lui s4,0x800F; j hook`
-    has the hook do the stock `lw s4,0x6134(s4)`, so the later `addiu s4,s4,0x118` is a stride, not a %lo
+    function's address): the registers the hook writes lose their lui value there. A relinked hack's `lui r,%hi; j hook`
+    can have the hook do the stock `lw r,%lo(r)`, so a later `addiu r,r,stride` is a stride, not a %lo
     (aki-roadmap#239). Registers the hook leaves alone keep theirs (a lui in the `j`'s delay slot, used after it)."""
     state = {r: (None, v) for r, v in (init or {}).items()}   # reg -> (hi_index, hi_value); None = caller's
     out = []
