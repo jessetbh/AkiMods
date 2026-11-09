@@ -128,6 +128,13 @@ class HiLoTests(unittest.TestCase):
         self.assertNotIn(SP, got)
         self.assertIn(A0, got)            # a call clobber it doesn't put back
 
+    def test_regs_written_slot_reuse_and_sp_moves(self):
+        # a save slot overwritten, a changed value saved back, or sp moved: the load gives something else (review notes)
+        SP, S4, T0 = 29, 20, 8
+        self.assertIn(S4, mips.regs_written([sw(S4, 0x10, SP), lw(T0, 0, A0), sw(T0, 0x10, SP), lw(S4, 0x10, SP)]))
+        self.assertIn(S4, mips.regs_written([sw(S4, 0x10, SP), addiu(S4, S4, 4), sw(S4, 0x10, SP), lw(S4, 0x10, SP)]))
+        self.assertIn(S4, mips.regs_written([sw(S4, 0x10, SP), addiu(SP, SP, -8), lw(S4, 0x10, SP)]))
+
     def test_regs_written_counts_a_calls_clobbers(self):
         self.assertTrue({V0, A0, RA} <= mips.regs_written([jal(0x80001000), NOP]))
 

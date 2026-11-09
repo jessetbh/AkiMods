@@ -101,8 +101,13 @@ def regs_written(words):
     changed, saved = set(), {}
     for w in words:
         op, rs, rt = w >> 26, (w >> 21) & 31, (w >> 16) & 31
-        if op in (0x2B, 0x3F) and rs == 29 and rt not in changed:          # sw / sd rX, k(sp): the caller's value
-            saved[w & 0xFFFF] = rt
+        if op in (0x2B, 0x3F) and rs == 29:                                 # sw / sd rX, k(sp)
+            if rt not in changed:
+                saved[w & 0xFFFF] = rt                                     # the caller's value
+            else:
+                saved.pop(w & 0xFFFF, None)                                # the slot no longer holds it
+        if gpr_written(w) == 29:
+            saved.clear()                                                  # sp moved: the offsets name other slots
         if op == 3 or (op == 0 and w & 0x3F == 0x09):
             changed |= CALL_CLOBBERS
         r = gpr_written(w)
