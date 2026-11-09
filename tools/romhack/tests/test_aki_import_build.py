@@ -668,6 +668,37 @@ class TexturesSave(BuildBase):
         self.assertNotEqual(ai.Builder.content_sha1(a), ai.Builder.content_sha1(c))
         self.assertIsNone(ai.Builder.content_sha1({'conversion/codes.txt': b'x'}))
 
+    def test_content_hash_is_of_the_png_image_not_its_deflate_bytes(self):
+        # aki-roadmap#273: the same image written by two zlib builds (here: two levels) has the same content hash, so the
+        # tier doesn't follow the launcher's Python. Another image, palette or size does change it.
+        import struct
+        import zlib
+
+        def png_file(raw, level, w=2, h=2, plte=b''):
+            def chunk(k, b):
+                return struct.pack('>I', len(b)) + k + b + struct.pack('>I', zlib.crc32(k + b) & 0xFFFFFFFF)
+            ihdr = struct.pack('>IIBBBBB', w, h, 8, 3 if plte else 6, 0, 0, 0)
+            return (ai.PNG_SIGNATURE + chunk(b'IHDR', ihdr) + (chunk(b'PLTE', plte) if plte else b'') +
+                    chunk(b'tEXt', b'Software\0level %d' % level) + chunk(b'IDAT', zlib.compress(raw, level)) +
+                    chunk(b'IEND', b''))
+
+        raw = bytes(range(18)) * 2        # 2 rows: filter byte + 2 RGBA pixels, twice
+        fast, best = png_file(raw, 1), png_file(raw, 9)
+        self.assertNotEqual(fast, best)
+        self.assertEqual(ai.png_content_sha1(fast), ai.png_content_sha1(best))
+        self.assertNotEqual(ai.png_content_sha1(fast), ai.png_content_sha1(png_file(bytes(36), 9)))
+        self.assertNotEqual(ai.png_content_sha1(fast), ai.png_content_sha1(png_file(raw, 9, w=1, h=4)))
+        pal = bytes(range(6))
+        self.assertNotEqual(ai.png_content_sha1(png_file(bytes(6), 9, plte=pal)),
+                            ai.png_content_sha1(png_file(bytes(6), 9, plte=pal[::-1])))
+        a = {'conversion/textures/x.png': fast, 'conversion/saves/s.bin': b'1'}
+        self.assertEqual(ai.Builder.content_sha1(a), ai.Builder.content_sha1(dict(a, **{'conversion/textures/x.png': best})))
+        # Not a PNG we can read (truncated, or no image data): its file bytes count, as before.
+        self.assertIsNone(ai.png_content_sha1(fast[:40]))
+        self.assertIsNone(ai.png_content_sha1(b'\x89PNG\r\n\x1a\n' + b'x' * 32))
+        self.assertNotEqual(ai.Builder.content_sha1({'conversion/textures/x.png': fast[:40]}),
+                            ai.Builder.content_sha1({'conversion/textures/x.png': fast[:41]}))
+
     def test_codes_entry_wanting_content_needs_it(self):
         bundle = Pj64Bundles.bundle(self)
         first = self.build_one([bundle])
