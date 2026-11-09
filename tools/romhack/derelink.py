@@ -1742,6 +1742,58 @@ def resized_redirects(A, D, report):
     report['resized_redirects'] = n
 
 
+def runtime_targets(A):
+    """(section, hack address) of each `j`/`jal` into a chunk reshaped at its own address, from code the hack loads at run
+    time: words in the ROM outside the stock code and the payload, out of reach of the rewrite. Decodable neighbours tell
+    code from a chance match in compressed assets."""
+    chunks = [(name, lo, hi) for name, slo, shi, lo, hi in A.reshaped if (slo, shi) == (lo, hi)]
+    if not chunks:
+        return set()
+    skip = list(stock_code_blocks(A.secs))
+    if A.payload:
+        skip.append((A.payload['rom'], A.payload['rom'] + A.payload['size']))
+    out = set()
+    for off in range(24, len(A.hack) - 27, 4):
+        w = word(A.hack, off)
+        if w >> 26 not in (2, 3):
+            continue
+        t = 0x80000000 | ((w & 0x3FFFFFF) << 2)
+        for name, lo, hi in chunks:
+            if lo <= t < hi and not any(a <= off < b for a, b in skip) and all(mips.plausible(word(A.hack, off + 4 * i)) for i in range(-6, 7)):
+                out.add((name, t))
+    return out
+
+
+def runtime_functions(A, area, new_rom, report):
+    """Code loaded at run time reaches a reshaped chunk at the hack's address, where the moved chunk left stock words (VPW64
+    Deluxe: `j 0x8011DA24` ran them with the wrong registers and crashed, and `jal 0x800F7A14` got the stock function, which
+    takes other arguments; jessetbh/aki-roadmap#222). Each target is compiled from a copy of the hack's words at its own
+    address and tied to its overlay, which also replaces a stock function there for calls through the lookup. RAM stays
+    stock: hack words there would change the stock function around them and the runtime would regenerate it. Branches out of
+    the chunk keep their offsets, so they become lookups."""
+    out, problems = [], []
+    for name, t in sorted(runtime_targets(A)):
+        st = A.byname[name]
+        lo, hi = next((l, h) for n_, a, b, l, h in A.reshaped if n_ == name and l <= t < h)
+        get = lambda v, name=name: word(A.hack, A.hack_rom_of(name, v))
+        end, _, _, back = trace_extent(get, t, lo, hi)
+        first = min([b for b in back if lo <= b] + [t])
+        words = rewrite([get(v) for v in range(first, end, 4)], first, first, lambda a, name=name: A.map.candidates(a, name), None, problems)
+        vram = first
+        if first < t:       # loops reach above the entry: the same form as the back-branch copies, a branch to the real entry first
+            words = [0x10000000 | (((t - (first - 4)) >> 2) & 0xFFFF), 0] + words
+            vram = first - 8
+        off = (len(area) + 15) & ~15
+        area.extend(bytes(off - len(area)))
+        for w in words:
+            area.extend(w.to_bytes(4, 'big'))
+        out.append(dict(vram=vram, entry=t, rom=new_rom + off, size=4 * len(words), kind='runtime', section_rom=st.rom,
+                        data=[st.text, st.bss, st.rom]))
+    report['runtime_functions'] = [f['entry'] for f in out]
+    report['runtime_function_problems'] = problems
+    return out
+
+
 def keep_caves_in_place(A, D, report):
     """Main-data caves also keep their code at the hack's addresses, where main's data isn't shifted: code the hack
     loads at run time (compressed modules, out of reach of the rewrite) jumps there (VPW64 Deluxe's hooks fall back
@@ -2138,6 +2190,63 @@ def add_branch_out_entries(A, D, ports, rounds=4):
         bodies = new
 
 
+def add_new_area_entries(A, D, area, ports, report, rounds=4):
+    """Every jump the rewrite points into the new-code area must land on a function the live recompiler knows, or the
+    lookup fails there. Two ways it didn't (VPW64 Deluxe v1.1, jessetbh/aki-roadmap#222):
+    - a branch from one new-code function into another: the hook at 0x8010DD50 branches to the `j` back at 0x8010D448,
+      in the chunk reshaped at 0x8010D404 (attract crash, "Failed to find function at 0x8F001194");
+    - a `j`/`jal` from ported code into a chunk no code of its own overlay enters: main's hook at 0x80010ADC does
+      `j 0x800F2ADC`, in ovl_a's chunk reshaped at 0x800F2A40 (crash after the match intro at 0x8F0007CC).
+    Each target gets an entry of its block's kind, as far as code entered there reaches in the block. Loops back above a
+    function's entry in its own block are left to the back-branch copy."""
+    blocks = [(nv, nv + (hi - lo), k, sec, lo) for k, sec, lo, hi, nv in A.new_blocks]
+    starts = {x.vram for x in A.extras if x.vram}
+    get_area = lambda v: word(area, v - NEW_CODE_VRAM)
+
+    def block_of(t):
+        return next((b for b in blocks if b[0] <= t < b[1]), None)
+
+    def get_for(x):
+        if x.kind in ('cave', 'reshaped'):
+            return get_area
+        if x.kind == 'payload':
+            return lambda v: word(D, A.payload['rom'] + (v - A.payload['ram']))
+        st = A.byname[x.section]
+        return lambda v, st=st: word(D, st.rom_of(v))
+
+    bodies = [(get_for(x), x.vram, x.size) for x in A.extras
+              if x.vram and x.size and x.kind in ('cave', 'reshaped', 'mid', 'payload') and (x.kind != 'mid' or x.section)]
+    bodies += [((lambda v, st=A.byname[p.section]: word(D, st.rom_of(v))), p.stock_vram, p.size) for p in ports if p.status == 'changed']
+    added = []
+    for _ in range(rounds):
+        new = []
+        for get, vram, size in bodies:
+            own = block_of(vram)
+            floor = own[0] if own else vram
+            for v in range(vram, vram + size, 4):
+                w = get(v)
+                t = mips.branch_target(w, v)
+                if t is None and w >> 26 in (2, 3):
+                    t = mips.jump_target(w, v)
+                elif t is not None and floor <= t < vram:
+                    continue    # a loop above the entry in its own block: the back-branch copy
+                if t is None or vram <= t < vram + size or t in starts:
+                    continue
+                b = block_of(t)
+                if b is None:
+                    continue
+                end, _, _, _ = trace_extent(get_area, t, b[0], b[1])
+                e = Extra(b[2], b[4] + (t - b[0]), t, end - t, section=b[3])
+                A.extras.append(e)
+                starts.add(t)
+                added.append((v, t))
+                new.append((get_area, t, end - t))
+        if not new:
+            break
+        bodies = new
+    report['new_area_entries'] = added
+
+
 REFRESH_OPS = {0x0F, 0x09, 0x0C, 0x0D, 0x0A, 0x0B} | mips.LOAD_GPR | {0x28, 0x29, 0x2B}
 REFRESH_SPECIAL = {0x00, 0x02, 0x03, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x2A, 0x2B}
 REFRESH_TEMPS = {1, 8, 9, 10, 11, 12, 13, 14, 15, 24, 25}
@@ -2237,6 +2346,65 @@ def add_refresh_stubs(A, D, area, report, lookahead=12):
         put_word(D, r, mips.with_jump_target(jal, stubs[key]))
         report.setdefault('refresh_sites', []).append((name, v, a, stubs[key]))
     report['refresh_hooks'] = [(e, sorted(ins), sorted(outs)) for e, _, ins, outs in hooks]
+
+
+def caller_checks(A):
+    """Return addresses the hack's own code compares $ra with (`lui r; ori r; beq/bne ra,r`), from its caves and the code it
+    loads at run time. A hook tells its callers apart that way."""
+    skip = list(stock_code_blocks(A.secs))
+    caves = [(A.hack_rom_of('main', lo), A.hack_rom_of('main', hi)) for k, sec, lo, hi, nv in A.new_blocks if k == 'cave']
+    out = set()
+    for off in range(16, len(A.hack) - 3, 4):
+        w = word(A.hack, off)
+        rs, rt = (w >> 21) & 31, (w >> 16) & 31
+        if w >> 26 not in (4, 5) or 31 not in (rs, rt) or rs == rt:
+            continue
+        if any(a <= off < b for a, b in skip) and not any(a <= off < b for a, b in caves):
+            continue
+        reg = rs if rt == 31 else rt
+        hi, lo = word(A.hack, off - 8), word(A.hack, off - 4)
+        if hi >> 26 == 0x0F and (hi >> 16) & 31 == reg and lo >> 26 == 0x0D and (lo >> 16) & 31 == reg and (lo >> 21) & 31 == reg:
+            ra = ((hi & 0xFFFF) << 16) | (lo & 0xFFFF)
+            if 0x80000000 <= ra < 0x80800000 and ra & 3 == 0:
+                out.add(ra)
+    return out
+
+
+def add_caller_stubs(A, D, area, report):
+    """Recompiled code doesn't put the return address in $ra, so a hook that checks who called it never matches (VPW64 Deluxe:
+    title belts in entrances, `jal 0x800FCCAC` at 0x80123AF8 and 0x80123E1C, and 0x800164FC called from ovl_d: 0x800FCCAC
+    called from elsewhere gets the wrestler's real second argument and a second man appears; jessetbh/aki-roadmap#222). Each
+    such `jal f` goes through a stub that sets $ra, calls f and clears $ra again: left set, it would match for the next
+    caller, since no jal overwrites it here. Only for sites at the hack's address, as the hack's value is what gets compared."""
+    stubs = {}
+    for ra in sorted(caller_checks(A)):
+        site = ra - 8
+        found = False
+        for name, st in A.byname.items():
+            if name == 'entry' or not st.text <= site < st.data:
+                continue
+            hrom, htext, htext_end = A.place[name][:3]
+            if not htext <= site < htext_end:
+                continue
+            w = word(A.hack, hrom + (site - htext))
+            if w >> 26 != 3 or (A.map.translate(site, name) or site) != site:
+                continue
+            target = mips.jump_target(word(D, st.rom_of(site)), site)
+            if (ra, target) not in stubs:
+                off = (len(area) + 15) & ~15
+                area.extend(bytes(off - len(area)))
+                sv = NEW_CODE_VRAM + off
+                code = [0x3C1F0000 | (ra >> 16), 0x37FF0000 | (ra & 0xFFFF), mips.with_jump_target(0x0C000000, target), 0,
+                        0x0000F821, 0x03E00008, 0]      # move ra, zero; jr ra
+                for c in code:
+                    area.extend(c.to_bytes(4, 'big'))
+                A.extras.append(Extra('refresh', None, sv, 4 * len(code)))
+                stubs[(ra, target)] = sv
+            put_word(D, st.rom_of(site), mips.with_jump_target(0x0C000000, stubs[(ra, target)]))
+            report.setdefault('caller_stubs', []).append((name, site, target))
+            found = True
+        if not found:
+            report.setdefault('caller_checks_unhandled', []).append(ra)
 
 
 def _jumpish(w):
@@ -2675,6 +2843,7 @@ def assemble(A, report):
                         put_word(area, off + 4 * i, c)
     report['cave_problems'] = cave_probs
     add_refresh_stubs(A, D, area, report)
+    add_caller_stubs(A, D, area, report)
     fix_unreachable_lo(A, D, area, report)
     fix_get_pc(A, D, area, report, new_rom)
     add_entry_logs(A, D, area, report)
@@ -2685,6 +2854,7 @@ def assemble(A, report):
     add_switch_case_entries(A, D)
     add_fall_through_entries(A, D, ports)
     add_branch_out_entries(A, D, ports)
+    add_new_area_entries(A, D, area, ports, report)
     kseg1_fixups(A, D, area, ports, report)
     functions = []
     copies = 0
@@ -2757,6 +2927,7 @@ def assemble(A, report):
             continue
         functions.append(f)
     report['back_branch_copies'] = copies
+    functions += runtime_functions(A, area, new_rom, report)
     # (debugging) raw word patches at stock addresses: section:vram=word
     for spec in getattr(A, 'experiment_word_patches', ()):
         sec, rest = spec.split(':')
@@ -2820,6 +2991,8 @@ def summarize(A, report):
         lines.append('biased table base taken from stock: %s %08X -> %08X' % (name, a, st))
     k = collections.Counter(x.kind for x in A.extras)
     lines.append('extra functions: %d payload, %d cave, %d reshaped, %d mid-function return points' % (k['payload'], k['cave'], k['reshaped'], k['mid']))
+    if report.get('new_area_entries'):
+        lines.append('jumps into new code without a function there: %d entr(ies) added' % len(report['new_area_entries']))
     lines.append('data words changed: %d; payload pointers translated: %d (%d by the overlay of the code that owns them)' % (
         report['data_words_changed'], report.get('payload_pointers_translated', 0), report.get('payload_pointers_by_owner', 0)))
     for name, old, new in getattr(A, 'table_extensions', []):
