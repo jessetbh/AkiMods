@@ -79,10 +79,11 @@ A conversion (AKI Launcher; its manifest is `aki.json`) can carry a codes file: 
 game runs with `AKI_CONVERSION=<id>`, it reads `<app folder>/conversions/<id>/<file>`. A file for the port's own
 revision the game runs itself (host export `aki_conversion_apply`, called by this mod every frame). Any other file
 it hands to this mod as text (host export `aki_conversion_codes`), which applies it every frame, on top of the
-toggles and the Codes box. All six games are built with `AKI_HOST_CONVERSION` (`mod.psd1`, `PerGame.<game>.Defines`),
-the define that makes this mod import those exports; a mod that imports a function the game lacks doesn't load, so
-a game without them would need the define removed. The result goes to the game's log as one
-`[conversion] codes: N active, ...` line (`aki_conversion_log`).
+toggles and the Codes box. This mod is built with `-DAKI_HOST_CONVERSION` for all six games (`mod.psd1`,
+`PerGame.<game>.Defines`), the define that makes it import those exports; a mod that imports a function the game
+lacks doesn't load, so a game without them would need the define removed. The result goes to the game's log as one
+line: `[conversion] codes: N active (native table: ...)` written by the game for a file it runs itself, or
+`[conversion] codes: N active, ...` from this mod (`aki_conversion_log`).
 
 Format: UTF-8 text (a BOM is fine), LF or CRLF, one code per line.
 
