@@ -102,10 +102,12 @@
    "note": "The pause screen draws noise. Ropes, body shapes and extra attires do not apply. Can crash on a save in a certain state.",
    "outputs": {
     "sha1": [
-     "63BB51FB10C96F8DBC15485740A330B9CDC18374"
+     "63BB51FB10C96F8DBC15485740A330B9CDC18374",
+     "4525C92D069BEB709514F98BED9D6FE150622FFE"
     ],
     "codes_sha1": [
-     "9C32DDE6E48ED87859BAD28A057AA156E4C5E64D"
+     "9C32DDE6E48ED87859BAD28A057AA156E4C5E64D",
+     "A2E83248CC1DC5A07DABBB68BA481C61C8003D7E"
     ]
    }
   },
