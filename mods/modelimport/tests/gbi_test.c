@@ -23,7 +23,7 @@ int main(void) {
     CHECK(mi_gbi_segment_w0(0xE) == 0xBC003806u);
     // VPW64's emitter: 0x039E0010, 0x03980010, 0x039A0010, 0x039C0010 at +0, +16, +32, +48; no G_MW_FORCEMTX.
     BEGIN(); mi_gbi_force_matrix(&out, 0x00300038u);
-    CHECK(words() == 8);
+    CHECK(words() == 8 && MI_GBI_FORCE_MATRIX_WORDS == 8);
     IS(0, 0x039E0010u, 0x00300038u); IS(1, 0x03980010u, 0x00300048u);
     IS(2, 0x039A0010u, 0x00300058u); IS(3, 0x039C0010u, 0x00300068u);
     BEGIN(); mi_gbi_texture(&out, 1, 0xFFFFFFFFu); IS(0, 0xBB000001u, 0xFFFFFFFFu);
@@ -54,7 +54,7 @@ int main(void) {
     CHECK(mi_gbi_segment_w0(0xC) == 0xDB060030u);
     CHECK(mi_gbi_segment_w0(0xE) == 0xDB060038u);
     BEGIN(); mi_gbi_force_matrix(&out, 0x00300038u);
-    CHECK(words() == 4);
+    CHECK(words() == 4 && MI_GBI_FORCE_MATRIX_WORDS == 4);
     IS(0, 0xDC38000Eu, 0x00300038u); IS(1, 0xDB0C0000u, 0x00010000u);
     BEGIN(); mi_gbi_texture(&out, 1, 0xFFFFFFFFu); IS(0, 0xD7000002u, 0xFFFFFFFFu);
     BEGIN(); mi_gbi_texture(&out, 0, 0xFFFFFFFFu); IS(0, 0xD7000000u, 0);
