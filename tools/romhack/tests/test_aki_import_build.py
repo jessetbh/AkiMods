@@ -462,6 +462,78 @@ class Pj64Bundles(BuildBase):
         self.assertEqual(r['status'], 'needs-game')
 
 
+def hts_file(path, records):
+    """A GLideN64 .hts (old layout) with RGBA8 records [(checksum, w, h, rgba)]: synthetic, as test_aki_conv's."""
+    import struct
+    body, index, pos = b'', [], 12
+    for chk, w, h, rgba in records:
+        rec = struct.pack('<IIIHHB', w, h, 0x8058, 0x1908, 0x1401, 1) + struct.pack('<I', len(rgba)) + rgba
+        index.append(struct.pack('<Qq', chk, pos))
+        body += rec
+        pos += len(rec)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'wb') as f:
+        f.write(struct.pack('<iq', 0x40220000, pos) + body + struct.pack('<i', len(index)) + b''.join(index))
+
+
+class TexturesSave(BuildBase):
+    catalog = HackRoutes.catalog
+    """A textures + save mod (N64Modderz64's WWF No Mercy MOD, aki-roadmap#172): one conversion with the save as its
+    seed save and the textures inside, matched to the catalog by its content hash."""
+
+    def mod(self, root='in/WWF MOD', fla=None):
+        px = bytes([255, 0, 0, 255, 0, 255, 0, 128])
+        hts_file(os.path.join(self.dir, root, 'Cache', 'WWF No Mercy_HIRESTEXTURES.hts'),
+                 [(0x0000000011111111, 2, 1, px), (0x2222222233333333, 2, 1, px)])
+        import test_aki_save as ts   # its synthetic No Mercy flash, in Project64's .fla word order
+        self.write(root + '/Save/WWF No Mercy-0123/WWF No Mercy.fla', ts.ws32(ts.nm_flash(fla or 1)))
+        return os.path.join(self.dir, *root.split('/'))
+
+    def test_builds_one_conversion_with_a_seed_save_and_textures(self):
+        r = self.build_one([self.mod()])
+        self.assertEqual((r['status'], r['converter'], r['game'], r['aki_tier']),
+                         ('converted', 'import-pj64', 'nomercy', 'untested'), r)
+        m, aki, _ = check_package(self, r['package'], 'conversion')
+        self.assertEqual([(s['kind'], s['mode']) for s in aki['components']['saves']], [('flash', 'seed')])
+        self.assertEqual(aki['components']['textures']['naming'], 'rice')
+        self.assertEqual(aki['survey']['content_sha1'], r['content_sha1'])
+        with zipfile.ZipFile(r['package']) as z:
+            pngs = [n for n in z.namelist() if n.startswith('conversion/textures/') and n.endswith('.png')]
+        self.assertEqual(len(pngs), 2)
+
+    def test_catalog_matches_by_content(self):
+        first = self.build_one([self.mod()])
+        os.remove(first['package'])
+        cat = self.catalog([{'id': 'n64m', 'name': 'Mod', 'game': 'nomercy', 'tier': 'verified', 'note': 'N',
+                             'outputs': {'content_sha1': [first['content_sha1']]}}])
+        r = self.build_one([self.mod()], catalog=cat)
+        self.assertEqual((r['aki_tier'], r['note']), ('verified', 'N'))
+
+    def test_other_save_is_untested(self):
+        first = self.build_one([self.mod()])
+        cat = self.catalog([{'id': 'n64m', 'name': 'Mod', 'game': 'nomercy', 'tier': 'verified',
+                             'outputs': {'content_sha1': [first['content_sha1']]}}])
+        r = self.build_one([self.mod('in2/WWF MOD', fla=2)], catalog=cat)
+        self.assertNotEqual(r['content_sha1'], first['content_sha1'])
+        self.assertEqual(r['aki_tier'], 'untested')
+
+    def test_content_hash_ignores_rt64_json_and_follows_every_image(self):
+        a = {'conversion/saves/s.bin': b'1', 'conversion/textures/x.png': b'p', 'conversion/textures/rt64.json': b'{}'}
+        b = dict(a, **{'conversion/textures/rt64.json': b'{"other": 1}'})
+        c = dict(a, **{'conversion/textures/x.png': b'q'})
+        self.assertEqual(ai.Builder.content_sha1(a), ai.Builder.content_sha1(b))
+        self.assertNotEqual(ai.Builder.content_sha1(a), ai.Builder.content_sha1(c))
+        self.assertIsNone(ai.Builder.content_sha1({'conversion/codes.txt': b'x'}))
+
+    def test_codes_entry_wanting_content_needs_it(self):
+        bundle = Pj64Bundles.bundle(self)
+        first = self.build_one([bundle])
+        os.remove(first['package'])
+        cat = self.catalog([{'id': 'mymod', 'name': 'My Mod', 'game': 'nomercy', 'tier': 'verified',
+                             'outputs': {'codes_sha1': [first['codes_sha1']], 'content_sha1': ['0' * 40]}}])
+        self.assertEqual(self.build_one([bundle], catalog=cat)['aki_tier'], 'untested')
+
+
 class Rev0Codes(BuildBase):
     """aki-roadmap#228: a bundle's codes for No Mercy Rev 0 are translated to the port's Rev 1 through the derelink
     map (a shipped one, else made from a stock Rev 0 ROM), with the hand-made packs' --map-range."""

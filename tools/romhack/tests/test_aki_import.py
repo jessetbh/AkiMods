@@ -240,6 +240,44 @@ class Containers(Base):
         r = self.one([os.path.join(self.dir, 'in', 'jabo')])
         self.assertEqual((r['naming'], r['ask']), ('jabo', 'which game'))
 
+    def textures_save_mod(self, root='in/WWF MOD', save='WWF No Mercy', extra=()):
+        # N64Modderz64's shape (aki-roadmap#172): a GLideN64 .hts, a Project64 Save folder with a flash save, a pak and a
+        # savestate, no Project64.cfg or cheats. Contents are placeholders: classification reads names only.
+        self.write(root + '/Project64 - Plugin - GFX - GLideN64 - Cache/WWF No Mercy_HIRESTEXTURES.hts', b'x')
+        for n in (save + '.fla', save + '_Cont_1.mpk', 'WWF No Mercy (U) (V1.0).pj.zip') + tuple(extra):
+            self.write(root + '/Project64 - Save/WWF No Mercy-0123/' + n, b'x')
+        return os.path.join(self.dir, *root.split('/'))
+
+    def test_hts_names_its_rom(self):
+        self.assertEqual(ai.texture_naming(['a/WWF No Mercy_HIRESTEXTURES.hts']), ('hts', 1, 'WWF No Mercy'))
+        self.assertEqual(ai.texture_naming(['cache.hts'])[2], None)
+        self.assertEqual(ai.texture_naming(['A_HIRESTEXTURES.hts', 'B_HIRESTEXTURES.hts'])[2], None)
+
+    def test_textures_and_save_folder_is_one_conversion(self):
+        r = self.one([os.path.dirname(self.textures_save_mod())])
+        self.assertEqual((r['kind'], r['route'], r['bundle'], r['game'], r['rom_name'], r['name']),
+                         ('pj64-bundle', 'import-pj64', 'textures-save', 'nomercy', 'WWF No Mercy', 'WWF MOD'))
+        self.assertEqual(r['parts'], ['save', 'textures'])
+
+    def test_zipped_textures_and_save_is_one_conversion(self):
+        files = {'WWF MOD/Cache/WWF NO MERCY#%08X#0#2_all.png' % i: b'png' for i in range(6)}
+        files['WWF MOD/Save/WWF NO MERCY.fla'] = b'x'
+        r = self.one([self.write('in/mod.zip', self.zip_bytes(files))])
+        self.assertEqual((r['kind'], r['bundle'], r['game']), ('pj64-bundle', 'textures-save', 'nomercy'))
+
+    def test_save_for_another_rom_stays_apart(self):
+        items, _ = self.run_job([self.textures_save_mod(save='Some Other Game')])
+        self.assertEqual(sorted((i['kind'], i['status']) for i in items),
+                         [('save', 'unsupported'), ('save', 'unsupported'), ('texture-pack', 'ready'),
+                          ('unknown', 'unsupported')])   # the savestate placeholder
+
+    def test_textures_and_save_beside_a_rom_stay_apart(self):
+        path = self.textures_save_mod()
+        self.write('in/WWF MOD/hack.z64', fake_rom(salt=9))
+        items, _ = self.run_job([path])
+        self.assertNotIn('pj64-bundle', [i.get('kind') for i in items])
+        self.assertIn('rom', [i.get('kind') for i in items])
+
     def test_rar_and_7z_without_tool(self):
         rar = self.write('in/a.rar', b'Rar!\x1a\x07\x00')
         sz = self.write('in/b.7z', b"7z\xbc\xaf\x27\x1c\x00\x04")

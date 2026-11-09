@@ -80,7 +80,11 @@ python -I tools\romhack\aki_import.py build C:\Downloads\wrestling --rom nomercy
   `install`), `stock`, `have-it`, `needs-rom` (`needs` names the base when the patch says which),
   `unsupported` (`why`), `failed` (`why`).
 - **Tiers:** a hack that matches the recipe catalog (`--catalog`, by SHA-1) gets that entry's id,
-  name, route and tier; any other hack is `untested` (#224, #172).
+  name, route and tier; any other hack is `untested` (#224, #172). A built package keeps the tier
+  only when it is the tested build: its patch makes the entry's `outputs.sha1`, else its
+  `codes.txt` is `outputs.codes_sha1`, else (textures + save mods, no patch or codes) its saves and
+  texture images hash to `outputs.content_sha1` (SHA-1 of the sorted `<path> NUL <file SHA-1> LF`
+  lines for `conversion/saves/*` and the images under `conversion/textures/`, not `rt64.json`).
 - **Patches** are applied with `patchfmt.py` in this folder (`detect(patch)`,
   `apply(patch, source) -> (target, info)`, `PatchError`). Every given stock ROM is tried as the
   base, port ROMs first; stock ROMs among the inputs count too. `.rup` and PPF files are refused
@@ -111,7 +115,7 @@ with `package`, `converter` and `aki_tier`:
 | Input | Converter | Package |
 |---|---|---|
 | hack ROM, or a patch applied to its base | `aki_hack.survey_rom` against the port's ROM: `patch-data` / `patch-code` -> `make_patch_mod`; `rev0-layout` / `relinked` / `restructured` -> `derelink` (also when make_patch_mod refuses); `different-base` refused unless the catalog has a derelink recipe for that exact ROM (9 Underground) | conversion: `conversion/aki.json` + `conversion/patch.nrm` (its mod id is the conversion id), + `codes.txt` when derelink writes a code watch table |
-| Project64 bundle (folder or zip) | `aki_conv` import-pj64 with the item's id and name; the game from the bundle's cheat sections or a ROM in it, else `game` | conversion (codes, saves, docs, patch, and the textures inside it at `conversion/textures/`: the game reads a conversion's textures from its own folder, while a texture-pack package installs to `mods\`) |
+| Project64 bundle (folder or zip), or a textures + save mod (a texture pack that names its ROM, such as a GLideN64 `WWF No Mercy_HIRESTEXTURES.hts`, beside a save named after the same ROM, and no ROM, patch or archive: N64Modderz64's WWF No Mercy MOD) | `aki_conv` import-pj64 with the item's id and name; the game from the bundle's cheat sections or a ROM in it, else the ROM name the textures and save share, else `game`; the save becomes the conversion's seed save | conversion (codes, saves, docs, patch, and the textures inside it at `conversion/textures/`: the game reads a conversion's textures from its own folder, while a texture-pack package installs to `mods\`) |
 | texture pack (rt64, Rice, Jabo, `.hts`) | images copied, an `rt64.json` added for Rice/Jabo (`autoPath`), `.hts` exported to Rice PNGs | texture-pack (`payload.folder: textures/`) |
 
 - Conversions are built against the port's ROM, so a build needs it (`--rom`, `--rom-dir`, or
