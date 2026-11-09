@@ -179,7 +179,7 @@ A complete example (every component is optional; use only the ones you need):
 | `version` | string | Use `x.y.z`. `aki_import.py` refuses anything else; the launcher only shows this one and checks the `aki-package.json` version. |
 | `authors` | list of strings | At least one name. The tools write `["unknown"]` when none is given. |
 | `game` | string | The game key: `wt`, `revenge`, `wm2k`, `vpw64`, `nomercy`, `vpw2`. (Note: `aki-package.json` uses the runtime id instead.) |
-| `base_rom.sha1` | string, or list of strings | SHA-1 of the ROM (in `.z64` byte order) the conversion runs on. The Mods page and Play as... accept either form; the install path without `aki-package.json` checks only a single string (a list skips the check). With no `sha1`, the launcher treats every ROM as a match. |
+| `base_rom.sha1` | string, or list of strings | SHA-1 of the ROM (in `.z64` byte order) the conversion runs on. The Mods page, Play as... and both install paths accept either form (any one matches). With no `sha1`, the launcher treats every ROM as a match. |
 | `base_rom.revision` | string | The revision tag of that ROM, e.g. `nomercy-rev1`. The ports run `nomercy-rev1`, `wt-rev0`, `revenge-rev0`, `wm2k-rev0`, `vpw64-rev0` and `vpw2-rev0`. |
 | `requires.patch` | object | Written by `import-pj64` only, when a mod's patch needs a ROM the player hasn't given yet: `{format: "ninja2-rup", base, source_md5, note}`. Rerun the import with that ROM to replace it with a real `patch` component. |
 | `source.mode` | string | `byo` ("bring your own" ROM). It is the only mode. The tools add `imported_from` (`project64-bundle`, `rom` or `patch`) to record what they built from. |
@@ -247,8 +247,8 @@ Source of truth: `AkiLauncher/src/packages.cpp` (`check_package`), `tools/romhac
 - `rom`: the revision the addresses are for (`rom_revision` is read too, as an older name). Make it the port's
   revision (`base_rom.revision`). Codes for another revision need translating first (`aki_conv.py translate-codes`);
   the bake step refuses them, and No Mercy Rev 0 lists are the only ones the game can translate itself. The
-  launcher uses `rom` only for a note when it installs the conversion; the game ignores it, and the codes file's own
-  `# rom:` line decides.
+  game ignores it and the codes file's own `# rom:` line decides; the launcher judges that line the same way for its
+  notes, and mentions `rom` only when it reads differently from the file.
 
 When the game runs the conversion, it reads this file and runs every code in it every frame.
 
@@ -301,9 +301,9 @@ it.
 - `sha256`: optional; the SHA-256 of the texture package zip, as lowercase hex, which pins the exact file.
   `import-pj64` writes it (its zips are byte-for-byte reproducible); `aki_import.py build` drops it and lists the
   package in `aki-package.json` `requires.packages` instead. When the launcher installs a package zip it stores the
-  zip's SHA-256 in `_packages\<package>\.package.sha256`. When you then add the conversion (install path without
-  `aki-package.json`), the launcher's result message notes a missing package, or a `sha256` that differs from the
-  installed one. That message is the only place either note appears, and the conversion still runs.
+  zip's SHA-256 in `_packages\<package>\.package.sha256`. The launcher notes a missing package, or a `sha256` that
+  differs from the installed one, under the conversion on the Mods page and in the result message when you add it
+  through the install path without `aki-package.json`. The conversion still runs.
 - `dir`: a folder inside the conversion that holds a texture pack, e.g. `textures`. If it's missing, the game logs it
   and runs without it. When `naming` is `rice` or `jabo` and the folder has no `rt64.json`, the game writes one, so
   a pack can ship with its author's own file names.
@@ -642,8 +642,8 @@ Where these disagree, the code (listed first) wins.
    first kind and `aki_conv.py` the second.
 2. **`textures.version` and `textures.optional`** are recorded only; nothing reads them.
 3. **`textures.sha256`.** Written by `import-pj64`, dropped by `aki_import.py build`. The launcher only notes a
-   mismatch, in the result message when the conversion is added through the path without `aki-package.json`, and
-   only when the package was installed from a zip first (a folder gets no `.package.sha256`).
+   mismatch (on the Mods page and in the install result message), and only when the package was installed from a zip
+   first (a folder gets no `.package.sha256`).
 4. **`base_rom` placement.** The `aki-package.json` installer requires `base_rom` in `aki-package.json`, but the
    launcher reads it from `aki.json` for the Mods page, Play as... and the other install path; with none in
    `aki.json`, every ROM shows as a match.
@@ -667,5 +667,3 @@ Where these disagree, the code (listed first) wins.
 14. **`format` / `format_version`.** The Mods page and Play as... check neither, and the launch list checks only
     `format`. The launcher can offer a conversion the game then refuses (which stops the game). Only the install
     path without `aki-package.json` checks both.
-15. **`base_rom.sha1` as a list** is skipped by the install path without `aki-package.json` (see
-    [The package around it](#the-package-around-it)).
