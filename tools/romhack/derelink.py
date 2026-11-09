@@ -900,7 +900,8 @@ def rewrite(words, hack_pc, new_pc, candidates, stock_words=None, problems=None,
         out[i] = (w & 0xFFFF0000) | (off & 0xFFFF)
     groups = collections.defaultdict(list)
     external = []                               # %lo uses whose lui is in the code that jumped here
-    for hi, lo, a in mips.hilo_refs(words, init=init):
+    for hi, lo, a in mips.hilo_refs(words, base_pc=hack_pc, init=init,
+                                    return_writes=getattr(candidates, 'return_writes', None)):
         if hi is None:
             external.append((lo, a))
         else:
@@ -1121,6 +1122,7 @@ def port_code(A):
                 A.biased_bases.append((name, a, (a + shift) & 0xFFFFFFFF))
             return ok
         tr.near_shift = near_shift
+        tr.return_writes = getattr(A, 'return_writes', None)   # see mips.hilo_refs
         zones = keep_stock_zones(A, name)
         for s, h, z in units:
             if any(lo <= s and s + z <= hi for lo, hi in zones):
@@ -1606,13 +1608,18 @@ def discover_extra_code(A):
     # ...and the other way round: registers a hook leaves holding a lui value when it jumps back
     # into the function (the hack moved a lui there; the %lo stayed behind)
     rinits = {}
+    rwrites = collections.defaultdict(set)   # return point -> registers the hooks coming back there write
     for e, (r, end, back) in entries.items():
         words = [r[3](v) for v in range(e, end, 4)]
         for i, kind, t in mips.jumps(words, e):
             if kind == 'j' and not region_of(t, r[4]):
                 st = mips.hilo_state_at(words, i)
                 rinits[t] = st if t not in rinits else {k: v for k, v in rinits[t].items() if st.get(k) == v}
+                rwrites[t] |= mips.regs_written(words[:i + 2])
     A.return_init = {t: st for t, st in rinits.items() if st}
+    # a register the hook writes holds no lui value of the function's any more when the hook comes back: a relinked hack's
+    # `lui s4,0x800F; j hook`, the hook doing the stock `lw s4,0x6134(s4)` (aki-roadmap#239)
+    A.return_writes = {t: frozenset(w) for t, w in rwrites.items() if w}
 
     # mid-function return points: a hook entered by a `j` from function U returns into U
     owners = collections.defaultdict(set)          # hack text address -> {(section, s, h, z)}
