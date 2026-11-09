@@ -194,6 +194,79 @@ class Patches(Base):
         self.assertEqual(r['status'], 'failed')
 
 
+class BaselessPatches(unittest.TestCase):
+    """aki-roadmap#269: an IPS / APS patch doesn't name its source ROM, so it "applies" to any of the six. The N64
+    header checksum of the result decides when the patch touched the checksummed area; else the import's game; else
+    it asks."""
+    SEED = 0xF8CA4DDC
+
+    def rom(self, salt):
+        body = bytearray(0x200000)
+        x = salt * 2654435761 & 0xFFFFFFFF
+        for i in range(0x40, len(body), 4):
+            x = (x * 1103515245 + 12345) & 0xFFFFFFFF
+            body[i:i + 4] = x.to_bytes(4, 'big')
+        return self.fix(body)
+
+    def fix(self, body):
+        c1, c2 = ai.n64_checksum(bytes(body), 6102, self.SEED)
+        body[0x10:0x14], body[0x14:0x18] = c1.to_bytes(4, 'big'), c2.to_bytes(4, 'big')
+        return bytes(body)
+
+    def ips_on(self, base, edits, header_from=None):
+        """What an IPS with these edits (and, as the hack's tools write it, the hack's header checksum) makes of base."""
+        out = bytearray(base)
+        for off, val in edits:
+            out[off] = val
+        if header_from is not None:
+            out[0x10:0x18] = header_from[0x10:0x18]
+        return bytes(out)
+
+    def test_checksum_and_cic(self):
+        a = self.rom(1)
+        self.assertEqual(ai.n64_cic_of(a), (6102, self.SEED))
+        broken = bytearray(a)
+        broken[0x3000] ^= 0xFF
+        self.assertIsNone(ai.n64_cic_of(bytes(broken)))
+        self.assertIsNone(ai.n64_checksum(b'x' * 100, 6102, self.SEED))
+
+    def test_the_base_whose_checksum_comes_out_right_wins(self):
+        a, b = self.rom(1), self.rom(2)
+        hack = self.fix(bytearray(self.ips_on(a, [(0x2000, 9)])))          # the hack as its author shipped it
+        on_b = self.ips_on(b, [(0x2000, 9)], header_from=hack)
+        on_a = self.ips_on(a, [(0x2000, 9)], header_from=hack)
+        self.assertEqual(on_a, hack)
+        # b is tried first (as the launcher's sorted list tried No Mercy first): a still wins, with any hint.
+        for hint in (None, 'game_b'):
+            self.assertEqual(ai.baseless_patch_pick([('game_b', 'B', b, on_b), ('game_a', 'A', a, on_a)], hint), (1, None))
+
+    def test_no_proof_uses_the_imports_game_else_asks(self):
+        a, b = self.rom(1), self.rom(2)
+        edits = [(0x180000, 7)]                                         # outside the checksummed area
+        applied = [('game_b', 'B', b, self.ips_on(b, edits)), ('game_a', 'A', a, self.ips_on(a, edits))]
+        i, why = ai.baseless_patch_pick(applied)
+        self.assertIsNone(i)
+        self.assertIn('fits more than one: B, A', why)
+        self.assertEqual(ai.baseless_patch_pick(applied, 'game_a'), (1, None))
+        self.assertEqual(ai.baseless_patch_pick(applied[:1]), (0, None))  # one base: that one
+        # The import's game without its ROM among the bases: say that, not "import it from that game's page".
+        v = [('game_b', 'B', False, True), ('game_a', 'A', False, True)]
+        i, why = ai.baseless_pick_from(v, 'wm2k', available={'game_a', 'game_b'})
+        self.assertIsNone(i)
+        self.assertIn("ROM isn't set up", why)
+        self.assertNotIn('pass game', why)
+
+    def test_real_stock_roms_checksums(self):
+        # The algorithm against the six real dumps' headers (not committed; skipped without the local test library).
+        lib = os.path.join(os.path.expanduser('~'), 'Downloads', 'AKI Test Library', 'stock')
+        if not os.path.isdir(lib):
+            self.skipTest('no local test library')
+        for f in sorted(os.listdir(lib)):
+            with open(os.path.join(lib, f), 'rb') as fh:
+                rom = fh.read()
+            self.assertIsNotNone(ai.n64_cic_of(rom), f)
+
+
 class Containers(Base):
     def zip_bytes(self, files):
         buf = io.BytesIO()
@@ -436,8 +509,12 @@ class Hostile(Base):
                                    PatchError=PatchError)
         hack_is_nm = self.write('in/nm.ips', b'PATCH' + bytes(3) + b'EOF')
         items, _ = self.run_job([hack_is_nm], roms={'wt': wt_path, 'nomercy': self.stock_path}, patchfmt=pf)
-        self.assertEqual(items[0]['status'], 'ready')
-        self.assertEqual(items[0]['base'], 'WCW vs. nWo World Tour')   # the first base: both games match themselves
+        # aki-roadmap#269: it used to take the first base (both games match themselves); now it asks...
+        self.assertEqual(items[0]['status'], 'needs-game')
+        self.assertIn('fits more than one', items[0]['why'])
+        # ...unless the import says which game (the launcher's Mods page does).
+        items, _ = self.run_job([hack_is_nm], roms={'wt': wt_path, 'nomercy': self.stock_path}, patchfmt=pf, game='wt')
+        self.assertEqual((items[0]['status'], items[0]['base']), ('ready', 'WCW vs. nWo World Tour'))
 
         def nm_header(patch, source):   # the result always carries No Mercy's header
             out = bytearray(source)
