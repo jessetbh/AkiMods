@@ -358,8 +358,10 @@ def bundle_root(names, zipped=False):
     if len(subs) != 1:
         return None
     sub = subs.pop()
+    # Not .jpg / .jpeg: nothing imports a JPEG on its own (texture packs are PNG / DDS / BMP), and distributions put
+    # read-me pictures beside the Project64 folder (WWF Legends: "Cheat Code Settings.jpg", aki-roadmap#265).
     own = (ROM_EXTS + PATCH_EXTS + IMAGE_EXTS + tuple(SAVE_EXTS) +
-           ('.jpg', '.jpeg', '.zip', '.7z', '.rar', '.nrm', '.rtz', '.hts', '.htc'))
+           ('.zip', '.7z', '.rar', '.nrm', '.rtz', '.hts', '.htc'))
     if any(os.path.splitext(n)[1] in own for n in lower if not n.startswith(sub + '/')):
         return None
     # The original spelling of that folder (names are matched lower-case).
@@ -367,6 +369,44 @@ def bundle_root(names, zipped=False):
         if n.split('/', 1)[0].lower() == sub:
             return n.split('/', 1)[0] + '/'
     return None
+
+
+MAX_BUNDLE_ROM = 128 << 20
+
+
+def bundle_rom_sha1s(src):
+    """SHA-1s (.z64 order) of the ROMs inside a Project64 bundle's own folder: the catalog knows a bundle by its hack ROM
+    (inputs.sha1), as it knows a loose hack (aki-roadmap#265: WWF Legends' bundle had no catalog entry, so it was built
+    without the entry's settings and Legends fixes, under the folder's name)."""
+    zipped = src.zip_path is not None or src.zip_blob is not None
+    sub = (bundle_root(src.names, zipped) or '').lower()
+    out = []
+    if zipped:
+        with zipfile.ZipFile(src.zip_path if src.zip_path is not None else io.BytesIO(src.zip_blob)) as z:
+            members = [i for i in z.infolist() if not i.is_dir()]
+            for info, rel in zip(members, strip_root([i.filename for i in members])):
+                low = rel.replace('\\', '/').lower()
+                if (low.startswith(sub) and os.path.splitext(low)[1] in ROM_EXTS and
+                        0 < info.file_size <= MAX_BUNDLE_ROM and not member_problem(info)):
+                    rom, _ = to_z64(z.read(info))
+                    if rom is not None:
+                        out.append(hashlib.sha1(rom).hexdigest().upper())
+        return out
+    for rel in src.names:
+        low = rel.replace('\\', '/').lower()
+        if not (low.startswith(sub) and os.path.splitext(low)[1] in ROM_EXTS):
+            continue
+        path = os.path.join(src.path, *rel.replace('\\', '/').split('/'))
+        try:
+            if not 0 < os.path.getsize(path) <= MAX_BUNDLE_ROM:
+                continue
+            with open(path, 'rb') as f:
+                rom, _ = to_z64(f.read())
+        except OSError:
+            continue
+        if rom is not None:
+            out.append(hashlib.sha1(rom).hexdigest().upper())
+    return out
 
 
 def is_bundle(names, zipped=False):
@@ -1176,6 +1216,15 @@ def classify(src, roms, catalog, ledger, patchfmt, taken, keep=False, hint=None)
         if src.kind_hint == 'folder':
             key = folder_key(src)
             classify_folder(src, res, roms)
+            if res.get('kind') == 'pj64-bundle' and catalog:
+                for h in bundle_rom_sha1s(src):
+                    e = catalog.get(h)
+                    if e and e.get('converter', 'import-pj64') == 'import-pj64':
+                        # The tested bundle (aki-roadmap#265): its id, name and game; the build takes its settings.
+                        res.update(bundle_rom_sha1=h, catalog=e.get('id'), id=e.get('id'), name=e.get('name'))
+                        if e.get('game'):
+                            res['game'] = e['game']
+                        break
         else:
             classify_file(src, res, roms, catalog, patchfmt, keep, hint)
             key = res.get('sha1')   # ROMs (.z64 order), patches, mods; loose saves and unknown files have none
@@ -1232,6 +1281,17 @@ IN_PLACE_TIERS = ('patch-data', 'patch-code')
 DERELINK_TIERS = ('rev0-layout', 'relinked', 'restructured')
 REFUSED_TIERS = ('different-base',)
 UNTESTED = 'untested'      # the fourth tier (#224, #172): built, not tested by us
+# Hack-specific codes.txt fixes a catalog entry can name ("codes_fixups"), applied after import-pj64 in the entry's
+# order: name -> (fixups/<module>.py, the functions run in turn; each takes the text and returns (text, report)).
+FIXUPS_DIR = os.path.join(TOOLS, 'fixups')
+CODES_FIXUPS = {
+    'legends_portrait_guards': ('legends_portrait_guards', ('add_guards',)),   # aki-roadmap#198
+    'legends_block_guards': ('legends_block_guards', ('add_guards',)),         # aki-roadmap#221
+    'legends_fb_relocate': ('legends_fb_relocate', ('relocate',)),             # aki-roadmap#249
+    # aki-roadmap#205: park checks every hook site holds what the tool knows, unpark puts them back on with Body
+    # Shapes' Rev 0 low half (on a fresh list the net change is that one line).
+    'legends_unpark': ('legends_park_hooks', ('park', 'unpark')),
+}
 MAX_EXTRACT = 4 << 30      # a zipped bundle unpacked for import-pj64 may take at most this much disk
 TEXTURE_EXTS = ('.png', '.dds')
 PACKAGE_ID = re.compile(r'^[a-z0-9_.-]{1,48}$')
@@ -1450,7 +1510,9 @@ class Builder:
         return res
 
     def catalog_entry(self, res):
-        return self.catalog.get((res.get('sha1') or '').upper()) or self.catalog.get((res.get('result_sha1') or '').upper())
+        return (self.catalog.get((res.get('sha1') or '').upper()) or
+                self.catalog.get((res.get('result_sha1') or '').upper()) or
+                self.catalog.get((res.get('bundle_rom_sha1') or '').upper()))
 
     def judge(self, res, game, files):
         """The tier a built conversion shows (#172, #224): the catalog's, only when what was built is what the AKI
@@ -2076,6 +2138,32 @@ class Builder:
             if out:     # by the id it was made under: a catalog match can rename the conversion (catalog_identity)
                 shutil.rmtree(out, ignore_errors=True)
 
+    def apply_codes_fixups(self, res, files, entry):
+        """The catalog entry's "codes_fixups" on the conversion's codes.txt, in order (aki-roadmap#265): the hack-specific
+        steps the tested pack went through after import-pj64 (fixups/*.py, from AkiTools: WWF Legends' menu and block
+        heap guards #198/#221, its cave tables out of the framebuffers #249, its hooks with the Rev 0 low half #205).
+        One that refuses the list fails the build: without them that conversion crashes (Legends at boot)."""
+        names = entry.get('codes_fixups') or []
+        if not names:
+            return
+        if 'conversion/codes.txt' not in files:
+            raise BuildError('the catalog names codes fixes (%s) but the bundle gave no codes' % ', '.join(names))
+        text = files['conversion/codes.txt'].decode('utf-8')
+        for n in names:
+            if n not in CODES_FIXUPS:
+                raise BuildError('unknown codes fix %r in the catalog' % n)
+            module, steps = CODES_FIXUPS[n]
+            mod = self._mods.get('fixups/' + module)
+            if mod is None:
+                mod = self._mods['fixups/' + module] = load_module(module, os.path.join(FIXUPS_DIR, module + '.py'))
+            try:
+                for step in steps:
+                    text, _ = getattr(mod, step)(text)
+            except ValueError as e:
+                raise BuildError('codes fix %s: %s' % (n, e))
+        files['conversion/codes.txt'] = text.encode('utf-8')
+        res['codes_fixups'] = list(names)
+
     def repack_pj64(self, res, game, cid, name, out, report):
         """import-pj64's Thunderstore-shaped zips -> one #154 conversion package (aki.json + its files under
         conversion/). The bundle's textures go inside it, at conversion/textures/ (components.textures.dir): the game
@@ -2100,6 +2188,9 @@ class Builder:
         aki.update(id=cid, name=name, version=self.version)
         aki.setdefault('survey', {}).update(self.conversion_manifest(res, game, cid, name, 'project64-bundle')['survey'])
         aki['survey']['converter'] = 'import-pj64'
+        self.apply_codes_fixups(res, files, self.catalog_entry(res) or {})
+        if res.get('codes_fixups'):
+            aki['survey']['codes_fixups'] = list(res['codes_fixups'])
         tex = aki['components'].get('textures')
         if not (tex and tex_zips):
             aki['components'].pop('textures', None)

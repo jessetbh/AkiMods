@@ -158,6 +158,15 @@ with `package`, `converter` and `aki_tier`:
   `codes translated from Rev 0 (41 of 44 lines; 3 dropped); 12 values inside the code they write
   translated`, or `codes for Rev 0 not translated: needs a stock ... ROM ...; they stay off`), with
   the numbers in `codes_translation`, and `watch_codes` / `watch_codes_note` when a patch was built.
+- **A Project64 bundle the catalog knows** (#265) is matched by the hack ROM inside its own folder
+  (`inputs.sha1`, `.z64` order): the build takes the entry's id, name and settings (`bake_exclude`,
+  `map_range`, `include`, ...). An entry's `codes_fixups` list then runs, in order, on the
+  conversion's `codes.txt`: hack-specific steps the tested pack went through, from `fixups\` (WWF
+  Legends: `legends_portrait_guards` #198, `legends_block_guards` #221, `legends_fb_relocate` #249,
+  `legends_unpark` #205; copies of the AkiTools tools). A fix that refuses the list fails the
+  build, since without it that conversion crashes. The item and `aki.json` survey list them in
+  `codes_fixups`. Read-me pictures (`.jpg`) beside a Project64 folder don't stop the distribution
+  from being one bundle.
 - The tools run in the one worker process; a hacked ROM is on disk only while derelink reads it.
 - `.nrm` mods and existing packages stay `ready` (`route: install`): the launcher installs them as
   they are.

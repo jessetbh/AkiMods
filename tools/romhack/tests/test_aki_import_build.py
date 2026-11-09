@@ -1202,5 +1202,118 @@ class RealPatchfmt(BuildBase):
             self.assertEqual(r['status'], 'unsupported', r)
 
 
+class CatalogBundles(BuildBase):
+    """aki-roadmap#265: the catalog knows a Project64 bundle by the hack ROM inside it (inputs.sha1). The build then
+    takes the entry's id, name and settings, and runs the entry's codes_fixups on codes.txt (WWF Legends: the menu and
+    block heap guards, the cave tables out of the framebuffers, the hooks with the Rev 0 low half: without them that
+    build crashed at boot)."""
+
+    def setUp(self):
+        super().setUp()
+        saved, ai.MAPS_DIR = ai.MAPS_DIR, os.path.join(self.dir, 'no-maps')
+        self.addCleanup(setattr, ai, 'MAPS_DIR', saved)
+        # A stand-in fix next to the tests' own temp folder, registered for these tests only.
+        fixups = os.path.join(self.dir, 'fixups')
+        os.makedirs(fixups)
+        with open(os.path.join(fixups, 'tfix.py'), 'w') as f:
+            f.write('def tag(text):\n'
+                    '    if "0BAD" in text:\n'
+                    '        raise ValueError("not the list this fix knows")\n'
+                    '    return text + "# tagged by tfix\\n", "1 line"\n'
+                    'def again(text):\n'
+                    '    return text + "# and again\\n", ""\n')
+        saved_dir, ai.FIXUPS_DIR = ai.FIXUPS_DIR, fixups
+        self.addCleanup(setattr, ai, 'FIXUPS_DIR', saved_dir)
+        ai.CODES_FIXUPS['tfix'] = ('tfix', ('tag', 'again'))
+        self.addCleanup(ai.CODES_FIXUPS.pop, 'tfix', None)
+        self.rom = t.fake_rom(revision=0, salt=9)
+        self.rom_sha1 = hashlib.sha1(self.rom).hexdigest().upper()
+
+    def bundle(self, root='in/Ch64 - Public', cheat='810500E8 0933'):
+        # The distribution's shape: read-me pictures and a launcher exe beside its Project64 folder.
+        self.write(root + '/Project64/Config/Project64.cht', '\n'.join([
+            '[%s]' % REV0_KEY, 'Name=WWF No Mercy', 'Cheat0="WWF Legends' + BS + 'Arena",' + cheat, '']).encode('latin-1'))
+        self.write(root + '/Project64/Project64.exe', b'x')
+        self.write(root + '/Project64/Roms/WWF Legends - Challenge 64.z64', self.rom)
+        self.write(root + '/Cheat Code Settings.jpg', b'x')
+        self.write(root + '/Help Files & Setup/Settings/Check Your Paths.jpg', b'x')
+        self.write(root + '/Help Files & Setup/Read Me.txt', b'x')
+        self.write(root + '/Run WWF Legends - Challenge 64.exe', b'x')
+        return os.path.join(self.dir, *root.split('/'))
+
+    def entry(self, **kw):
+        e = {'id': 'legends_c64', 'name': 'WWF Legends: Challenge 64', 'game': 'nomercy', 'tier': 'experimental',
+             'converter': 'import-pj64', 'inputs': {'sha1': [self.rom_sha1]}, 'codes_fixups': ['tfix']}
+        e.update(kw)
+        return HackRoutes.catalog(self, [e])
+
+    def codes(self, r):
+        with zipfile.ZipFile(r['package']) as z:
+            return z.read('conversion/codes.txt').decode(), json.loads(z.read('conversion/aki.json'))
+
+    def test_the_bundle_is_known_by_its_rom_and_gets_the_entrys_fixes(self):
+        dl = fake_derelink()
+        r = self.build_one([self.bundle()], fakes={'derelink': dl}, catalog=self.entry())
+        self.assertEqual((r['status'], r['id'], r['name'], r['game']),
+                         ('converted', 'legends_c64', 'WWF Legends: Challenge 64', 'nomercy'), r)
+        self.assertEqual(r['codes_fixups'], ['tfix'])
+        codes, aki = self.codes(r)
+        self.assertTrue(codes.endswith('# tagged by tfix\n# and again\n'), codes[-80:])   # both steps, in order
+        self.assertIn('810500E8 0933', codes)
+        self.assertEqual(aki['survey']['codes_fixups'], ['tfix'])
+        self.assertEqual(aki['survey']['catalog'], 'legends_c64')
+        self.assertEqual(os.path.basename(r['package']), 'legends_c64-1.0.0.zip')
+        # plan says the same id and name before anything is built
+        items, _ = self.run_job([self.bundle()], catalog=self.entry())
+        self.assertEqual([(i['kind'], i['id'], i['catalog']) for i in items],
+                         [('pj64-bundle', 'legends_c64', 'legends_c64')])
+
+    def test_zipped_bundle_is_known_by_its_rom_too(self):
+        folder = self.bundle('src/Ch64 - Public')
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, 'w') as z:
+            for d, _, fs in os.walk(folder):
+                for f in fs:
+                    p = os.path.join(d, f)
+                    z.write(p, 'Ch64 - Public/' + os.path.relpath(p, folder).replace(os.sep, '/'))
+        r = self.build_one([self.write('in/Ch64 - Public v2.zip', buf.getvalue())], fakes={'derelink': fake_derelink()},
+                           catalog=self.entry())
+        self.assertEqual((r['status'], r['id'], r['codes_fixups']), ('converted', 'legends_c64', ['tfix']), r)
+
+    def test_without_the_catalog_the_read_me_pictures_still_keep_it_one_bundle(self):
+        r = self.build_one([self.bundle()], fakes={'derelink': fake_derelink()}, catalog='')
+        self.assertEqual((r['status'], r['kind'], r['id']), ('converted', 'pj64-bundle', 'ch64-public'), r)
+        self.assertNotIn('codes_fixups', r)
+
+    def test_a_fix_that_refuses_the_list_fails_the_build(self):
+        r = self.build_one([self.bundle(cheat='810500E8 0BAD')], fakes={'derelink': fake_derelink()},
+                           catalog=self.entry())
+        self.assertEqual(r['status'], 'failed', r)
+        self.assertIn('codes fix tfix: not the list this fix knows', r['why'])
+        shutil.rmtree(os.path.join(self.dir, 'in'))
+        r = self.build_one([self.bundle()], fakes={'derelink': fake_derelink()},
+                           catalog=self.entry(codes_fixups=['tfix', 'no-such-fix']))
+        self.assertEqual(r['status'], 'failed', r)
+        self.assertIn("unknown codes fix 'no-such-fix'", r['why'])
+        self.assertFalse(os.listdir(os.path.join(self.out, 'nomercy')) if os.path.isdir(os.path.join(self.out, 'nomercy'))
+                         else [])
+
+    def test_the_shipped_legends_entry_names_registered_fixes(self):
+        cat = json.load(open(ai.DEFAULT_CATALOG, encoding='utf-8'))
+        legends = [e for e in cat['entries'] if e['id'] == 'legends_c64'][0]
+        self.assertEqual(legends['codes_fixups'], ['legends_portrait_guards', 'legends_block_guards',
+                                                   'legends_fb_relocate', 'legends_unpark'])
+        for n in legends['codes_fixups']:
+            module, steps = ai.CODES_FIXUPS[n]
+            mod = ai.load_module(module, os.path.join(os.path.dirname(ai.DEFAULT_CATALOG), 'fixups', module + '.py'))
+            for s in steps:
+                self.assertTrue(callable(getattr(mod, s)), (n, s))
+        self.assertEqual(legends['bake_exclude'], ['Wrestler Info Icon\\Mapping'])
+        # The fixes refuse a list that isn't Legends': a synthetic list fails, it isn't silently changed.
+        with self.assertRaises(ValueError):
+            ai.load_module('legends_park_hooks', os.path.join(os.path.dirname(ai.DEFAULT_CATALOG), 'fixups',
+                                                              'legends_park_hooks.py')).park('# rom: nomercy-rev1\n')
+
+
 if __name__ == '__main__':
     unittest.main()
