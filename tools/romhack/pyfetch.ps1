@@ -53,7 +53,7 @@ $PYTHON_VERSION = '3.12.10'
 $PYTHON_URL = 'https://www.python.org/ftp/python/3.12.10/python-3.12.10-embed-amd64.zip'
 $PYTHON_SHA256 = '4ACBED6DD1C744B0376E3B1CF57CE906F9DC9E95E68824584C8099A63025A3C3'
 $PYTHON_STDLIB = 'python312.zip'      # the embeddable package's standard library: it must be there too
-$STALE_MINUTES = 10                   # temp folders older than this are a run that died; newer may be another run
+$STALE_MINUTES = 60                   # temp folders older than this are a run that died; newer may be another run
 
 class FetchError : System.Exception {
     [string]$Kind
@@ -61,7 +61,11 @@ class FetchError : System.Exception {
 }
 
 function Emit($obj) {
-    [Console]::Out.WriteLine(($obj | ConvertTo-Json -Compress))
+    # Pure ASCII: redirected stdout is in the OEM code page, and PS 5.1 doesn't escape non-ASCII, so a user name
+    # like Jose with an accent would reach the launcher garbled. \uXXXX is plain JSON.
+    $json = $obj | ConvertTo-Json -Compress
+    $json = [regex]::Replace($json, '[^\x00-\x7F]', { param($m) '\u{0:x4}' -f [int][char]$m.Value })
+    [Console]::Out.WriteLine($json)
 }
 
 function Test-Installed([string]$dir) {
@@ -117,7 +121,9 @@ function Get-Download([string]$url, [string]$file, [int]$timeoutSec) {
         while ($e.InnerException -and -not ($e -is [Net.WebException])) { $e = $e.InnerException }
         $offline = 'NameResolutionFailure', 'ProxyNameResolutionFailure', 'ConnectFailure', 'Timeout',
                    'ConnectionClosed', 'ReceiveFailure', 'SendFailure', 'SecureChannelFailure', 'KeepAliveFailure'
-        if ($e -is [Net.WebException] -and $offline -contains [string]$e.Status) {
+        $socket = $false   # the connection dropped part way: an IOException around a SocketException
+        for ($x = $_.Exception; $x; $x = $x.InnerException) { if ($x -is [Net.Sockets.SocketException]) { $socket = $true } }
+        if ($socket -or ($e -is [Net.WebException] -and $offline -contains [string]$e.Status)) {
             throw [FetchError]::new('no-network', ("Couldn't download Python for ROM-hack imports: no connection " +
                 "to python.org ($($e.Status)). Check the internet connection and try again."))
         }
@@ -181,7 +187,8 @@ function Install-Python([string]$root, [string]$version, [string]$url, [string]$
             if (Test-Installed $dest) { return $false }   # another run finished first: use that one
             Remove-Item -LiteralPath $dest -Recurse -Force   # incomplete (not made by this script's rename)
         }
-        try { Move-Item -LiteralPath $part -Destination $dest }
+        # Directory.Move, not Move-Item: if another run got there first, Move-Item would move part *into* dest.
+        try { [IO.Directory]::Move($part, $dest) }
         catch {
             if (Test-Installed $dest) { return $false }
             throw [FetchError]::new('not-writable', ("Couldn't move Python into place at $dest " +

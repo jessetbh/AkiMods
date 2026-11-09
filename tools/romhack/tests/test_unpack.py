@@ -87,7 +87,8 @@ class Names(unittest.TestCase):
 
     def test_bad_names(self):
         for name in ('../evil', 'a/../../evil', '/abs', '\\abs', '\\\\server\\share\\x', 'C:/x', 'c:x', 'C:\\x',
-                     'a/b:stream', 'CON', 'nul.txt', 'sub/Com1.z64', 'aux ', '', './', '..'):
+                     'a/b:stream', 'CON', 'nul.txt', 'sub/Com1.z64', 'aux ', '', './', '..', 'sub/.. /x',
+                     'trail.', 'trail ', 'a?b', 'a*b', 'a<b', 'a|b', 'a\x01b', 'CONIN$', 'com\u00b9.txt'):
             with self.subTest(name=name):
                 with self.assertRaises(up.UnpackError) as cm:
                     up.check_name(name)
@@ -161,6 +162,23 @@ class Zip(Base):
         self.assertEqual(cm.exception.kind, 'damaged')
         self.assertClean(self.dest())
 
+    def test_duplicate_names_ignoring_case(self):
+        arc = self.write('dup.zip', make_zip([('Mod/A.bin', b'1'), ('mod/a.BIN', b'2')]))
+        with self.assertRaises(up.UnpackError) as cm:
+            up.extract_zip(arc, self.dest())
+        self.assertEqual(cm.exception.kind, 'bad-path')
+        self.assertClean(self.dest())
+
+    def test_corrupt_deflate_data(self):
+        blob = bytearray(make_zip([('f.bin', bytes(range(256)) * 400)]))
+        start = 30 + len('f.bin')            # the local header, then the compressed data
+        blob[start:start + 16] = b'\xff' * 16
+        arc = self.write('bad.zip', bytes(blob))
+        with self.assertRaises(up.UnpackError) as cm:
+            up.extract_zip(arc, self.dest())
+        self.assertEqual(cm.exception.kind, 'damaged')
+        self.assertClean(self.dest())
+
     def test_dest_must_not_exist(self):
         arc = self.write('a.zip', make_zip([('f', b'x')]))
         os.makedirs(self.dest())
@@ -206,6 +224,18 @@ class SevenZipMissing(Base):
                 mock.patch.dict(os.environ, {'ProgramW6432': self.dir, 'ProgramFiles': self.dir,
                                              'ProgramFiles(x86)': self.dir}):
             self.assertIsNone(up.find_7z())
+
+    def test_listing_without_entries_is_refused(self):
+        # 7-Zip exits 0 but prints no listing (another build, a quirk): the names can't be checked, so no unpack.
+        arc = self.write('a.7z', up.SEVENZ_MAGIC + bytes(26))
+        exe = self.write('7z.exe', b'MZ')
+        done = subprocess.CompletedProcess([], 0, stdout=b'7-Zip 99\r\n\r\nScanning\r\n')
+        with mock.patch.object(up.subprocess, 'run', return_value=done), \
+                mock.patch.object(up.subprocess, 'Popen', side_effect=AssertionError('must not unpack')):
+            with self.assertRaises(up.UnpackError) as cm:
+                up.extract_7z(arc, self.dest(), sevenzip=exe)
+        self.assertEqual(cm.exception.kind, 'damaged')
+        self.assertClean(self.dest())
 
     def test_found_in_install_folder(self):
         exe = self.write('7-Zip/7z.exe', b'MZ')

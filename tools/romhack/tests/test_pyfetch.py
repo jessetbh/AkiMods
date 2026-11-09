@@ -123,7 +123,7 @@ class PyFetch(unittest.TestCase):
 
     def test_half_finished_unpack_is_redone(self):
         # A folder without the completion marker (not made by pyfetch's rename) and a temp folder from a run that
-        # died 20 minutes ago: both cleared, Python installed. A recent temp folder may be another run: kept.
+        # died 2 hours ago: both cleared, Python installed. A recent temp folder may be another run: kept.
         dest = os.path.join(self.root, VERSION)
         os.makedirs(dest)
         with open(os.path.join(dest, 'python.exe'), 'wb') as f:
@@ -132,7 +132,7 @@ class PyFetch(unittest.TestCase):
         fresh = os.path.join(self.root, VERSION + '.part-3-4')
         os.makedirs(stale)
         os.makedirs(fresh)
-        old = time.time() - 20 * 60
+        old = time.time() - 2 * 3600
         os.utime(stale, (old, old))
         url, sha = self.serve(fake_embeddable())
         out = self.run_fetch('-Url', url, '-Sha256', sha)
@@ -141,6 +141,13 @@ class PyFetch(unittest.TestCase):
         with open(os.path.join(dest, 'python.exe'), 'rb') as f:
             self.assertNotEqual(f.read(), b'half')
         self.assertEqual(self.leftovers(), [os.path.basename(fresh)])
+
+    def test_non_ascii_root_survives_the_json(self):
+        root = os.path.join(self.dir, 'Jos\u00e9 \u5c71\u7530', 'python')
+        url, sha = self.serve(fake_embeddable())
+        out = self.run_fetch('-Url', url, '-Sha256', sha, root=root)
+        self.assertEqual(out['python'], os.path.join(root, VERSION, 'python.exe'))
+        self.assertTrue(os.path.isfile(out['python']))
 
     def test_check_only(self):
         out = self.run_fetch('-NoDownload')

@@ -8,9 +8,11 @@ API (aki_import calls these; stdlib only, 3.7+):
 Each returns {"files": n, "bytes": total uncompressed} and leaves the files in dest, which must not exist yet.
 
 Every failure raises UnpackError: str(err) is player-readable, err.kind is one of
-  bad-path   a member is an absolute path, has '..', a drive letter, ':' or a Windows device name (CON, NUL ...)
+  bad-path   a member is an absolute path, has '..', a drive letter, ':', a character or trailing dot / space
+             Windows can't use, a Windows device name (CON, NUL ...), or the same name as another (ignoring case)
   too-big    more than max_total bytes would come out (default 4 GB). Counted on the bytes actually written, not
-             the sizes the archive declares, so an archive that lies about its sizes is still stopped part way.
+             the sizes the archive declares, so an archive that lies about its sizes is still stopped part way
+             (7z: the folder is measured every POLL seconds, so it can overshoot by what 7-Zip writes in that time).
   need-7zip  a 7z archive and no 7-Zip found (it isn't bundled: install it from 7-zip.org)
   damaged    not a readable archive, or 7-Zip failed
   exists     dest is already there
@@ -33,13 +35,17 @@ import sys
 import tempfile
 import time
 import zipfile
+import zlib
 
 MAX_TOTAL = 4 << 30           # default cap on everything an archive unpacks to
 CHUNK = 1 << 20
 POLL = 0.2                    # seconds between size checks while 7-Zip runs
 ZIP_MAGIC = b'PK\x03\x04'
 SEVENZ_MAGIC = b"7z\xbc\xaf\x27\x1c"
-DEVICE_NAMES = {'con', 'prn', 'aux', 'nul'} | {'com%d' % i for i in range(1, 10)} | {'lpt%d' % i for i in range(1, 10)}
+PORT_DIGITS = '123456789\u00b9\u00b2\u00b3'   # Windows also reserves COM and LPT with superscript 1-3
+DEVICE_NAMES = ({'con', 'prn', 'aux', 'nul', 'conin$', 'conout$'} | {'com' + d for d in PORT_DIGITS} |
+                {'lpt' + d for d in PORT_DIGITS})
+BAD_CHARS = re.compile(r'[<>"|?*\x00-\x1f]')
 SEVENZ_NAMES = ('7z.exe', '7za.exe', '7zr.exe')
 
 
@@ -75,6 +81,9 @@ def check_name(name):
         if ':' in p:
             raise UnpackError('The archive has a file name with ":" (%r), which Windows reads as a drive or hidden '
                               'stream. It was not unpacked.' % name, 'bad-path')
+        if BAD_CHARS.search(p) or p.endswith(('.', ' ')):
+            raise UnpackError("The archive has a file name Windows can't use (%r). It was not unpacked." % name,
+                              'bad-path')
         if p.split('.')[0].rstrip(' ').lower() in DEVICE_NAMES:
             raise UnpackError('The archive has a file named like a Windows device (%r). It was not unpacked.' % name,
                               'bad-path')
@@ -105,6 +114,8 @@ def _finish(part, dest):
     try:
         os.rename(part, dest)
     except OSError as e:
+        if os.path.lexists(dest):
+            raise UnpackError('The folder %s appeared while unpacking; nothing was unpacked.' % dest, 'exists')
         raise UnpackError("Can't move the unpacked files to %s (%s)." % (dest, e.strerror or e), 'not-writable')
 
 
@@ -139,6 +150,14 @@ def _zip_into(archive, part, max_total):
     with z:
         members = z.infolist()
         plans = [(m, check_name(m.filename)) for m in members]   # every name checked before anything is written
+        seen = set()
+        for m, parts in plans:
+            key = '/'.join(parts).lower()   # Windows names ignore case: A.bin would overwrite a.bin
+            if not m.is_dir():
+                if key in seen:
+                    raise UnpackError('The archive has two files named %r. It was not unpacked.' % m.filename,
+                                      'bad-path')
+                seen.add(key)
         if declared_total(m.file_size for m in members) > max_total:
             raise _too_big(archive, max_total)
         total, files = 0, 0
@@ -161,7 +180,7 @@ def _zip_into(archive, part, max_total):
                         out.write(chunk)
             except UnpackError:
                 raise
-            except (zipfile.BadZipFile, zipfile.LargeZipFile, EOFError, ValueError, RuntimeError,
+            except (zipfile.BadZipFile, zipfile.LargeZipFile, zlib.error, EOFError, ValueError, RuntimeError,
                     NotImplementedError) as e:
                 # RuntimeError: an encrypted member; NotImplementedError: a compression method zipfile lacks.
                 raise UnpackError('%s is damaged or uses a feature the importer can\'t read (%s: %s). Try '
@@ -172,6 +191,9 @@ def _zip_into(archive, part, max_total):
                     raise UnpackError("Can't write %s (%s)." % (target, e.strerror or e), 'not-writable')
                 raise UnpackError('%s: %s could not be unpacked (%s).' % (os.path.basename(archive), m.filename,
                                                                          e.strerror or e))
+            except Exception as e:   # lzma / bz2 errors and anything else a damaged member throws
+                raise UnpackError('%s is damaged (%s: %s: %s). Try downloading it again.'
+                                  % (os.path.basename(archive), m.filename, type(e).__name__, e))
             files += 1
     return {'files': files, 'bytes': total}
 
@@ -214,8 +236,9 @@ def list_7z(exe, archive):
     text = r.stdout.decode('utf-8', 'replace')
     body = text.split('\n----------', 1)
     entries = []
-    if len(body) < 2:
-        return entries
+    if len(body) < 2:   # no listing at all: the names and sizes can't be checked, so don't unpack
+        raise UnpackError('7-Zip could not list %s. It may be damaged or not a 7z archive; try downloading it again.'
+                          % os.path.basename(archive))
     for block in re.split(r'\r?\n\r?\n', body[1]):
         fields = {}
         for line in block.splitlines():
@@ -260,7 +283,7 @@ def extract_7z(archive, dest, max_total=MAX_TOTAL, sevenzip=None):
     part = _staging(dest)
     try:
         # -snl-: links come out as plain files. The folder's size is watched while 7-Zip runs, so a lying archive
-        # is stopped part way (and checked again at the end).
+        # is stopped part way (and checked again at the end). It can overshoot by what 7-Zip writes in one POLL.
         log = tempfile.TemporaryFile()
         try:
             proc = subprocess.Popen([exe, 'x', '-y', '-bd', '-snl-', '-o' + part, archive], stdout=log,

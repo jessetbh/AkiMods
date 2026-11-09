@@ -416,7 +416,10 @@ class Hostile(Base):
         # A stand-in 7zr: copies the "archive"'s payload (after the 7z magic) to <out>/inner.z64.
         script = self.write('tools/fake7z.py', (
             'import sys, os\n'
-            'if sys.argv[1] == "l": sys.exit(0)\n'   # unpack.py lists first; an empty listing
+            'if sys.argv[1] == "l":\n'   # unpack.py lists first: one entry, with its real size
+            '    n = os.path.getsize(sys.argv[-1]) - 6\n'
+            '    print("--\\n----------\\nPath = inner.z64\\nSize = %d\\nFolder = -\\n" % n)\n'
+            '    sys.exit(0)\n'
             'out =[a[2:] for a in sys.argv if a.startswith("-o")][0]\n'
             'data = open(sys.argv[-1], "rb").read()[6:]\n'
             'open(os.path.join(out, "inner.z64"), "wb").write(data)\n').encode())
