@@ -211,6 +211,73 @@ class OverlayContext(unittest.TestCase):
         self.assertEqual(len(rep['unmapped']), 1)
 
 
+def guarded(conds, lines):
+    """Each code line behind the same conditions, the way translate_codes emits a guarded unit."""
+    out = []
+    for line in lines:
+        out += conds + [line]
+    return out
+
+
+class CaveContext(unittest.TestCase):
+    """aki-roadmap#246: Legends' Extra Attires hook was split into an ovl_c version and an ovl_e version. Only ovl_c's
+    ROM holds the hook's own condition, but the ovl_e version came last, so the cave's way back took ovl_e's address."""
+    # X holds 3C01 at the slot's start and nothing at +0x10; Y holds 0C03 at the start and 0213 at +0x40.
+    ROM = rom([(0x100000, 0x3C010000), (0x200000, 0x0C030000), (0x200040, 0x02130000)])
+
+    def hooks(self, x_cond):
+        y = guarded(['D1100000 0C03', 'D1100040 0213'], code(0x100044, j(0x80300000)))
+        x = guarded(['D1100000 3C01', x_cond], code(0x100014, j(0x80300000)))
+        return y + x + ['[part 2]'] + code(0x300000, j(0x80100400), 0)
+
+    def test_a_hook_whose_condition_the_rom_contradicts_does_not_pick_the_way_back(self):
+        text, rep = run(self.hooks('D1100010 0213'), v.Layout({'sections': SECTIONS}, self.ROM))
+        self.assertEqual(word(values(text), 0x80300000), j(0x80100200))   # Y's -0x200, not X's -0x100
+        self.assertEqual(rep['unmapped'], [])
+
+    def test_two_live_hooks_that_disagree_leave_the_way_back_and_report_it(self):
+        # Both versions can run (X holds its condition too): no one return is right, whichever hook comes last.
+        layout = v.Layout({'sections': SECTIONS}, rom([(0x100000, 0x3C010000), (0x100010, 0x02130000),
+                                                       (0x200000, 0x0C030000), (0x200040, 0x02130000)]))
+        text, rep = run(self.hooks('D1100010 0213'), layout)
+        self.assertEqual(word(values(text), 0x80300000), j(0x80100400))
+        self.assertEqual(rep['unmapped'], ['j at 80300000 -> 80100400'])
+
+    def test_a_contradicted_hook_still_counts_when_nothing_else_reaches_the_cave(self):
+        lines = guarded(['D1100000 3C01', 'D1100010 0213'], code(0x100014, j(0x80300000))) + code(0x300000, j(0x80100400), 0)
+        text, rep = run(lines, v.Layout({'sections': SECTIONS}, self.ROM))
+        self.assertEqual(word(values(text), 0x80300000), j(0x80100300))
+
+    def test_a_condition_on_a_halfword_the_list_writes_is_not_a_contradiction(self):
+        layout = v.Layout({'sections': SECTIONS}, self.ROM)
+        self.assertEqual(layout.context(0x80100014, [(0x80100000, 0x3C01), (0x80100010, 0x0213)]), (['x'], False))
+        self.assertEqual(layout.context(0x80100014, [(0x80100000, 0x3C01), (0x80100010, 0x0213)], {0x80100010: []}),
+                         (['x'], True))
+
+
+class CoresidentContext(unittest.TestCase):
+    """Slot A holds A or E, slot B holds B; E covers both slots. A guard on one overlay doesn't rule out an overlay in
+    the other slot (aki-roadmap#246's ovl_a + ovl_b units), but does rule out the one sharing its RAM."""
+    SECS = [{'name': 'a', 'rom': 0x100000, 'text': 0x80100000, 'data': 0x80104000, 'end': 0x80108000, 'slot': 0x80100000},
+            {'name': 'e', 'rom': 0x200000, 'text': 0x80100000, 'data': 0x80110000, 'end': 0x80118000, 'slot': 0x80100000},
+            {'name': 'b', 'rom': 0x280000, 'text': 0x80108000, 'data': 0x80110000, 'end': 0x80118000, 'slot': 0x80108000}]
+    LAYOUT = v.Layout({'sections': SECS}, rom([(0x100000, 0x0C030000), (0x200000, 0x3C010000), (0x208000, 0x24020000),
+                                               (0x280000, 0x27BD0000)]))
+
+    def test_a_guard_in_the_other_slot_keeps_the_write_s_overlay(self):
+        self.assertEqual(self.LAYOUT.context(0x80100100, [(0x80108000, 0x27BD)]), (['a'], True))   # B loaded: not E
+        self.assertEqual(self.LAYOUT.overlays_for(0x80100100, [(0x80108000, 0x27BD)]), ['a'])
+        self.assertEqual(self.LAYOUT.context(0x80100100, [(0x80100000, 0x0C03), (0x80108000, 0x27BD)]), (['a'], True))
+
+    def test_a_guard_for_the_big_overlay_rules_out_the_other_slot(self):
+        self.assertEqual(self.LAYOUT.context(0x80108100, [(0x80100000, 0x3C01)]), (['e'], True))
+        self.assertEqual(self.LAYOUT.context(0x80108100, [(0x80100000, 0x0C03)]), (['b'], True))   # A loaded: not E
+        self.assertEqual(self.LAYOUT.overlays_for(0x80108100, [(0x80100000, 0x0C03)]), ['b'])
+
+    def test_a_write_its_conditions_rule_out_is_not_live(self):
+        self.assertFalse(self.LAYOUT.context(0x80108100, [(0x80100000, 0x3C01), (0x80108000, 0x27BD)])[1])
+
+
 class Text(unittest.TestCase):
     def test_lines_keep_their_comments_and_everything_else_stays(self):
         text, _ = v.translate_values('# head\n[g]\n# note\n81002000 0800 # x\n81002002 4000 // y\n\n', MAPPER, LAYOUT)
