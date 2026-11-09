@@ -11,6 +11,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import types
 import unittest
 import zipfile
@@ -186,6 +187,31 @@ class Patches(Base):
         self.assertEqual(by['somehack.xdelta']['status'], 'ready')
         self.assertEqual(by['somehack.xdelta']['base'], 'WWF No Mercy (USA) 1.0')
         self.assertEqual(by['nm10.z64']['status'], 'stock')
+
+    def test_catalog_patch_names_its_game_when_its_base_is_missing(self):
+        # aki-roadmap#284: Badd Blood's xdelta names no base; the catalog knows its game (WrestleMania 2000).
+        wm2k = fake_rom(code='NWXE', title='WRESTLEMANIA 2000', salt=5)
+        ai.GAMES['wm2k']['sha1'] = hashlib.sha1(wm2k).hexdigest().upper()
+        data = make_patch(wm2k, [(0x2000, 9)])
+        cat = self.write('catalog.json', json.dumps({'entries': [{'id': 'wz_badd_blood', 'name': 'Badd Blood',
+            'game': 'wm2k', 'inputs': {'sha1': [hashlib.sha1(data).hexdigest().upper()]}}]}).encode())
+        patch = self.write('in/wzbb.xdelta', data)
+        r = self.one([patch], catalog=cat)
+        self.assertEqual((r['status'], r['needs']), ('needs-rom', 'your WWF WrestleMania 2000 ROM'))
+        self.assertIn('WWF No Mercy', r['why'])                 # what it tried stays in the reason
+        r = self.one([patch], catalog=cat, roms={})
+        self.assertEqual((r['status'], r['needs']), ('needs-rom', 'your WWF WrestleMania 2000 ROM'))
+        # With that ROM given it applies; a WrestleMania 2000 ROM it doesn't fit gets no "your ... ROM".
+        r = self.one([patch], catalog=cat, roms={'nomercy': self.stock_path, 'wm2k': self.write('roms/w.z64', wm2k)})
+        self.assertEqual((r['status'], r['game']), ('ready', 'wm2k'))
+        ai.GAMES['wm2k']['sha1'] = hashlib.sha1(STOCK[:0x2000] + bytes(0x2000)).hexdigest().upper()
+        r = self.one([patch], catalog=cat, roms={'wm2k': self.write('roms/w2.z64', STOCK[:0x2000] + bytes(0x2000))})
+        self.assertEqual(r['status'], 'needs-rom')
+        self.assertNotIn('your', r['needs'])
+        # Unknown to the catalog: as before.
+        r = self.one([self.write('in/other.xdelta', make_patch(wm2k, [(0x2001, 9)]))], catalog=cat)
+        self.assertEqual(r['status'], 'needs-rom')
+        self.assertNotIn('WrestleMania', r['needs'])
 
     def test_patch_without_any_rom(self):
         r = self.one([self.write('in/x.bps', make_patch(REV0, []))], roms={})
@@ -656,20 +682,47 @@ class Hostile(Base):
             '    sys.exit(0)\n'
             'out =[a[2:] for a in sys.argv if a.startswith("-o")][0]\n'
             'data = open(sys.argv[-1], "rb").read()[6:]\n'
-            'open(os.path.join(out, "inner.z64"), "wb").write(data)\n').encode())
+            'open(os.path.join(out, "inner.z64"), "wb").write(data)\n'
+            'os.chmod(os.path.join(out, "inner.z64"), 0o444)\n').encode())   # 7-Zip keeps read-only attributes
         exe = self.write('tools/fake7zr.cmd', ('@"%s" -I "%s" %%*\r\n' % (sys.executable, script)).encode())
         arc = self.write('in/a.7z', b"7z\xbc\xaf\x27\x1c" + fake_rom(salt=11))
         work = os.path.join(self.dir, 'work')
         items, _ = self.run_job([arc], sevenzip=exe, work=work)
         self.assertEqual(len(items), 1, items)
         self.assertEqual((items[0]['status'], items[0]['item']), ('ready', arc + '!inner.z64'))
-        self.assertTrue(any(f.startswith('7z-') for f in os.listdir(work)))
+        # aki-roadmap#283: the unpack (the hack's ROMs) never stays in --work, read-only files included.
+        self.assertEqual(os.listdir(work), [])
+        # Nor when the batch fails part way.
+        def boom(obj):
+            if obj.get('event') == 'item':
+                raise RuntimeError('launcher went away')
+        with self.assertRaises(RuntimeError):
+            ai.run_job(dict(paths=[arc], roms={'nomercy': self.stock_path}, sevenzip=exe, work=work), boom,
+                       patchfmt=PATCHFMT)
+        self.assertEqual(os.listdir(work), [])
         items, _ = self.run_job([arc], sevenzip=exe)   # no --work: the temp unpack folder is removed
         self.assertEqual(items[0]['status'], 'ready')
         # Through unpack.py: the size cap holds for 7z archives too.
         items, _ = self.run_job([arc], sevenzip=exe, work=os.path.join(self.dir, 'work2'), max_unpack=1024)
         self.assertEqual((items[0]['status'], items[0]['item']), ('unsupported', arc), items)
         self.assertIn('more than', items[0]['why'])
+
+    def test_stale_7z_unpacks_are_removed(self):
+        # aki-roadmap#283: unpacks an older importer (or a killed one) left in --work go at the next batch; a fresh one
+        # (another batch's, in use) and anything not ours stay.
+        work = os.path.join(self.dir, 'work')
+        old = self.write('work/7z-0123456789ABCDEF/Games/hack.z64', b'rom')
+        os.chmod(old, 0o444)
+        self.write('work/7z-0123456789ABCDEF/.aki-complete', b'x')
+        part = self.write('work/7z-FEDCBA9876543210.part-abc/x.z64', b'rom')    # killed mid-unpack: no marker
+        fresh = self.write('work/7z-1111111111111111/.aki-complete', b'x')
+        mine = self.write('work/build-notes/keep.txt', b'x')
+        t = time.time() - ai.STALE_UNPACK_SECONDS - 60
+        os.utime(os.path.join(work, '7z-0123456789ABCDEF', '.aki-complete'), (t, t))
+        os.utime(os.path.dirname(part), (t, t))
+        self.run_job([self.write('in/hack.bps', make_patch(STOCK, [(0x2000, 9)]))], work=work)
+        self.assertEqual(sorted(os.listdir(work)), ['7z-1111111111111111', 'build-notes'])
+        self.assertTrue(os.path.isfile(fresh) and os.path.isfile(mine))
 
 
 class Worker(Base):

@@ -42,7 +42,7 @@ through aki_conv import-pj64 with an automatic id and name. The tools run in thi
 Patch files are applied by patchfmt.py next to this file (aki-roadmap#228: xdelta/VCDIFF, BPS, IPS, UPS, APS;
 detect(patch) and apply(patch, source) -> (target, info), raising PatchError). .rup (NINJA2) and PPF are refused by
 name here (import-pj64 applies a bundle's .rup). Stdlib only; run with python -I. Writes nothing but --ledger / --json, files under --work
-(7z unpacks, build temp files, removed after each item) and, for build, the packages under --out. A hacked ROM is
+(build temp files, removed after each item; 7z unpacks, removed when the batch ends) and, for build, the packages under --out. A hacked ROM is
 on disk only while derelink reads it; packages never hold ROM bytes beyond what a patch carries.
 """
 import argparse
@@ -659,6 +659,48 @@ def work_dir(job):
     return job['_tmp']
 
 
+def remove_tree(path):
+    """rmtree that also removes read-only files (7-Zip keeps an archived file's read-only attribute)."""
+    def clear_and_retry(func, p, _exc):
+        try:
+            os.chmod(p, stat.S_IWRITE)
+            func(p)
+        except OSError:
+            pass
+    if os.path.isdir(path):
+        if sys.version_info >= (3, 12):            # onerror is deprecated there (a warning in the worker log)
+            shutil.rmtree(path, onexc=clear_and_retry)
+        else:
+            shutil.rmtree(path, onerror=clear_and_retry)
+
+
+STALE_UNPACK_SECONDS = 6 * 3600
+
+
+def remove_stale_unpacks(job, now=None):
+    """7z unpacks a killed or older importer left in --work (aki-roadmap#283: before the fix every 7z import left one,
+    ROMs included). Only 7z-* folders untouched for STALE_UNPACK_SECONDS, so another batch's unpack in use is kept."""
+    work = job.get('work')
+    if not work or not os.path.isdir(work):
+        return
+    now = time.time() if now is None else now
+    try:
+        entries = os.listdir(work)
+    except OSError:
+        return
+    for entry in entries:
+        p = os.path.join(work, entry)
+        if not (entry.startswith('7z-') and os.path.isdir(p)) or is_link(p):
+            continue
+        marker = os.path.join(p, '.aki-complete')
+        try:
+            age = now - os.path.getmtime(marker if os.path.isfile(marker) else p)
+        except OSError:
+            continue
+        if age >= STALE_UNPACK_SECONDS:
+            remove_tree(p)
+
+
 def expand_7z(path, job, sources, notes):
     exe = find_7zr(job)
     if not exe:
@@ -667,12 +709,16 @@ def expand_7z(path, job, sources, notes):
                'or extract it yourself and import the folder')
         notes.append(dict(item=path, status='unsupported', why=why))
         return
-    # Keyed by content, so a changed archive is unpacked again; a .complete marker, so a broken unpack isn't reused.
+    # Keyed by content, so the same archive twice in a batch is unpacked once; a .complete marker, so a broken unpack
+    # isn't reused. The unpack holds the hack's ROMs, so run_job deletes it when the batch ends, built or failed
+    # (aki-roadmap#283: it was left in the launcher's Converted\.work, ROMs and all).
     out = os.path.join(work_dir(job), '7z-%s' % sha1_file(path)[:16])
     marker = os.path.join(out, '.aki-complete')
+    if out not in job.setdefault('_unpacks', []):
+        job['_unpacks'].append(out)
     if not os.path.isfile(marker):
         if os.path.isdir(out):
-            shutil.rmtree(out, ignore_errors=True)
+            remove_tree(out)
         unpack = load_unpack()
         if unpack is not None:   # romhack/unpack.py: size cap, path checks, unpacked aside and renamed into out
             try:
@@ -687,7 +733,7 @@ def expand_7z(path, job, sources, notes):
             r = subprocess.run([exe, 'x', '-y', '-bd', '-snl-', '-o' + out, path], stdout=subprocess.PIPE,
                                stderr=subprocess.STDOUT)
         if r is not None and r.returncode != 0:
-            shutil.rmtree(out, ignore_errors=True)
+            remove_tree(out)
             notes.append(dict(item=path, status='failed', why='7zr exit %d' % r.returncode))
             return
         with open(marker, 'w') as f:
@@ -1065,6 +1111,7 @@ def classify_patch(data, fmt, res, roms, catalog, patchfmt, keep=False, hint=Non
     if found is None:
         if errors and not tried:
             return res.update(status='failed', why='; '.join(errors))
+        needs = base_named_by_catalog(sha1, needs, roms, catalog)
         if not roms.candidates():
             return res.update(status='needs-rom', needs=needs or 'a stock ROM of the game it was made for',
                               why='no stock ROMs were given (roms / rom_dirs)')
@@ -1084,6 +1131,19 @@ def classify_patch(data, fmt, res, roms, catalog, patchfmt, keep=False, hint=Non
         e = catalog[sha1]
         res.update(catalog=e.get('id'), tier=e.get('tier', 'verified'), id=e.get('id'), name=e.get('name'))
     return res
+
+
+def base_named_by_catalog(sha1, needs, roms, catalog):
+    """aki-roadmap#284: an xdelta names no base, but a tested one is in the catalog (inputs.sha1 holds the patch's
+    SHA-1) with its game: "your <game> ROM" when that game's ROM wasn't given. A known dump the patch itself named
+    (base_named_by) stays; a bare CRC32 gives way to the game."""
+    e = catalog.get(sha1) if catalog else None
+    game = e.get('game') if e else None
+    if game not in GAMES or game in roms.by_game:
+        return needs
+    if needs and not needs.startswith('the ROM with CRC32'):
+        return needs
+    return 'your %s ROM' % GAMES[game]['title']
 
 
 def base_named_by_footer(patch, fmt):
@@ -1412,7 +1472,7 @@ class Builder:
 
     def cleanup(self):
         """The batch's build temp folder (a byte-swapped port ROM's .z64 copy among others) goes at the end."""
-        shutil.rmtree(os.path.join(work_dir(self.job), 'build'), ignore_errors=True)
+        remove_tree(os.path.join(work_dir(self.job), 'build'))
 
     def target(self, game, pid, res):
         """Converted\\<game>\\<id>-<version>.zip for this item: an id another item of this batch wrote, or a package
@@ -2322,6 +2382,7 @@ def run_job(job, emit, patchfmt=None):
     if builder is not None:
         builder.taken = taken
     sources, notes = [], []
+    remove_stale_unpacks(job)
     try:
         for p in job.get('paths', []):
             try:
@@ -2416,8 +2477,10 @@ def run_job(job, emit, patchfmt=None):
     finally:
         if builder is not None:
             builder.cleanup()
+        for out in job.pop('_unpacks', []):      # aki-roadmap#283: no ROM bytes stay behind in --work
+            remove_tree(out)
         if job.get('_tmp'):
-            shutil.rmtree(job['_tmp'], ignore_errors=True)
+            remove_tree(job['_tmp'])
     summary = dict(event='done', counts=counts, engine=ENGINE_VERSION, patch_engine=patchfmt is not None,
                    patch_engine_name=getattr(patchfmt, '__name__', None))
     emit(summary)
