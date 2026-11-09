@@ -377,6 +377,42 @@ class HackRoutes(BuildBase):
         self.assertEqual((entry['status'], entry['package'], entry['converter']), ('converted', r['package'], 'make_patch_mod'))
         self.assertEqual(self.build_one([path], ledger=ledger)['status'], 'have-it')
 
+    def test_have_it_carries_the_built_package(self):
+        # aki-roadmap#272: a launcher reinstalls a removed conversion from the package the ledger names.
+        hack = bytearray(STOCK)
+        hack[0x2000] ^= 9
+        path = self.write('in/h.z64', bytes(hack))
+        ledger = os.path.join(self.dir, 'ledger.json')
+        first = self.build_one([path], ledger=ledger)
+        again = self.build_one([path], ledger=ledger)
+        self.assertEqual((again['status'], again['package'], again['packages'], again['id']),
+                         ('have-it', first['package'], [first['package']], first['id']))
+
+    def test_a_deleted_package_is_converted_again_under_its_id(self):
+        hack = bytearray(STOCK)
+        hack[0x2000] ^= 9
+        path = self.write('in/h.z64', bytes(hack))
+        ledger = os.path.join(self.dir, 'ledger.json')
+        first = self.build_one([path], ledger=ledger)
+        os.remove(first['package'])
+        again = self.build_one([path], ledger=ledger)
+        self.assertEqual((again['status'], again['id']), ('converted', first['id']))
+        self.assertTrue(os.path.isfile(again['package']))
+        self.assertEqual(self.build_one([path], ledger=ledger)['status'], 'have-it')
+
+    def test_a_plan_never_drops_the_packages_a_build_recorded(self):
+        hack = bytearray(STOCK)
+        hack[0x2000] ^= 9
+        path = self.write('in/h.z64', bytes(hack))
+        ledger = os.path.join(self.dir, 'ledger.json')
+        first = self.build_one([path], ledger=ledger)
+        os.remove(first['package'])
+        items, _ = self.run_job([path], ledger=ledger, record=True)       # plan --record: ready, not have-it
+        self.assertEqual(items[0]['status'], 'ready')
+        entry = list(json.load(open(ledger))['entries'].values())[0]
+        self.assertEqual(entry['package'], first['package'])
+        self.assertEqual(self.build_one([path], ledger=ledger)['status'], 'converted')
+
     def test_rom_bytes_are_never_emitted(self):
         hack = bytearray(STOCK)
         hack[0x2000] ^= 1

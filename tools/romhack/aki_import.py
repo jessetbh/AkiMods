@@ -24,8 +24,9 @@ Result status per item:
   converted    (build) built: `package` (and `packages` when a bundle also made a texture package), `converter`,
                `aki_tier` (the catalog's tier, else "untested"), `survey_tier` for hacks
   stock        the unmodified game: nothing to convert
-  have-it      the ledger already has this exact input; or the batch builds the same ROM from another item
-               (`duplicate_of`), or a sibling patch in its archive is the catalog's build of it (`alternative_of`)
+  have-it      the ledger already has this exact input (with the packages it built, if they still exist); or the
+               batch builds the same ROM from another item (`duplicate_of`), or a sibling patch in its archive is the
+               catalog's build of it (`alternative_of`)
   needs-rom    a patch whose base ROM isn't among the ROMs given (`needs` names it when the patch says which);
                also a hack whose port ROM wasn't given (conversions are built against it)
   needs-game   a texture pack or bundle (build) that doesn't say its game, or an IPS / APS patch that fits more
@@ -758,6 +759,14 @@ def load_catalog(path=DEFAULT_CATALOG):
         return Catalog(json.load(f))
 
 
+def ledger_packages(entry):
+    """The package zips a ledger entry recorded (its "packages", else its one "package")."""
+    pkgs = [p for p in entry.get('packages') or [] if p]
+    if not pkgs and entry.get('package'):
+        pkgs = [entry['package']]
+    return pkgs
+
+
 class Ledger:
     """Every input seen, by content hash: re-running an import skips what it already did."""
 
@@ -1179,8 +1188,18 @@ def classify(src, roms, catalog, ledger, patchfmt, taken, keep=False, hint=None)
     res['key'] = key
     if ledger is not None and key in ledger.entries:
         prev = ledger.entries[key]
-        return dict(item=src.label, status='have-it', key=key, kind=prev.get('kind'), game=prev.get('game'),
-                    id=prev.get('id'), name=prev.get('name'), why='imported before (%s)' % prev.get('time', '?')), key
+        built = ledger_packages(prev)
+        kept = [p for p in built if os.path.isfile(p)]
+        if len(kept) == len(built):
+            # The packages it built go with the line, so a launcher can install one again after it was removed
+            # (aki-roadmap#272).
+            out = dict(item=src.label, status='have-it', key=key, kind=prev.get('kind'), game=prev.get('game'),
+                       id=prev.get('id'), name=prev.get('name'), why='imported before (%s)' % prev.get('time', '?'))
+            if kept:
+                out.update(package=kept[0], packages=kept)
+            return out, key
+        # A package it built is gone (deleted from the Converted folder): convert it again, under its old id.
+        taken.discard(prev.get('id'))
     if res.get('status') == 'ready' and res.get('kind') in ('rom', 'patch', 'pj64-bundle', 'texture-pack'):
         res.setdefault('name', None)
         if not res['name']:
@@ -2210,7 +2229,8 @@ def run_job(job, emit, patchfmt=None):
                 matched.setdefault((archive_of(s), res.get('base'), res.get('game')), res)
             counts[res['status']] = counts.get(res['status'], 0) + 1
             if ledger is not None and record and key and res['status'] in ('ready', 'converted'):
-                if builder is None or res['status'] == 'converted':
+                # A plan (no build) never overwrites an entry: it would drop the packages a build recorded (#272).
+                if (builder is None and key not in ledger.entries) or res['status'] == 'converted':
                     ledger.record(key, res)
             emit(dict(res, event='item'))
 
