@@ -2,7 +2,7 @@
 
     python -m unittest discover -s tools/romhack/tests -v
 """
-import json, os, struct, sys, unittest
+import json, os, struct, sys, types, unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 import bps
@@ -544,6 +544,91 @@ class MapTests(unittest.TestCase):
         got = d.main_data_evidence(main, {'main': [hook, data], 'ovl_a': [ovl, bss]})
         self.assertEqual(got, [data, bss])
         self.assertEqual(d.runs_from_pairs(got, 0x80039620, 0x800E6AF0)[0][2], 0)
+
+    def runtime_analysis(self, chunk_words, loaded):
+        # one overlay with a chunk reshaped at its own address (0x80100000-0x80100200), and code loaded at run time past the stock code
+        ROM, TEXT, size, LOADED = 0x1000, 0x80100000, 0x1000, 0x3000
+        hack = bytearray(LOADED + 0x400)
+        for off, words in chunk_words.items():
+            put(hack, ROM + off, words)
+        put(hack, LOADED, loaded)
+        A = d.Analysis.__new__(d.Analysis)
+        A.byname = {'ovl_b': d.Section('ovl_b', ROM, TEXT, TEXT + 0xF00, TEXT + size, TEXT + size, funcs=[(0, 0x100)])}
+        A.secs = list(A.byname.values())
+        A.place = {'ovl_b': (ROM, TEXT, TEXT + 0xF00, TEXT + 0xF00, TEXT + size)}
+        A.reshaped = [('ovl_b', TEXT, TEXT + 0x200, TEXT, TEXT + 0x200), ('ovl_b', TEXT + 0x300, TEXT + 0x320, TEXT + 0x340, TEXT + 0x360)]
+        A.payload = None
+        A.hack = bytes(hack)
+        A.map = d.AddressMap()
+        A.map.ovl['ovl_b'] = [(TEXT, TEXT + 0x10000, 0, 'text')]      # far branches stay at their addresses
+        A.map.finish()
+        return A
+
+    def test_runtime_targets(self):
+        # VPW64 Deluxe (aki-roadmap#222): only a real jump counts: into a chunk at its own address, from code outside the stock code
+        TEXT = 0x80100000
+        jump = lambda t, op=2: (op << 26) | ((t & 0x0FFFFFFF) >> 2)
+        nop = [0] * 6
+        loaded = nop + [jump(TEXT + 0x40)] + nop + nop + [jump(TEXT + 0x340)] + nop + nop + [jump(TEXT + 0x800)] + nop + nop + [jump(TEXT + 0x80, 3)] + nop
+        A = self.runtime_analysis({}, loaded)
+        self.assertEqual(d.runtime_targets(A), {('ovl_b', TEXT + 0x40), ('ovl_b', TEXT + 0x80)})
+        # a jump in the stock code is rewritten anyway; one between undecodable words is a chance match in compressed data
+        A = self.runtime_analysis({0xE00: nop + [jump(TEXT + 0x40)] + nop}, [0x48000000] * 6 + [jump(TEXT + 0x40)] + [0x48000000] * 6)
+        self.assertEqual(d.runtime_targets(A), set())
+
+    def test_runtime_functions_compile_the_hack_words_at_their_own_address(self):
+        TEXT = 0x80100000
+        JR = 0x03E00008
+        beq_far = 0x11220000 | 0x1000                       # a far branch out of the chunk keeps its offset (a lookup)
+        A = self.runtime_analysis({0x40: [0x11, beq_far, 0, JR, 0x13, 0x14]}, [0] * 6 + [(2 << 26) | ((TEXT + 0x40) & 0x0FFFFFFF) >> 2] + [0] * 6)
+        area, report = bytearray(0x18), {}
+        got = d.runtime_functions(A, area, 0x200000, report)
+        self.assertEqual(got, [dict(vram=TEXT + 0x40, entry=TEXT + 0x40, rom=0x200020, size=0x14, kind='runtime', section_rom=0x1000,
+                                    data=[TEXT, TEXT + 0x1000, 0x1000])])
+        self.assertEqual([d.word(area, 0x20 + 4 * i) for i in range(5)], [0x11, beq_far, 0, JR, 0x13])
+        self.assertEqual(report['runtime_functions'], [TEXT + 0x40])
+        self.assertEqual(report['runtime_function_problems'], [])
+
+    def test_runtime_functions_with_a_loop_above_the_entry(self):
+        TEXT = 0x80100000
+        JR = 0x03E00008
+        back = 0x1000FFFD                                   # at +0x48, to +0x40, above the entry at +0x44
+        A = self.runtime_analysis({0x40: [0x11, 0x12, back, 0, JR, 0]}, [0] * 6 + [(2 << 26) | ((TEXT + 0x44) & 0x0FFFFFFF) >> 2] + [0] * 6)
+        area = bytearray()
+        f = d.runtime_functions(A, area, 0x200000, {})[0]
+        self.assertEqual((f['vram'], f['entry'], f['rom']), (TEXT + 0x38, TEXT + 0x44, 0x200000))
+        self.assertEqual(d.mips.branch_target(d.word(area, 0), f['vram']), f['entry'])
+        self.assertEqual(d.word(area, 8), 0x11)             # the words keep their addresses: +0x40 is at vram + 8
+
+    def test_caller_stubs_set_the_return_address_a_hook_checks(self):
+        # VPW64 Deluxe (aki-roadmap#222): code loaded at run time compares $ra with 0x80100108, the return address of a jal
+        TEXT, RA = 0x80100000, 0x80100108
+        check = [0x3C080000 | (RA >> 16), 0x35080000 | (RA & 0xFFFF), 0x13E80005]          # lui t0; ori t0,t0; beq ra,t0
+        jal = 0x0C000000 | ((0x80020000 >> 2) & 0x3FFFFFF)
+        A = self.runtime_analysis({0x100: [jal, 0x24A5FFFF, 0x11]}, [0] * 6 + check + [0] * 6)
+        A.new_blocks = []
+        A.extras = []
+        self.assertEqual(d.caller_checks(A), {RA})
+        D, area, report = bytearray(A.hack), bytearray(), {}
+        d.add_caller_stubs(A, D, area, report)
+        self.assertEqual(report['caller_stubs'], [('ovl_b', TEXT + 0x100, 0x80020000)])
+        self.assertEqual(d.mips.jump_target(d.word(D, 0x1100), TEXT + 0x100), d.NEW_CODE_VRAM)
+        self.assertEqual(d.word(D, 0x1100) >> 26, 3)                                       # still a jal, its delay slot untouched
+        self.assertEqual(d.word(D, 0x1104), 0x24A5FFFF)
+        self.assertEqual([d.word(area, 4 * i) for i in range(2)], [0x3C1F8010, 0x37FF0108])
+        self.assertEqual(d.word(area, 8) >> 26, 3)                                         # a call, so $ra can be cleared after it
+        self.assertEqual(d.mips.jump_target(d.word(area, 8), d.NEW_CODE_VRAM + 8), 0x80020000)
+        self.assertEqual([d.word(area, 4 * i) for i in range(3, 7)], [0, 0x0000F821, 0x03E00008, 0])
+        self.assertEqual([(x.kind, x.vram, x.size) for x in A.extras], [('refresh', d.NEW_CODE_VRAM, 28)])
+
+    def test_caller_check_without_a_call_there_is_reported(self):
+        RA = 0x80100108
+        A = self.runtime_analysis({0x100: [0x11, 0x12, 0x13]}, [0] * 6 + [0x3C080000 | (RA >> 16), 0x35080000 | (RA & 0xFFFF), 0x13E80005] + [0] * 6)
+        A.new_blocks, A.extras = [], []
+        report = {}
+        d.add_caller_stubs(A, bytearray(A.hack), bytearray(), report)
+        self.assertEqual(report['caller_checks_unhandled'], [RA])
+        self.assertNotIn('caller_stubs', report)
 
     def test_translate_data_reports_dropped_words(self):
         TEXT, DATA, ROM, size = 0x80090000, 0x80090100, 0x1000, 0x400
@@ -1236,6 +1321,57 @@ class EntryPassTests(unittest.TestCase):
         self.assertEqual(A.extras, [])
 
 
+def fake_new_area(funcs, words):
+    """New-code area holding reshaped functions [(vram, size)], each its own block; words {vram: word}."""
+    area = bytearray(0x100)
+    for v, w in words.items():
+        put(area, v - d.NEW_CODE_VRAM, [w])
+    extras = [d.Extra('reshaped', 0x80100000 + (v - d.NEW_CODE_VRAM), v, z, section='ovl_d') for v, z in funcs]
+    blocks = [('reshaped', 'ovl_d', x.hack_vram, x.hack_vram + x.size, x.vram) for x in extras]
+    return types.SimpleNamespace(extras=extras, new_blocks=blocks), area
+
+
+class NewAreaEntryTests(unittest.TestCase):
+    N = d.NEW_CODE_VRAM
+
+    def test_branch_into_another_chunks_function_gets_an_entry(self):
+        # VPW64 Deluxe v1.1: the hook at 0x8F0011B0 branches to the shared `j` back at 0x8F001194, inside 0x8F001150
+        N = self.N
+        A, area = fake_new_area([(N, 0x10), (N + 0x10, 0x10)],
+                                {N: addiu(V0, 0, 1), N + 4: addiu(29, 29, -0x28), N + 8: j(0x80140BC8), N + 0xC: NOP,
+                                 N + 0x10: beq(V0, 0, -4), N + 0x14: NOP, N + 0x18: jr(RA), N + 0x1C: NOP})
+        report = {}
+        d.add_new_area_entries(A, bytearray(), area, [], report)
+        self.assertEqual([(x.kind, x.vram, x.size, x.hack_vram) for x in A.extras[2:]],
+                         [('reshaped', N + 4, 0xC, 0x80100004)])
+        self.assertEqual(report['new_area_entries'], [(N + 0x10, N + 4)])
+
+    def test_jump_from_a_port_into_a_chunk_nothing_entered_gets_an_entry(self):
+        # VPW64 Deluxe v1.1: main's hook at 0x80010ADC does `j 0x800F2ADC`, into ovl_a's chunk reshaped at 0x800F2A40;
+        # the rewrite points it at the moved chunk, where no function was registered (crash at 0x8F0007CC)
+        N = self.N
+        A, D = fake_main([(0x80000400, 0x10)], {}, {0x80000400: j(N + 0x24), 0x80000404: NOP})
+        A2, area = fake_new_area([(N, 0x10)], {N + 0x24: addiu(V0, 0, 1), N + 0x28: jr(RA), N + 0x2C: NOP})
+        A.extras, A.new_blocks = A2.extras, [('reshaped', 'ovl_a', 0x800F2A40, 0x800F2A80, N)]
+        report = {}
+        d.add_new_area_entries(A, D, area, [d.Port('main', 0x80000400, 0x10, None, 'changed', [])], report)
+        self.assertEqual([(x.kind, x.vram, x.size, x.hack_vram, x.section) for x in A.extras[1:]],
+                         [('reshaped', N + 0x24, 0xC, 0x800F2A64, 'ovl_a')])
+        self.assertEqual(report['new_area_entries'], [(0x80000400, N + 0x24)])
+
+    def test_loop_in_its_own_block_and_known_starts_add_nothing(self):
+        N = self.N
+        A, area = fake_new_area([(N, 0x10), (N + 0x10, 0x10)],
+                                {N: beq(V0, 0, 2), N + 8: jr(RA),
+                                 N + 0x10: beq(V0, 0, -5), N + 0x18: jr(RA)})    # N + 0x10 -> N: a function start
+        # two functions in one block: the second loops back above its entry (left to the back-branch copy)
+        A.extras.append(d.Extra('reshaped', 0x80100028, N + 0x28, 0x10, section='ovl_d'))
+        A.new_blocks[1] = ('reshaped', 'ovl_d', 0x80100010, 0x80100040, N + 0x10)
+        put(area, 0x28, [beq(V0, 0, -6), NOP, jr(RA), NOP])     # N + 0x28 -> N + 0x14, inside the block, above the entry
+        d.add_new_area_entries(A, bytearray(), area, [], {})
+        self.assertEqual(len(A.extras), 3)
+
+
 class _ChainMap:
     """The address map discover_extra_code reads: identity, no data ranges."""
     def __init__(self, names):
@@ -1253,7 +1389,6 @@ def fake_hook_chain(extra_main=(), extra_ovl_b=()):
     ovl_b's changed function at 0x80100000 does `j 0x80000480` (a hook in main's text) at 0x80100010; that hook does
     `j 0x80100024`, into ovl_a's reshaped chunk 0x80100020-0x80100040; that does `j 0x80100054`, into ovl_a's reshaped
     chunk 0x80100050-0x80100070, which comes back with `j 0x80100018` into ovl_b's function."""
-    import types
     hack = bytearray(0x5000)
     secs = [d.Section('main', 0x1000, 0x80000400, 0x80000800, 0x80000900, 0x80000900, [(0x80, 0x10)]),
             d.Section('ovl_a', 0x2000, 0x80100000, 0x80100100, 0x80100100, 0x80100100, [(0, 0x20), (0x20, 0x20), (0x50, 0x20)], slot=0x80100000),
