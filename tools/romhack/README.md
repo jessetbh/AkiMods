@@ -83,7 +83,7 @@ python -I tools\romhack\aki_import.py build C:\Downloads\wrestling --rom nomercy
   `failed` (`why`).
 - **One conversion per hack in a batch** (#268): an item that builds the same ROM as an earlier
   one (a hack ROM and its patch) is `have-it` with `duplicate_of`, and the ledger records its input
-  too. In an archive holding several patches, a patch the catalog doesn't know whose sibling (same
+  too. In an archive holding exactly two patches, the one the catalog doesn't know, when its sibling (same
   base) matched a catalog entry is that hack's other build (VPW64 Deluxe's Emulator_over64MB
   xdelta beside the Summercart one): `have-it` with `alternative_of`, not built; imported alone
   it builds as usual.

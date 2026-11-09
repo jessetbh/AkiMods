@@ -431,8 +431,8 @@ def is_texture_folder(names):
 
 def pack_archive_note(item, pack):
     return dict(item=item, kind='archive', status='unsupported',
-                why='an archive inside the texture pack %s: not part of the pack and nothing in it to import on its own; '
-                    'extract it into the pack to include its images' % display_name(pack))
+                why='an archive inside the texture pack %s: not part of the pack (not opened here); extract it and '
+                    'import it on its own, or into the pack to include its images' % display_name(pack))
 
 
 def file_head(path, n=64):
@@ -2230,8 +2230,10 @@ def run_job(job, emit, patchfmt=None):
                 res = dict(item=s.label, status='have-it', key=key, why='same input as another item in this batch')
             if key:
                 seen.add(key)
+            # Only an archive of exactly two patches (one hack's two builds, VPW64 Deluxe's Summercart / emulator pair):
+            # in a collection zip of several hacks of one game every unknown hack would hide behind the catalog one.
             if res.get('status') == 'ready' and res.get('kind') == 'patch' and not res.get('catalog') and \
-                    patches.get(archive_of(s), 0) > 1:
+                    patches.get(archive_of(s), 0) == 2:
                 taken.discard(res.get('id'))      # its id is chosen again if it is built
                 deferred.append((s, {k: v for k, v in res.items() if not k.startswith('_')}))
                 continue
@@ -2246,7 +2248,8 @@ def run_job(job, emit, patchfmt=None):
                 counts[res['status']] = counts.get(res['status'], 0) + 1
                 emit(dict(res, event='item'))
                 continue
-            res, key = classify(s, roms, catalog, ledger, patchfmt, taken, keep=builder is not None)
+            res, key = classify(s, roms, catalog, ledger, patchfmt, taken, keep=builder is not None,
+                                hint=job.get('game'))
             finish(s, res, key)
         if ledger is not None and (job.get('record') or builder is not None):
             ledger.save()
