@@ -1467,19 +1467,23 @@ class Builder:
         raise NeedsGame('which game this Project64 bundle is for (%s; pass "game")' % (
             'its cheats name ' + ', '.join(sorted(found)) if found else 'no cheats or ROM in it name a game'))
 
-    def bundle_code_tags(self, folder, conv, game):
-        """The revision tags of the bundle's Project64 cheat sections for this game (e.g. {'nomercy-rev0'})."""
-        tags = set()
+    def bundle_code_tag(self, folder, conv, game, name, include):
+        """The revision tag of the cheat section import-pj64 will take (the first, in its order, with the mod's
+        cheats: e.g. 'nomercy-rev0'), or None. A bundle's other sections (a full Project64.cht) don't count."""
         for d, _, fs in os.walk(folder):
             for f in fs:
                 p = os.path.join(d, f)
-                if f.lower().endswith(('.cht', '.ini')) and os.path.getsize(p) < (8 << 20):
+                if f.lower().endswith(('.cht', '.ini')) and 0 < os.path.getsize(p) < (8 << 20):
                     with open(p, encoding='latin-1') as fh:
-                        for key in conv.parse_cht(fh.read()):
-                            tag = conv.CHT_SECTIONS.get(key) or conv.CHT_SECTIONS.get(key.upper())
-                            if tag and conv.GAME_OF_TAG.get(tag, tag.split('-rev')[0]) == game:
-                                tags.add(tag)
-        return tags
+                        for key, sec in conv.parse_cht(fh.read()).items():
+                            tag = conv.CHT_SECTIONS.get(key)
+                            if tag is None and key.upper() == conv.stock_cht_key(game):
+                                tag = PORT_TAGS[game]
+                            if tag is None or conv.GAME_OF_TAG.get(tag, tag.split('-rev')[0]) != game:
+                                continue
+                            if conv.mod_cheats(sec, name, include):
+                                return tag
+        return None
 
     def bundle_dump(self, folder, game, dump):
         """A stock dump named `dump` inside the bundle (Showdown 64 ships its unpatched cartridge), .z64 bytes, or None."""
@@ -1528,8 +1532,11 @@ class Builder:
             with open(hack_path, 'wb') as f:
                 f.write(rom)
             ok, log = run_main(dl, ['map', '--base', port_path, '--hack', hack_path, '--out', map_path])
+        except Exception as e:      # a map that can't be made leaves the codes off, never fails the bundle
+            ok, log = False, '%s: %s' % (type(e).__name__, e)
         finally:
-            os.remove(hack_path)    # the stock ROM never stays on disk
+            if os.path.exists(hack_path):
+                os.remove(hack_path)    # the stock ROM never stays on disk
         if not ok or not os.path.isfile(map_path):
             got = (None, None, 'derelink map: %s' % ((log.strip().splitlines() or ['failed'])[-1]))
         else:
@@ -1591,12 +1598,22 @@ class Builder:
             shutil.rmtree(out, ignore_errors=True)
             os.makedirs(out)
             # Codes for another revision than the port's (No Mercy Rev 0) are translated through that revision's map.
-            other = sorted(self.bundle_code_tags(folder, conv, game) - {PORT_TAGS[game]})
-            map_path, map_from, map_why = (self.revision_map(game, other[0], folder, port_path) if other
-                                           else (None, None, None))
-            map_range = entry.get('map_range', REVISION_MAP_RANGES.get(other[0], []) if other else [])
+            cheat_name = entry.get('cheat_name') or name
+            tag = self.bundle_code_tag(folder, conv, game, cheat_name, entry.get('include'))
+            map_path = map_from = map_why = None
+            map_range = []
+            if tag and tag != PORT_TAGS[game]:
+                map_range = entry.get('map_range', REVISION_MAP_RANGES.get(tag, []))
+                try:
+                    if not isinstance(map_range, list) or not all(isinstance(r, str) for r in map_range):
+                        raise ValueError('not a list of "LO,HI,DELTA" strings')
+                    conv.parse_map_ranges(map_range)
+                except ValueError as e:
+                    map_why = "the catalog's map_range %r: %s" % (map_range, e)
+                else:
+                    map_path, map_from, map_why = self.revision_map(game, tag, folder, port_path)
             a = argparse.Namespace(
-                folder=folder, game=game, id=cid, name=entry.get('cheat_name') or name, team='aki-import',
+                folder=folder, game=game, id=cid, name=cheat_name, team='aki-import',
                 version=self.version, author=list(self.authors), description=entry.get('description', ''),
                 credits=entry.get('credits', ''), permission=entry.get('permission', ''), url=entry.get('url', ''),
                 include=entry.get('include'), all_cheats=bool(entry.get('all_cheats')), map=map_path,

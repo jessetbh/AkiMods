@@ -535,6 +535,79 @@ class Rev0Codes(BuildBase):
         self.assertEqual(r['status'], 'converted', r)
         self.assertIn('not translated: derelink map: base ROM matches no layout', r['codes'])
 
+    def test_a_map_that_raises_leaves_the_codes_off_once(self):
+        # Not only sys.exit: any exception in derelink's analysis leaves the codes off (cached), never fails the bundle.
+        self.write('more/nm10.z64', t.REV0)
+        calls = []
+
+        def boom(argv):
+            calls.append(argv)
+            raise IndexError('odd ROM')
+        dl = types.SimpleNamespace(main=boom)
+        real = ai.Builder.mod
+        ai.Builder.mod = lambda builder, name: dl if name == 'derelink' else real(builder, name)
+        try:
+            items, _ = self.build([self.bundle('in/A Mod'), self.bundle('in/B Mod')], rom_dirs=[os.path.join(self.dir, 'more')])
+        finally:
+            ai.Builder.mod = real
+        self.assertEqual([i['status'] for i in items], ['converted', 'converted'])
+        self.assertIn('not translated: derelink map: IndexError: odd ROM', items[0]['codes'])
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(os.path.exists(calls[0][calls[0].index('--hack') + 1]))
+
+    def test_only_the_mods_own_section_decides(self):
+        # A full Project64.cht: stock Rev 0 cheats, the mod's own in the port's (Rev 1) section. No map is made.
+        self.write('more/nm10.z64', t.REV0)
+        self.write('in/My Mod/Project64.cht', '\n'.join([
+            '[%s]' % REV0_KEY, 'Name=WWF No Mercy', 'Cheat0="Stock' + BS + 'Money",8109940A FFFF',
+            '[00000000-00000000-C:45]', 'Name=WWF No Mercy', 'Cheat0="MyMod' + BS + 'Arena",810500E8 0933', '']).encode())
+        dl = fake_derelink()
+        r = self.build_one([os.path.join(self.dir, 'in', 'My Mod')], fakes={'derelink': dl},
+                           rom_dirs=[os.path.join(self.dir, 'more')])
+        self.assertEqual(r['codes'], "codes for the port's revision (1 lines)")
+        self.assertEqual(dl.calls, [])
+
+    def test_a_bad_catalog_map_range_is_refused(self):
+        self.write('more/nm10.z64', t.REV0)
+        conv = ai.load_module('aki_conv')
+        real = ai.Builder.catalog_entry
+        dl = fake_derelink()
+        for bad in ('200800,400000,-1000', ['200800,400000'], None):
+            ai.Builder.catalog_entry = lambda builder, res: {'map_range': bad}
+            try:
+                r = self.build_one([self.bundle('in/Mod %d' % len(str(bad)))], fakes={'derelink': dl, 'aki_conv': conv},
+                                   rom_dirs=[os.path.join(self.dir, 'more')])
+            finally:
+                ai.Builder.catalog_entry = real
+            self.assertEqual(r['status'], 'converted', r)
+            self.assertIn("not translated: the catalog's map_range", r['codes'])
+        self.assertEqual(dl.calls, [])
+
+    def test_values_are_translated_when_a_layout_matches(self):
+        # The port ROM here is synthetic, so no shipped layout matches it: stand one in, as the real port ROM has.
+        self.write('more/nm10.z64', t.REV0)
+        conv = ai.load_module('aki_conv')
+        conv.find_layout = lambda derelink, rom: {'sections': [
+            {'name': 'main', 'rom': 0x1000, 'text': 0x80000400, 'data': 0x80030000}]}
+        conv.bake_codes = lambda *a, **k: (None, {})        # nothing to bake into a patch here
+        j = lambda tgt: 0x08000000 | ((tgt & 0x0FFFFFFF) >> 2)
+        hook, back = j(0x80300074), j(0x80021C88)   # into a cave in high RAM, and the way back
+        self.write('in/Hook Mod/Project64.cht', '\n'.join([
+            '[%s]' % REV0_KEY, 'Name=WWF No Mercy',
+            'Cheat0="HookMod' + BS + 'Hook",81021C80 %04X,81021C82 %04X,81300074 %04X,81300076 %04X' % (
+                hook >> 16, hook & 0xFFFF, back >> 16, back & 0xFFFF), '']).encode())
+        r = self.build_one([os.path.join(self.dir, 'in', 'Hook Mod')], fakes={'derelink': fake_derelink(), 'aki_conv': conv},
+                           rom_dirs=[os.path.join(self.dir, 'more')])
+        self.assertEqual(r['codes'], 'codes translated from Rev 0 (4 of 4 lines; 0 dropped); 3 values inside the code '
+                                     'they write translated', r)
+        self.assertEqual(r['codes_translation']['values'],
+                         {'values_changed': 3, 'unmapped': 0, 'lui_conflicts': 0, 'stepped_bases': 0})
+        codes = self.codes(r)[0]
+        moved = j(0x802FF074)       # the hook follows the cave the -0x1000 override moved
+        self.assertIn('81021BF0 %04X' % (moved >> 16), codes)
+        self.assertIn('81021BF2 %04X' % (moved & 0xFFFF), codes)
+        self.assertIn('812FF076 %04X' % (j(0x80021BF8) & 0xFFFF), codes)   # the way back follows main text
+
     def test_port_revision_codes_say_so(self):
         r = self.build_one([Pj64Bundles.bundle(self)])
         self.assertEqual(r['codes'], "codes for the port's revision (1 lines)")

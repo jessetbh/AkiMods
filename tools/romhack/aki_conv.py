@@ -605,7 +605,10 @@ def cmd_import_pj64(a):
                                                        'overlay_guards': guard_note,
                                                        'map_ranges': list(getattr(a, 'map_range', None) or [])}
                 # The addresses inside the code the list writes (hooks, lui/low pairs) follow too (aki-roadmap#205).
-                text, values = translate_values_in(text, a, overrides)
+                try:
+                    text, values = translate_values_in(text, a, overrides)
+                except Exception as e:  # a list the value pass can't read keeps its values; the addresses stand
+                    values = {'off': '%s: %s' % (type(e).__name__, e)}
                 report['parts']['codes_translated']['values'] = values
                 # Every code left is at the port's addresses now: tag it so, or the engine would translate it again.
                 text = text.replace('# rom: %s' % tag, '# rom: %s\n# translated from %s by aki-conv (revision map)' % (port, tag), 1)
