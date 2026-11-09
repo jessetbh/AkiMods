@@ -333,6 +333,33 @@ class Rup(unittest.TestCase):
     def test_known_bases(self):
         self.assertEqual(aki_conv.KNOWN_ROM_MD5['04c492be7f89fc6f425238bd67629544'], 'nomercy-rev0')
 
+    def test_watch_codes_join_the_pack_codes(self):
+        # derelink's codes.txt (aki-roadmap#191) was left out of import-pj64 packs (aki-roadmap#207).
+        import tempfile, types
+        with tempfile.TemporaryDirectory() as d:
+            a = types.SimpleNamespace(out=d, game='nomercy')
+            open(os.path.join(d, 'codes.txt'), 'w').write('# watch\n[Conversion\\Hack code writes]\nD1000400 3C09\n810F295C 0000\n')
+            aki = {'components': {}}
+            pkg = {'codes.txt': b'[Mod\\A]\n8109940A FFFF\n'}
+            self.assertEqual(aki_conv.add_watch_codes(a, aki, pkg), 2)
+            self.assertEqual(pkg['codes.txt'].decode(), '[Mod\\A]\n8109940A FFFF\n\n# watch\n[Conversion\\Hack code writes]\nD1000400 3C09\n810F295C 0000\n')
+            self.assertFalse(os.path.exists(os.path.join(d, 'codes.txt')))
+            self.assertEqual(aki['components']['codes']['rom'], 'nomercy-rev1')
+            self.assertEqual(aki_conv.add_watch_codes(a, aki, pkg), 0)
+
+    def test_stock_rom_is_not_a_hack(self):
+        # Showdown 64 ships the unpatched Rev 0 cartridge beside its .rup: the import took it as the hack (aki-roadmap#207).
+        import hashlib
+        rom = b'stock cartridge bytes'
+        saved = dict(aki_conv.KNOWN_ROM_MD5)
+        try:
+            aki_conv.KNOWN_ROM_MD5[hashlib.md5(rom).hexdigest()] = 'nomercy-rev0'
+            self.assertEqual(aki_conv.stock_rom(rom), 'nomercy-rev0')
+            self.assertIsNone(aki_conv.stock_rom(rom + b'patched'))
+        finally:
+            aki_conv.KNOWN_ROM_MD5.clear()
+            aki_conv.KNOWN_ROM_MD5.update(saved)
+
     def test_cht_key_from_header(self):
         rom = bytearray(0x40)
         rom[0x10:0x18] = bytes.fromhex('4E4B06401B49BCFB')

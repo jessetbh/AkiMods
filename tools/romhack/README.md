@@ -130,9 +130,30 @@ with `package`, `converter` and `aki_tier`:
 All of them live here (owner decision on #228: the player-facing converter is in AkiMods):
 `derelink.py` (+ `layouts/`, `mips.py`, `bps.py`; from the No Mercy repo's `tools/romhack`),
 `aki_hack.py` (survey), `aki_conv.py` + `aki_conv_bake.py` (import-pj64, pack-nrm, bake-codes,
-translate-codes) and `aki_save.py` (save conversion; from AkiTools). They find each other in this
-folder; `AKI_DEPOT` points the developer-only lookups (stock ROMs and RecompiledFuncs in game
-repos) at a depot.
+translate-codes, translate-code-values; with `aki_conv_values.py`) and `aki_save.py` (save
+conversion; from AkiTools). They find each other in this folder; `AKI_DEPOT` points the
+developer-only lookups (stock ROMs and RecompiledFuncs in game repos) at a depot.
+
+The AkiTools copies are kept in step by hand. `akitools-sync.json` records the AkiTools git blob
+of each file at the last sync, and `tests/test_akitools_sync.py` fails when a depot AkiTools
+checkout (`AKI_TOOLS`, else `<depot>\AkiTools`) has committed past one of them, naming the commits
+to port. It skips without a checkout, or when the checkout is older than the last sync. After
+porting, put the new blobs (`git -C AkiTools rev-parse HEAD:aki-conv.py`) and commit in the file.
+
+`translate-code-values` fixes the addresses inside the code a translated GameShark list writes
+(aki-roadmap#205): hooks, `lui`/low pairs and pointers to what the list wrote, through a derelink
+map (`derelink.py map --base <port ROM> --hack <old revision's ROM> --out map.json`):
+
+```powershell
+python tools\romhack\aki_conv.py translate-code-values <pack>\codes.txt --map map.json `
+    --port-rom ..\NoMercyRecomp\nomercy.z64 [--map-range LO,HI,DELTA] [--move-writes LO,HI,DELTA] [--dry-run]
+```
+
+Only values known to be instructions change. It tags the file and refuses to run twice; read the
+report (`unmapped`, `lui_conflicts` and `stepped_bases` are left alone). `--map-range` overrides
+the map for a list translated with an older one; `--move-writes` moves what a `stepped_bases` `lui`
+points at. Run the pack after any move. import-pj64 never takes a known stock cartridge in a bundle
+for the hack, and adds derelink's code-watch list to the pack's codes (aki-roadmap#207).
 
 Stdlib only. It never writes ROM bytes; tests use synthetic images
 (`python -m unittest discover -s tools/romhack/tests`).
