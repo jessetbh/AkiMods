@@ -9,7 +9,8 @@ A conversion never contains ROM data. Patches are applied to the player's own ca
 Each section ends with a **Source of truth** line that names the code that reads or writes it. Where this guide and
 the code disagree, the code is right; the known gaps are listed at the end.
 
-Paths below are in this repository (AkiMods) unless they start with `AkiLauncher/`.
+Paths below are in this repository (AkiMods) unless they start with `AkiLauncher/` or follow "N64ModernRuntime"
+(the game runtime every port is built on).
 
 ## Contents
 
@@ -39,6 +40,9 @@ Installed, a conversion is one folder named after its id:
     models\           model packs (optional)
         roster.json
         <pack>.akimodel\
+    textures\         a texture pack inside the conversion (optional; aki.json textures "dir")
+    rt_lights.json    ray-tracing lights (optional; aki.json rt "lights")
+    rt_materials.json ray-tracing materials (optional; aki.json rt "materials")
     icon.png          256x256 picture (optional; aki.json "thumb")
     README.md         what it is, credits, permission (optional)
     docs\             anything else the author shipped, e.g. move lists (optional)
@@ -48,13 +52,17 @@ Installed, a conversion is one folder named after its id:
   `portable.txt`.
 - The folder name **is** the id: the game finds a conversion by its folder, and the launcher lists it under that
   name whatever `aki.json` says.
-- Folders under `conversions\` whose names start with `_` or `.` are not conversions; the launcher skips them.
-  `conversions\_packages\` is planned for shared texture packages; today texture packs install to `mods\`.
-- A conversion's saves live in `<app folder>\saves\<id>\`, apart from the stock game's saves. Installing,
-  upgrading or removing a conversion never touches them.
+- Folders under `conversions\` whose names start with `_` or `.` are not conversions; the launcher and the game
+  skip them. `conversions\_packages\<package>\` holds shared texture packages (see [textures](#textures)).
+- A conversion's saves live in `<app folder>\saves\<id>\`, apart from the stock game's saves. Upgrading or removing
+  a conversion never touches them.
+- Any patch mod (`.nrm`) or texture pack (`.rtz`, or a folder with an `rt64.json`) in the conversion folder
+  is opened with it: the game scans the folder for mods when the conversion runs.
 
 Source of truth: `AkiLauncher/src/packages.cpp` (`list_conversions`, `install_package`),
-`tools/romhack/aki_save.py` (header, `install`).
+`AkiLauncher/src/conversions.cpp` (`list_conversions`, `add_conversion`), N64ModernRuntime
+`librecomp/src/conversion.cpp` (`load_active_conversion`, `list_installed_conversions`), `tools/romhack/aki_save.py`
+(header, `install`).
 
 ## The package around it
 
@@ -107,14 +115,24 @@ my-conversion-1.0.0.zip
 The launcher refuses a package that holds a `.z64`, `.v64` or `.n64` file, that is over 8 GB, or whose conversion
 folder has no `aki.json`.
 
-`tools/romhack/aki_conv.py` (`import-pj64`, `pack-nrm`) also writes an older Thunderstore-shaped zip, with
-`manifest.json`, `icon.png`, `README.md` and `aki.json` at its root. The launcher does not install that shape as a
-conversion. `aki_import.py build` repacks the `import-pj64` zips it makes itself into the shape above (it drops
-`manifest.json` and moves the rest under `conversion/`); a `pack-nrm` zip is not converted, so drop its `.nrm` on
-the launcher instead (see [Installing](#how-the-launcher-installs-and-runs-a-conversion)).
+**Without `aki-package.json`.** `tools/romhack/aki_conv.py` (`import-pj64`, `pack-nrm`) writes an older
+Thunderstore-shaped zip, with `manifest.json`, `icon.png`, `README.md` and `aki.json` at its root. The launcher
+installs a zip or folder with `aki.json` at its root and no `aki-package.json` along a second, simpler path:
+
+- the whole zip becomes `conversions\<id>\` (`aki.json` `id`), in the game that `aki.json` `game` names;
+- it checks `format` (`aki-conversion`), `format_version` (`1`), the id, that the paths in `aki.json` stay inside
+  the folder, and the player's ROM against `aki.json` `base_rom.sha1`;
+- it seeds the conversion's saves (see [saves](#saves));
+- it doesn't check the patch's `mod_id` and doesn't record the install in `packages.json`. It refuses an id that
+  the package installer already installed.
+
+The same path installs a shared texture package (see [textures](#textures)). `aki_import.py build` repacks the
+`import-pj64` zips it makes itself into the `aki-package.json` shape (it drops `manifest.json` and moves the rest under
+`conversion/`).
 
 Source of truth: `AkiLauncher/src/packages.cpp` (`parse_manifest`, `check_package`),
-`tools/romhack/aki_import.py` (`package_manifest`, `write_conversion`).
+`AkiLauncher/src/conversions.cpp` (`is_conversion_source`, `add_conversion`), `tools/romhack/aki_import.py`
+(`package_manifest`, `write_conversion`).
 
 ## aki.json, field by field
 
@@ -141,17 +159,19 @@ A complete example (every component is optional; use only the ones you need):
     "codes":    { "file": "codes.txt", "format": "aki-codes", "rom": "nomercy-rev1" },
     "saves":    [{ "file": "saves/wwf.nomercy.us.bin", "kind": "flash", "mode": "seed" }],
     "textures": { "package": "my-conversion-textures", "version": "1.0.0", "naming": "rice", "optional": false },
+    "rt":       { "lights": "rt_lights.json", "materials": "rt_materials.json" },
     "models":   { "dir": "models", "format": 2, "roster": "models/roster.json",
                   "slots": [{ "wrestler": "0x0404", "name": "Example Wrestler", "costume": 0, "pack": "q-robot" }] }
-  }
+  },
+  "addons": { "allow": "data", "mods": ["aki_camera"] }
 }
 ```
 
 | Field | Type | Meaning |
 |---|---|---|
-| `format` | string | Always `aki-conversion`. |
-| `format_version` | number | Always `1`. |
-| `id` | string | Same rules as the package id. Must equal the folder name and the package id. |
+| `format` | string | Always `aki-conversion`. The game refuses to start the conversion otherwise. |
+| `format_version` | number | Always `1`. The game refuses to start the conversion otherwise. |
+| `id` | string | Same rules as the package id. Must equal the folder name and the package id; the game refuses a mismatch. |
 | `name` | string | Display name. The launcher falls back to the folder name. |
 | `version` | string | Use `x.y.z`. `aki_import.py` refuses anything else; the launcher only shows this one and checks the `aki-package.json` version. |
 | `authors` | list of strings | At least one name. The tools write `["unknown"]` when none is given. |
@@ -164,8 +184,21 @@ A complete example (every component is optional; use only the ones you need):
 | `description`, `credits` | string | Free text. |
 | `links` | list | `[{label, url}]`; `url` starts with `http://` or `https://`. |
 | `thumb` | string | Path of the picture, usually `icon.png`. |
-| `components` | object | What the conversion is made of. See [Components](#components). |
+| `components` | object | What the conversion is made of. See [Components](#components). At least one component the game can use is required, or it refuses to start the conversion. |
+| `addons` | object | Optional: which of the player's own mods may run beside the conversion. See below. |
 | `survey` | object | Written by the tools: how the conversion was built and how well it was tested. See below. |
+
+**`addons`.** While a conversion runs, the game turns off the player's other mods unless this allows them:
+
+| Key | Meaning |
+|---|---|
+| `allow` | `none`: only the conversion's own mods. `data` (the default, also used for any value the game doesn't know): the texture packs the player has turned on, and the code mods listed in `mods` if the player has turned them on. `all`: every mod the player has turned on. |
+| `mods` | Ids of code mods allowed beside it, e.g. `aki_camera`. |
+
+Another ROM hack's patch never runs beside the conversion's. The game turns on the cheats mod for a conversion with
+codes and the model import mod for one whose models are on; otherwise the cheats mod stays off. The player can
+change this for one conversion in `conversions\<id>\addons.json` (`{"enabled": [ids], "disabled": [ids]}`), which
+wins over `addons` (but can't turn on another ROM hack or turn off the conversion's own mods).
 
 **`survey`.** You don't write this by hand; the converters fill it in. Keys you may see:
 
@@ -179,7 +212,7 @@ A complete example (every component is optional; use only the ones you need):
 
 Source of truth: `tools/romhack/aki_conv.py` (`cmd_import_pj64`, `cmd_pack_nrm`, `cmd_bake_codes`),
 `tools/romhack/aki_import.py` (`conversion_manifest`, `write_conversion`), `AkiLauncher/src/packages.cpp`
-(`list_conversions`).
+(`list_conversions`), N64ModernRuntime `librecomp/src/conversion_rules.cpp` (`parse`, `session_enabled_mods`).
 
 ## Components
 
@@ -207,9 +240,11 @@ Source of truth: `AkiLauncher/src/packages.cpp` (`check_package`), `tools/romhac
 
 - `file`: the codes file in the conversion folder.
 - `format`: always `aki-codes` (see [codes.txt](#codestxt-aki-codes)).
-- `rom`: the revision the addresses are for. Make it the port's revision (`base_rom.revision`). Codes for another
-  revision need translating first (`aki_conv.py translate-codes`); the bake step refuses them, and No Mercy Rev 0
-  lists are the only ones the game can translate itself.
+- `rom`: the revision the addresses are for (`rom_revision` is read too, as an older name). Make it the port's
+  revision (`base_rom.revision`). Codes for another revision need translating first (`aki_conv.py translate-codes`);
+  the bake step refuses them, and No Mercy Rev 0 lists are the only ones the game can translate itself. The
+  launcher uses `rom` for its notes (codes for another game stay off); when the game runs the codes, the file's own
+  `# rom:` line decides.
 
 When the game runs the conversion, it reads this file and runs every code in it every frame.
 
@@ -227,15 +262,21 @@ Source of truth: `tools/romhack/aki_conv.py` (`codes_txt`, `add_watch_codes`, `c
   `wwf.nomercy.us` and `vpw.vpw2.jp`. Only WrestleMania 2000, No Mercy and VPW2 have a separate `.pak.bin`; World
   Tour keeps its Controller Pak in `<game id>.bin`, and Revenge and VPW64 have no separate pak file.
 - `kind`: `flash`, `sram` or `pak` (`eep` exists in the tool, though none of the six games uses it). No Mercy saves
-  to flash; Revenge, WrestleMania 2000, VPW64 and VPW2 to SRAM; World Tour has only a Controller Pak.
-- `mode`: `seed`, the only mode: the file is copied into `saves\<id>\` once, for a fresh start, and never over a
-  player's progress.
+  to flash; Revenge, WrestleMania 2000, VPW64 and VPW2 to SRAM; World Tour has only a Controller Pak. A note for
+  people and tools: the launcher doesn't read it.
+- `mode`: `seed`, the only mode. The launcher doesn't read it either; every entry is seeded.
+
+**Seeding is done by the launcher when it installs the conversion**, not by the game. Each `file` is copied to
+`saves\<id>\<its file name>` (the `saves/` folder part is dropped) unless a file of that name is already there, so an
+upgrade never overwrites a player's progress. Only the install path for packages without `aki-package.json` seeds
+(see [The package around it](#the-package-around-it)); the `aki-package.json` installer doesn't seed yet. In that
+case, or by hand, `aki_save.py install <file> --game <key> --conversion <id> --if-missing` does the same.
 
 To make these from an emulator save (`.fla`, `.sra`, `.mpk`, `.eep`, RetroArch `.srm`), use
 `aki_save.py convert <file> --game <key> -o <out>`; it handles byte order and pak splitting.
 
-Source of truth: `tools/romhack/aki_conv.py` (`cmd_import_pj64`, saves part), `tools/romhack/aki_save.py`
-(`GAMES`, `KINDS`, `install --if-missing`).
+Source of truth: `AkiLauncher/src/conversions.cpp` (`add_conversion`, seeding), `tools/romhack/aki_conv.py`
+(`cmd_import_pj64`, saves part), `tools/romhack/aki_save.py` (`GAMES`, `KINDS`, `install --if-missing`).
 
 ### textures
 
@@ -243,26 +284,70 @@ Source of truth: `tools/romhack/aki_conv.py` (`cmd_import_pj64`, saves part), `t
 "textures": { "package": "my-conversion-textures", "version": "1.0.0", "naming": "rice", "optional": false }
 ```
 
-- `package`: the texture package this conversion uses. Big packs ship as their own package so several conversions
-  can share one and players can skip a download they already have.
-- `version`: that package's version.
-- `sha256`: optional; the SHA-256 of the texture package zip, which pins the exact file. `import-pj64` writes it
-  (its zips are byte-for-byte reproducible); `aki_import.py build` drops it and lists the package in
-  `aki-package.json` `requires.packages` instead.
-- `naming`: how the images are named: `rt64`, `rice` or `jabo` (see [Textures and naming](#textures-and-naming)).
-- `optional`: `true` if the conversion plays fine without the pack. The tools always write `false`.
+A conversion gets its textures in one of two ways: a shared **package** installed beside it, or a **folder** inside
+it.
 
-Source of truth: `tools/romhack/aki_conv.py` (`cmd_import_pj64`, textures part), `tools/romhack/aki_import.py`
-(Project64 bundle repack).
+- `package`: the shared texture package this conversion uses. Big packs ship as their own package so several
+  conversions can share one and players can skip a download they already have. While the conversion runs, the game
+  opens `conversions\_packages\<package>\`. If that folder isn't there, the game logs it and runs without the
+  textures, and the launcher shows a note.
+- `version`: that package's version. Recorded only; nothing checks it.
+- `sha256`: optional; the SHA-256 of the texture package zip, as lowercase hex, which pins the exact file.
+  `import-pj64` writes it (its zips are byte-for-byte reproducible); `aki_import.py build` drops it and lists the
+  package in `aki-package.json` `requires.packages` instead. When the launcher installs a package zip it stores the
+  zip's SHA-256 in `_packages\<package>\.package.sha256`. If that differs from `sha256`, the launcher notes that the
+  installed pack isn't the one the conversion was made with. It still runs.
+- `dir`: a folder inside the conversion that holds a texture pack, e.g. `textures`. If it's missing, the game logs it
+  and runs without it. When `naming` is `rice` or `jabo` and the folder has no `rt64.json`, the game writes one, so
+  a pack can ship with its author's own file names.
+- `naming`: how the images are named: `rt64`, `rice` or `jabo` (see [Textures and naming](#textures-and-naming)).
+- `optional`: `true` if the conversion plays fine without the pack. The tools always write `false`. Nothing reads
+  it yet.
+- `file`: a texture pack file in the conversion. The game reads no field of it; an `.rtz` in the conversion folder is
+  opened anyway (see [Folder layout](#folder-layout)).
+
+**The shared package itself** is a zip named `<package>-<version>.zip` with an `aki.json` at its root:
+
+```json
+{ "format": "aki-package", "format_version": 1, "kind": "textures", "game": "nomercy", "naming": "rice",
+  "folder": "My_Textures", "images": 1234 }
+```
+
+and the pack in a folder with an `rt64.json` (here `My_Textures\rt64.json`). The launcher installs the whole zip
+as `conversions\_packages\<package>\`; the package name is the zip's name up to its last `-`, so
+`Team-My_Textures-1.0.0.zip` becomes `Team-My_Textures` (a folder you install keeps its own name). The launcher
+checks only `format`, `format_version` (`1`), `kind` and `game`. `import-pj64` writes this shape. A `kind: texture-pack` package with
+`aki-package.json` is a different thing: it installs to `mods\<id>.rtz` like any texture pack, and runs beside a
+conversion only as one of the player's add-ons (see `addons`).
+
+Source of truth: N64ModernRuntime `librecomp/src/conversion.cpp` (`load_active_conversion`, textures),
+`AkiLauncher/src/conversions.cpp` (`add_conversion`, texture package; `annotate`), `tools/romhack/aki_conv.py`
+(`cmd_import_pj64`, textures part), `tools/romhack/aki_import.py` (Project64 bundle repack).
 
 ### RT lights and materials
 
-The ray-traced renderer reads per-venue lights and per-texture surface materials from the game's
-`assets/rt_lights.json` and `assets/rt_materials.json`. A component that lets a conversion ship its own (planned
-as `components.rt`) is **not read by any tool or by the launcher yet**, so it has no fields to document. Leave it
-out for now; this section will grow when the game reads it.
+```json
+"rt": { "lights": "rt_lights.json", "materials": "rt_materials.json" }
+```
 
-Source of truth: none yet (see [Known gaps](#known-gaps-between-code-and-docs)).
+The ray-traced renderer reads per-venue lights and per-texture surface materials from the game's
+`assets/rt_lights.json` and `assets/rt_materials.json`. A conversion can replace either one:
+
+- `lights`: a lights file in the conversion folder, in the same format as the game's `assets/rt_lights.json`.
+- `materials`: a materials file, in the same format as `assets/rt_materials.json`.
+
+Either key may be left out; the game then uses its own file. Both paths must stay inside the conversion folder (no
+`..`, drive or leading `/`). The game refuses to start a conversion that breaks this, and the launcher refuses to
+install one when it installs packages without `aki-package.json`.
+
+**Only the launcher passes them on.** When it starts a conversion, the launcher sets `WCW_RT_LIGHTS_FILE` and
+`WCW_RT_MATERIALS_FILE` to the full paths of these files for that start only, and the renderer reads those. The game
+doesn't read `components.rt` itself (it only names `rt` in its `[conversion] running ...` log line), so a conversion
+started from the game's own Mods menu runs with the stock lights and materials.
+
+Source of truth: `AkiLauncher/src/conversions.cpp` (`parse_info`, `add_conversion`, `conversion_env`),
+`AkiLauncher/src/launch.cpp` (`GameSession::launch`, the extra environment), N64ModernRuntime
+`librecomp/src/conversion_rules.cpp` (`parse`, the path check).
 
 ### models
 
@@ -278,28 +363,45 @@ Source of truth: none yet (see [Known gaps](#known-gaps-between-code-and-docs)).
 }
 ```
 
-- `dir`: the folder in the conversion that holds the model packs (`<pack>.akimodel\`). While the conversion runs,
-  the game reads models from here **instead of** `mods\models\`: the player's own packs and `models.txt` don't mix
-  in, and the model import mod is turned on for the session.
-- `format`: the AKP1 pack version the packs need (see [Model packs](#model-packs)). Games read up to `2`; missing
-  means `1`. A newer value turns the models off with an "update the game" message.
-- `roster`: optional; a roster file for the conversion's wrestlers:
-  `{"format": 1, "game": "nomercy", "wrestlers": [{"id": "0x0404", "name": "...", "costumes": 4}]}`. This is not
-  the same shape as the launcher's model-picker rosters (`<game>-roster.json`, `"schema": 1`, `costumes` as a list
-  of `{costume, name}`), so don't copy one into the other.
-- `slots`: which pack replaces which wrestler. Each entry: `wrestler` (the game's wrestler id, hex), `name` (for
-  people), `costume` (optional; leave it out for every costume), `pack` (the pack id). Each entry works like a
-  `<pack> wrestler 0xNNNN [costume C]` line in `models.txt`. Without `slots`, the game reads `<dir>\models.txt` as
-  it is.
-- HD textures for the packs (`<pack>-hd.rtz`) go beside `aki.json`.
+- `dir`: required; the folder in the conversion that holds the model packs (`<pack>.akimodel\`). Without it the
+  component is ignored. While the conversion runs, the game's model host serves models from here **instead of**
+  `mods\models\`: the player's own packs and `models.txt` don't mix in, and the model import mod
+  (`aki_modelimport`) is turned on for the session. If the folder is missing, the game logs it.
+- `format`: a whole number, the AKP1 pack version the packs need (see [Model packs](#model-packs)). Games read up to
+  `2`; missing means `1`. A newer value turns the models off with an "update the game" message; `0`, a negative number
+  or a value that isn't a whole number turns them off too.
+- `roster`: optional; the path of a roster file for the hack's wrestlers, for the tools and the launcher. The game
+  only checks that the path stays inside the conversion folder; nothing reads the file yet. Use the shape of the
+  rosters the launcher's model picker reads (`<game>-roster.json`), with `costumes` as a **list**:
+  `{"schema": 1, "wrestlers": [{"id": "0x0404", "name": "Example Wrestler", "costumes": [{"costume": 0, "name": "Default"}]}]}`.
+  `id` is a string starting with `0x`; `costumes` is optional.
+- `slots`: optional; which pack replaces which wrestler. Each entry:
+  - `wrestler`: required; the hack's wrestler id, as hex text (`"0x0404"` or `"404"`, at most 4 digits) or a number up
+    to 65535.
+  - `pack`: required; the pack id (`a-z A-Z 0-9 _ - .`, at most 64 characters, not starting with `.`).
+  - `costume`: optional; a whole number from 0 to 255. Leave it out for every costume.
+  - `name`: optional; the wrestler's name, for people. The launcher's Mods page lists up to four names, and the game
+    logs one `[conversion] model slot: ...` line per slot.
 
-The game runs the conversion **without models** (one line in its log, a warning in the launcher) when `format` is
-too new, a slot is bad, or the hack itself puts code or data in the RAM the model packs load into
-(`0x80400000`-`0x80800000`). Plain patch hacks are fine.
+  The game serves the slots to the model import mod as a `models.txt` with one `<pack> wrestler 0xNNNN [costume C]`
+  line each. An empty list means no wrestler changes. Without `slots`, the game reads `<dir>\models.txt` as it is.
+- HD textures for the packs (`<pack>-hd.rtz`) go beside `aki.json`, where the game opens them with the conversion's
+  other mods.
+
+The game runs the conversion **without models** (one `[conversion] ...` line in its log) when `format` is unusable or
+too new, `slots` isn't a list or any slot is bad, or the hack's patch has a `relink.json` that puts code, data, preloads
+or zeroed memory in the Expansion RAM the model packs load into (`0x80400000`-`0x80800000`, any address mirror), or
+whose `relink.json` doesn't parse. Plain patch hacks are fine. The launcher's Mods page shows "Custom models for N
+wrestlers" for the conversion, or "Custom models are off for this conversion" and why; it checks `format` and the
+patch's `relink.json`, not the slots. A bad `dir` or `roster` path (one that leaves the conversion folder) is
+different: the game won't run the conversion at all (see [Running](#how-the-launcher-installs-and-runs-a-conversion)).
 
 Older game builds ignore this component.
 
-Source of truth: the game runtime's conversion rules (`librecomp/src/conversion_rules.cpp` in N64ModernRuntime),
+Source of truth: N64ModernRuntime `librecomp/src/conversion_rules.cpp` (`parse_models`, `models_txt`,
+`models_refusal`, `session_enabled_mods`), `librecomp/src/conversion.cpp` (`active_conversion_models_dir`,
+`active_conversion_models_txt`), `librecomp/src/recomp.cpp` (the refusal at the mod scan),
+`AkiLauncher/src/packages.cpp` (`conversion_models`), `AkiLauncher/src/modelpacks.cpp` (`load_roster_file`),
 `mods/modelimport/src/core.c` (packs and `models.txt`).
 
 ## codes.txt (aki-codes)
@@ -360,8 +462,9 @@ file), `mods/cheats/README.md` ("Codes files"),
 ## Textures and naming
 
 A texture pack is a folder of images with an `rt64.json` at its root; that file is what makes the game open the
-folder as a texture pack. Ship it as its own package (`kind: texture-pack`), which the launcher installs as
-`mods\<id>.rtz`.
+folder as a texture pack. For a conversion, ship it as a shared texture package or as a folder inside the conversion
+(see [textures](#textures)). A pack for players to add to any game ships as its own package (`kind: texture-pack`),
+which the launcher installs as `mods\<id>.rtz`.
 
 ```json
 { "configuration": { "autoPath": "rice", "configurationVersion": 3, "hashVersion": 5 }, "textures": [] }
@@ -470,14 +573,35 @@ Source of truth: `tools/romhack/catalog.json` (`tiers`), `tools/romhack/aki_impo
 
 A bare ROM-hack patch mod (`.nrm` with `patch.bps`) dropped on the launcher is wrapped into a conversion for you.
 
+That is the `aki-package.json` installer. A zip or folder with only an `aki.json` takes the simpler path described
+in [The package around it](#the-package-around-it); that path also seeds the conversion's saves.
+
 **Running:** pick the conversion in **Play as...** on the home page. The launcher starts the game with the
-environment variable `AKI_CONVERSION=<id>` (the folder name) for that start only. The game then loads
-`conversions\<id>\aki.json`, applies `patch.nrm` to the player's ROM, runs `codes.txt` through the cheats engine,
-seeds saves into `saves\<id>\`, and loads the conversion's textures and models. The launcher warns, but still
-starts, when the ROM doesn't match.
+environment variable `AKI_CONVERSION=<id>` (the folder name), plus `WCW_RT_LIGHTS_FILE` / `WCW_RT_MATERIALS_FILE`
+when the conversion has [RT files](#rt-lights-and-materials), for that start only. The game then loads
+`conversions\<id>\aki.json` and:
+
+- opens the mods in the conversion folder (`patch.nrm`, applied to the player's ROM, and any `.rtz`), its shared
+  texture package from `conversions\_packages\` and its `textures` `dir`;
+- turns off the player's other mods, except those `addons` allows;
+- runs `codes.txt`: the game runs a file tagged with the port's own revision itself, and hands any other revision to
+  the cheats mod;
+- serves the conversion's models (see [models](#models));
+- keeps its saves in `saves\<id>\`.
+
+It logs one `[conversion] running <id> ("<name>"): patch codes ...; saves in saves/<id>` line. The launcher warns,
+but still starts, when the ROM doesn't match.
+
+A conversion the game can't run (its `aki.json` is missing or not a valid v1 manifest, the id doesn't match the folder,
+it has no usable components, or a path leaves the folder) **stops the game** with a message when the launcher asked
+for it, so its saves and mods never mix with the player's own. The game's own Mods menu can also pick a conversion for
+the next starts (`conversions\active.txt`); one picked that way that can't run is dropped and the game starts normally.
+`AKI_CONVERSION` wins over `active.txt`, and only the launcher passes the RT files.
 
 Source of truth: `AkiLauncher/src/packages.cpp` (`install_package`, `install_patch_mod`), `AkiLauncher/src/launch.cpp`
-(`AKI_CONVERSION`), `mods/cheats/README.md` ("Codes files").
+(`GameSession::launch`), `AkiLauncher/src/conversions.cpp` (`conversion_env`), N64ModernRuntime
+`librecomp/src/conversion.cpp` (`decide_session`, `load_active_conversion`, `active_native_codes_ready`),
+`librecomp/src/recomp.cpp` (the mod scan), `mods/cheats/README.md` ("Codes files").
 
 ## Testing a conversion
 
@@ -487,10 +611,15 @@ Source of truth: `AkiLauncher/src/packages.cpp` (`install_package`, `install_pat
    without building, and `build ... --out Converted` makes the package.
 2. **Install it** with the launcher. An install error names the field that is wrong.
 3. **Play it.** Pick it in Play as..., start a match, and check the game's log:
-   - `[conversion] codes: N active, ...` (from the cheats mod, for a translated Rev 0 list; malformed or dropped
-     codes are counted here),
+   - `[conversion] running <id> ...`, listing the components the game found,
+   - `[conversion] codes: N active (native table: ...)` (the game's own, for codes in the port's revision) or
+     `[conversion] codes: N active, ...` (from the cheats mod, for a translated Rev 0 list); malformed or dropped
+     codes are counted here,
    - `[romhack] ...` lines (functions the patch changed),
-   - one line if the models were turned off, and why.
+   - `[conversion] model slot: ...` per slot, or `[conversion] models refused: ...` if the models were turned off,
+     and why,
+   - `[conversion] texture package ... isn't installed` or `texture folder ... is missing` if the textures weren't
+     found.
 4. **Check the saves** appear in `saves\<id>\` and that your stock saves are untouched.
 5. **Try it without the optional parts** (textures off) if you marked them optional.
 
@@ -498,27 +627,29 @@ Source of truth: `AkiLauncher/src/packages.cpp` (`install_package`, `install_pat
 
 Where these disagree, the code (listed first) wins.
 
-1. **Package shape.** `aki_conv.py` describes and writes Thunderstore-shaped zips (`manifest.json` at the root);
-   the launcher installs only `aki-package.json` packages, and `aki_import.py build` converts the first into the
-   second.
-2. **Shared texture packages.** The design note puts shared packages in `conversions\_packages\`; the launcher
-   only reserves that name (it skips `_` folders) and today installs texture packs as `mods\<id>.rtz`.
-3. **`textures.sha256`.** Written by `import-pj64`, dropped by `aki_import.py build`; nothing in the launcher checks
-   it.
-4. **`base_rom` placement.** The launcher requires `base_rom` in `aki-package.json` to install, but reads it from
-   `aki.json` for the Mods page and Play as...; with none in `aki.json`, every ROM shows as a match.
+1. **Two install paths.** The `aki-package.json` installer checks the patch's `mod_id` and records installs in
+   `packages.json`, but doesn't seed saves. The path for packages with only an `aki.json` seeds saves and installs
+   shared texture packages, but doesn't check `mod_id` or record the install. `aki_import.py build` makes the
+   first kind and `aki_conv.py` the second.
+2. **`textures.version` and `textures.optional`** are recorded only; nothing reads them.
+3. **`textures.sha256`.** Written by `import-pj64`, dropped by `aki_import.py build`. The launcher only notes a
+   mismatch, and only for a package installed from a zip (a folder gets no `.package.sha256`).
+4. **`base_rom` placement.** The `aki-package.json` installer requires `base_rom` in `aki-package.json`, but the
+   launcher reads it from `aki.json` for the Mods page, Play as... and the other install path; with none in
+   `aki.json`, every ROM shows as a match.
 5. **`patch.mod_id` default.** `import-pj64` defaults it to `<id>_patch`, `bake-codes` to `<id>`, `pack-nrm` to the
-   `.nrm`'s own id; the launcher requires it to equal the conversion id, and `aki_import.py build` rewrites it so.
+   `.nrm`'s own id; the `aki-package.json` installer requires it to equal the conversion id, and
+   `aki_import.py build` rewrites it so.
 6. **`# default: on/off`** in codes.txt is ignored by the engine; every code runs.
-7. **`mods/cheats/README.md`** calls the manifest `conversion.json` (it is `aki.json`) and says only No Mercy
-   builds the conversion codes host; `mods/cheats/mod.psd1` now enables it for all six games.
-8. **`format` / `format_version`** are not checked by the launcher.
-9. **RT lights and materials.** Planned as a `components.rt` entry; no code reads one yet.
-10. **`models`** is read by the game runtime, not by anything in this repository; this guide follows its design.
-11. **`pack-nrm --tier`** accepts any string for `survey.tier`.
-12. **`requires.packages`** in `aki-package.json` is parsed by the launcher but not checked or installed.
-13. **Conversion `models.roster`** (`format` 1, `costumes` as a count) differs from the launcher's model-picker
-    roster files (`schema` 1, `costumes` as a list).
-14. **What the game does at start** (seeding saves, loading the conversion's textures and models) happens in the
-    game runtime, which isn't in this repository. The steps in [Running](#how-the-launcher-installs-and-runs-a-conversion)
-    follow its design; only the codes path (`mods/cheats`) and the save layout (`aki_save.py`) are checked here.
+7. **`saves[].kind` / `saves[].mode`** are written by the tools but not read by the launcher.
+8. **RT files** reach the game only through the launcher's `WCW_RT_*` variables; a conversion chosen in the
+   game's own Mods menu runs with the stock lights and materials.
+9. **`pack-nrm --tier`** accepts any string for `survey.tier`.
+10. **`requires.packages`** in `aki-package.json` is parsed by the launcher but not checked or installed.
+11. **`models.roster`** has no reader yet: the game only checks its path. The shape above is the one the
+    launcher's roster reader takes, the only roster reader in the code.
+12. **The model host and the RT renderer** that read `active_conversion_models_dir` / `active_conversion_models_txt`
+    and `WCW_RT_*` live in the game repositories, which this guide wasn't checked against; what they are given is
+    checked (N64ModernRuntime, AkiLauncher).
+13. **The models line on the Mods page** checks `format` and the patch's `relink.json` but not the slots, so a bad
+    slot shows "Custom models" there while the game runs without them.
