@@ -787,6 +787,24 @@ def similar_game(rom, roms, threshold=0.3):
     return best[1]
 
 
+# The ports' header names (0x20), for a hack with its own game code that kept the title (aki-roadmap#268: No Mercy
+# Plus V3 Open Beta (ED) is 'NX4E' "WWF No Mercy + V3-B5", relinked too far for similar_game). The VPW titles are
+# Japanese, so those two aren't matched by name.
+HEADER_TITLES = {'wt': 'WCWvs.NWO:World Tour', 'revenge': 'WCW / nWo  REVENGE', 'wm2k': 'WRESTLEMANIA 2000',
+                 'nomercy': 'WWF No Mercy'}
+
+
+def game_by_title(*names):
+    """The one port whose header title is inside the first of names that holds one (letters and digits only,
+    any case), else None: the hack's header name first, then its file name."""
+    for n in names:
+        squashed = re.sub(r'[^a-z0-9]+', '', (n or '').lower())
+        hits = [g for g, t in HEADER_TITLES.items() if re.sub(r'[^a-z0-9]+', '', t.lower()) in squashed]
+        if len(hits) == 1:
+            return hits[0]
+    return None
+
+
 def classify_rom(rom, order, res, roms, catalog, base_game=None):
     """Fill res for a ROM image (z64 bytes). base_game: the game of the stock ROM a patch made it from."""
     sha1 = hashlib.sha1(rom).hexdigest().upper()
@@ -810,7 +828,7 @@ def classify_rom(rom, order, res, roms, catalog, base_game=None):
             region, GAMES[game]['title'], GAMES[game]['code'][-1] == 'E' and 'USA' or 'Japanese'))
     if not game:
         # A hack may rename its header (Freem: "NVFE"): the base a patch applied to, or the code, says the game.
-        game = base_game or similar_game(rom, roms)
+        game = base_game or similar_game(rom, roms) or game_by_title(hdr['name'], display_name(res.get('item', '')))
         if not game:
             return res.update(status='unsupported', why='header %r (%s) is not one of the six AKI games' % (
                 hdr['code'], hdr['name']))

@@ -140,6 +140,17 @@ class Roms(Base):
         self.assertEqual(r['status'], 'unsupported')
         self.assertIn('not one of the six', r['why'])
 
+    def test_renamed_code_with_a_port_title_goes_to_that_game(self):
+        # aki-roadmap#268: No Mercy Plus V3 Open Beta (ED) is 'NX4E' "WWF No Mercy + V3-B5", relinked so far that
+        # its code shares almost no words with the port's: the title says the game. Untested, never refused.
+        r = self.one([self.write('in/ed.z64', fake_rom(code='NX4E', title='WWF No Mercy + V3-B5', salt=5))])
+        self.assertEqual((r['status'], r['game'], r['tier']), ('ready', 'nomercy', 'untested'))
+        self.assertIn('NX4E', r['header_note'])
+        r = self.one([self.write('in/WWF No Mercy (ED).z64', fake_rom(code='NX4E', title='ED', salt=5))])
+        self.assertEqual((r['status'], r['game']), ('ready', 'nomercy'))      # the file name says it
+        r = self.one([self.write('in/War Zone.z64', fake_rom(code='NWWE', title='WWF WAR ZONE', salt=5))])
+        self.assertEqual(r['status'], 'unsupported')
+
     def test_other_stock_revision_is_stock(self):
         r = self.one([self.write('in/nm10.z64', REV0)])
         self.assertEqual(r['status'], 'stock')
