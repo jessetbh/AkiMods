@@ -1,7 +1,7 @@
 {
  "format": "aki-import-catalog",
  "version": 1,
- "about": "Conversions the AKI team tested (aki-roadmap#172, #228): hashes and notes only, no ROM or hack data. inputs.sha1: the hack ROM (.z64 order) a player imports; outputs.sha1: the ROM the tested package's patch makes from the port ROM; outputs.codes_sha1: its codes.txt; outputs.content_sha1: its saves and texture images, for packs with no patch or codes (the entry then also names the built conversion). A player-built package gets the tier only when its output matches; otherwise it is Untested.",
+ "about": "Conversions the AKI team tested (aki-roadmap#172, #228): hashes and notes only, no ROM or hack data. inputs.sha1: the hack ROM (.z64 order) a player imports, or its patch file (a patch whose base ROM is missing then names its game); outputs.sha1: the ROM the tested package's patch makes from the port ROM; outputs.codes_sha1: its codes.txt; outputs.content_sha1: its saves and texture images, for packs with no patch or codes (the entry then also names the built conversion). A player-built package gets the tier only when its output matches; otherwise it is Untested.",
  "tiers": {
   "verified": "Verified: plays through a match like the original on an emulator.",
   "experimental": "Experimental: runs, with known problems.",
@@ -720,7 +720,8 @@
    "note": "Singles matches were checked; tag, the other modes and a finished match were not.",
    "inputs": {
     "sha1": [
-     "AA8EFEDE5A93CBD943B34FC2A46FE780A1E54825"
+     "AA8EFEDE5A93CBD943B34FC2A46FE780A1E54825",
+     "2CA4E54E452C4C8C67A352F638E866562B75479D"
     ]
    },
    "outputs": {
