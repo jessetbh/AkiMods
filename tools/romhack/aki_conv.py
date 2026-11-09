@@ -748,7 +748,7 @@ def cmd_import_pj64(a):
             else:
                 nrm, how = build_patch_nrm(a, hack, cid, name)
                 # Only derelink writes a watch list; never pick up another codes.txt in --out.
-                summary['watch_codes'] = add_watch_codes(a, aki, pkg_files) if how == 'derelink' else 0
+                summary['watch_codes'] = add_watch_codes(a, aki, pkg_files, summary) if how == 'derelink' else 0
                 summary['built_with'] = how
                 pkg_files['patch.nrm'] = nrm
                 aki['components']['patch'] = {'file': 'patch.nrm', 'mod_id': getattr(a, 'patch_mod_id', None) or cid + '_patch'}
@@ -773,7 +773,7 @@ def cmd_import_pj64(a):
             if summary['base'] != port and not a.derelink:
                 sys.exit('the patch is for %s and the port runs %s: pass --derelink' % (summary['base'], port))
             nrm, summary['built_with'] = build_patch_nrm(a, target, cid, name)
-            summary['watch_codes'] = add_watch_codes(a, aki, pkg_files) if summary['built_with'] == 'derelink' else 0
+            summary['watch_codes'] = add_watch_codes(a, aki, pkg_files, summary) if summary['built_with'] == 'derelink' else 0
             pkg_files['patch.nrm'] = nrm
             aki['components']['patch'] = {'file': 'patch.nrm', 'mod_id': getattr(a, 'patch_mod_id', None) or cid + '_patch'}
         else:
@@ -894,17 +894,26 @@ def to_z64(rom):
     return None
 
 
-def add_watch_codes(a, aki, pkg_files):
+def add_watch_codes(a, aki, pkg_files, summary=None):
     """derelink writes a codes.txt next to the patch that watches the code the hack rewrites itself (aki-roadmap#191);
-    the pack needs it as part of its codes. Appended to the pack's codes (or made its codes). Returns the line count."""
+    the pack needs it as part of its codes. Appended to the pack's codes (or made its codes). Returns the line count.
+    The watch list is at the port's addresses: it joins only codes tagged with the port's revision. Codes for another
+    revision (left untranslated: no --map) keep that tag, and the watch codes stay out, with a note in summary."""
     path = os.path.join(a.out, 'codes.txt')
     if not os.path.isfile(path):
         return 0
     watch = open(path, encoding='utf8').read()
     os.remove(path)  # one build's watch list never carries into the next
+    port = PORT_TAG.get(a.game, a.game)
+    codes = aki['components'].get('codes')
+    if codes is not None and codes.get('rom') != port:
+        if summary is not None:
+            summary['watch_codes_note'] = ("not added: the pack's codes are for %s and the watch list is for the port "
+                                           '(%s); translate the codes (--map) and import again' % (codes.get('rom'), port))
+        return 0
     old = pkg_files.get('codes.txt', b'').decode()
     pkg_files['codes.txt'] = (old.rstrip('\n') + '\n\n' + watch if old else watch).encode()
-    aki['components'].setdefault('codes', {'file': 'codes.txt', 'format': 'aki-codes', 'rom': PORT_TAG.get(a.game, a.game)})
+    aki['components'].setdefault('codes', {'file': 'codes.txt', 'format': 'aki-codes', 'rom': port})
     return sum(1 for l in watch.splitlines() if l.strip() and not l.startswith(('#', '[')))
 
 

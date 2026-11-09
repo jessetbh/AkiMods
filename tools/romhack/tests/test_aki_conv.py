@@ -347,6 +347,35 @@ class Rup(unittest.TestCase):
             self.assertEqual(aki['components']['codes']['rom'], 'nomercy-rev1')
             self.assertEqual(aki_conv.add_watch_codes(a, aki, pkg), 0)
 
+    def test_watch_codes_stay_out_of_codes_for_another_revision(self):
+        # The watch list is at the port's (Rev 1) addresses; joined to untranslated Rev 0 codes it would be tagged Rev 0,
+        # and translating the pack later would move it off the code it watches.
+        import tempfile, types
+        with tempfile.TemporaryDirectory() as d:
+            a = types.SimpleNamespace(out=d, game='nomercy')
+            watch = '[Conversion\\Hack code writes]\nD1000400 3C09\n'
+            with open(os.path.join(d, 'codes.txt'), 'w') as f:
+                f.write(watch)
+            rev0 = '# rom: nomercy-rev0\n[Mod\\A]\n8109940A FFFF\n'
+            aki = {'components': {'codes': {'file': 'codes.txt', 'format': 'aki-codes', 'rom': 'nomercy-rev0'}}}
+            pkg = {'codes.txt': rev0.encode()}
+            self.assertEqual(aki_conv.add_watch_codes(a, aki, pkg), 0)
+            self.assertEqual(pkg['codes.txt'].decode(), rev0)
+            self.assertEqual(aki['components']['codes']['rom'], 'nomercy-rev0')
+            self.assertFalse(os.path.exists(os.path.join(d, 'codes.txt')))  # still never carried into the next build
+            # import-pj64 passes its report part, which says why the watch codes are missing.
+            with open(os.path.join(d, 'codes.txt'), 'w') as f:
+                f.write(watch)
+            summary = {}
+            self.assertEqual(aki_conv.add_watch_codes(a, aki, pkg, summary), 0)
+            self.assertIn('nomercy-rev0', summary['watch_codes_note'])
+            # Codes already at the port's revision (translated with --map) take it.
+            with open(os.path.join(d, 'codes.txt'), 'w') as f:
+                f.write(watch)
+            aki['components']['codes']['rom'] = 'nomercy-rev1'
+            self.assertEqual(aki_conv.add_watch_codes(a, aki, pkg, {}), 1)
+            self.assertEqual(pkg['codes.txt'].decode(), rev0 + '\n' + watch)
+
     def test_stock_rom_is_not_a_hack(self):
         # Showdown 64 ships the unpatched Rev 0 cartridge beside its .rup: the import took it as the hack (aki-roadmap#207).
         import hashlib
