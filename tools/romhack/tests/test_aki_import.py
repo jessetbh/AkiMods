@@ -396,7 +396,11 @@ class Hostile(Base):
         except (OSError, NotImplementedError):
             self.skipTest('no symlink privilege')
         items, _ = self.run_job([target])
-        self.assertEqual([i['status'] for i in items], ['ready'])
+        # The ROM once (the loop isn't walked) and the link as its own item, saying to pick what it points to.
+        # (Creating a symlink needs a privilege most accounts lack, so elsewhere this test skips.)
+        self.assertEqual(sorted((os.path.basename(i['item']), i['status']) for i in items),
+                         [('a.z64', 'ready'), ('loop', 'unsupported')])
+        self.assertIn('link', [i for i in items if i['status'] == 'unsupported'][0]['why'])
 
     def test_bytes_are_released_after_each_item(self):
         srcs = []

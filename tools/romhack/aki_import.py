@@ -922,6 +922,15 @@ GAME_IDS = {'wt': 'wcwnwoworldtour', 'revenge': 'wcwnworevenge', 'wm2k': 'wwfwm2
             'nomercy': 'wwfnomercy', 'vpw2': 'vpw2'}
 PORT_TAGS = {'nomercy': 'nomercy-rev1', 'wt': 'wt-rev0', 'revenge': 'revenge-rev0', 'wm2k': 'wm2k-rev0',
              'vpw64': 'vpw64-rev0', 'vpw2': 'vpw2-rev0'}
+# Codes for another revision than the port's are translated through that revision's derelink map: a shipped one
+# (maps/<tag>.json next to this file: address ranges only, no ROM bytes), else one made with derelink map from a stock
+# dump of that revision (the player's, or one in the bundle; OTHER_DUMPS names it).
+REVISION_DUMPS = {'nomercy-rev0': 'WWF No Mercy (USA) 1.0'}
+MAPS_DIR = os.path.join(TOOLS, 'maps')
+# --map-range overrides per revision, as the hand-made packs were translated (AkiTools README, aki-roadmap#205): No
+# Mercy Rev 0 lists' high RAM (their code caves) moves -0x1000; at the map's own shift there Legends crashed. A catalog
+# entry's "map_range" (a list, [] for none) wins.
+REVISION_MAP_RANGES = {'nomercy-rev0': ['200800,400000,-1000']}
 # aki-hack survey tiers -> converter. patch-* run in place (make_patch_mod); moved or reshaped code goes to derelink.
 IN_PLACE_TIERS = ('patch-data', 'patch-code')
 DERELINK_TIERS = ('rev0-layout', 'relinked', 'restructured')
@@ -930,6 +939,11 @@ UNTESTED = 'untested'      # the fourth tier (#224, #172): built, not tested by 
 MAX_EXTRACT = 4 << 30      # a zipped bundle unpacked for import-pj64 may take at most this much disk
 TEXTURE_EXTS = ('.png', '.dds')
 PACKAGE_ID = re.compile(r'^[a-z0-9_.-]{1,48}$')
+
+
+def revision_label(tag):
+    """'nomercy-rev0' -> 'Rev 0'."""
+    return 'Rev %s' % tag.rsplit('-rev', 1)[1] if '-rev' in tag else tag
 
 
 class BuildError(Exception):
@@ -1027,6 +1041,7 @@ class Builder:
         self.game_hint = job.get('game')
         self._mods = {}
         self._tables = {}
+        self._maps = {}                             # (game, revision tag) -> revision_map's answer
 
     def cleanup(self):
         """The batch's build temp folder (a byte-swapped port ROM's .z64 copy among others) goes at the end."""
@@ -1452,6 +1467,123 @@ class Builder:
         raise NeedsGame('which game this Project64 bundle is for (%s; pass "game")' % (
             'its cheats name ' + ', '.join(sorted(found)) if found else 'no cheats or ROM in it name a game'))
 
+    def bundle_code_tag(self, folder, conv, game, name, include):
+        """The revision tag of the cheat section import-pj64 will take (the first, in its order, with the mod's
+        cheats: e.g. 'nomercy-rev0'), or None. A bundle's other sections (a full Project64.cht) don't count."""
+        for d, _, fs in os.walk(folder):
+            for f in fs:
+                p = os.path.join(d, f)
+                if f.lower().endswith(('.cht', '.ini')) and 0 < os.path.getsize(p) < (8 << 20):
+                    with open(p, encoding='latin-1') as fh:
+                        for key, sec in conv.parse_cht(fh.read()).items():
+                            tag = conv.CHT_SECTIONS.get(key)
+                            if tag is None and key.upper() == conv.stock_cht_key(game):
+                                tag = PORT_TAGS[game]
+                            if tag is None or conv.GAME_OF_TAG.get(tag, tag.split('-rev')[0]) != game:
+                                continue
+                            if conv.mod_cheats(sec, name, include):
+                                return tag
+        return None
+
+    def bundle_dump(self, folder, game, dump):
+        """A stock dump named `dump` inside the bundle (Showdown 64 ships its unpatched cartridge), .z64 bytes, or None."""
+        for d, _, fs in os.walk(folder):
+            for f in sorted(fs):
+                p = os.path.join(d, f)
+                if not f.lower().endswith(ROM_EXTS) or not 0x1000 <= os.path.getsize(p) <= MAX_ITEM:
+                    continue
+                if to_z64(file_head(p, 0x40))[0] is None:
+                    continue
+                rom, _ = to_z64(read_file(p))
+                if rom is None:
+                    continue
+                known = OTHER_DUMPS_CRC32.get('%08X' % zipcrc(rom)) or OTHER_DUMPS_MD5.get(hashlib.md5(rom).hexdigest())
+                if known == (game, dump):
+                    return rom
+        return None
+
+    def revision_map(self, game, tag, folder, port_path):
+        """(map path, where it came from, None) for translating `tag` codes to the port's revision, or
+        (None, None, why not). A map made here is kept for the batch (it is address ranges only)."""
+        key = (game, tag)
+        if key in self._maps:
+            return self._maps[key]
+        if not port_path:
+            return None, None, 'needs the %s ROM the port uses' % GAMES[game]['title']
+        shipped = os.path.join(MAPS_DIR, tag + '.json')
+        if os.path.isfile(shipped):
+            self._maps[key] = (shipped, 'maps/%s.json' % tag, None)
+            return self._maps[key]
+        dump = REVISION_DUMPS.get(tag)
+        if dump is None:
+            return None, None, 'no revision map for %s' % tag
+        rom = next((r for g, n, r in self.roms.others if g == game and n == dump), None)
+        where = 'your %s ROM' % dump
+        if rom is None:
+            rom = self.bundle_dump(folder, game, dump)
+            where = "the bundle's %s ROM" % dump
+        if rom is None:
+            return None, None, ('needs a stock %s ROM to make the %s -> %s map (put it with your ROMs and import again)'
+                                % (dump, revision_label(tag), revision_label(PORT_TAGS[game])))
+        dl = self.mod('derelink')
+        hack_path = self.tmp('revision-%s.z64' % tag)
+        map_path = self.tmp('map-%s.json' % tag)
+        try:
+            with open(hack_path, 'wb') as f:
+                f.write(rom)
+            ok, log = run_main(dl, ['map', '--base', port_path, '--hack', hack_path, '--out', map_path])
+        except Exception as e:      # a map that can't be made leaves the codes off, never fails the bundle
+            ok, log = False, '%s: %s' % (type(e).__name__, e)
+        finally:
+            if os.path.exists(hack_path):
+                os.remove(hack_path)    # the stock ROM never stays on disk
+        if not ok or not os.path.isfile(map_path):
+            got = (None, None, 'derelink map: %s' % ((log.strip().splitlines() or ['failed'])[-1]))
+        else:
+            got = (map_path, 'derelink map from %s' % where, None)
+        self._maps[key] = got
+        return got
+
+    def codes_outcome(self, res, game, parts, map_from, map_why):
+        """What happened to the bundle's codes, for the results JSON: res['codes'] (one line) and
+        res['codes_translation'] (the numbers) when they were for another revision; the watch codes' count or note."""
+        codes = parts.get('codes')
+        port = PORT_TAGS[game]
+        if codes:
+            tr = parts.get('codes_translated')
+            if tr:
+                values = tr.get('values') or {}
+                line = 'codes translated from %s (%d of %d lines; %d dropped)' % (
+                    revision_label(tr['from']), tr['codes'], tr['lines'], tr['dropped_lines'])
+                if 'off' in values:
+                    line += '; values inside the code they write not translated (%s)' % values['off']
+                else:
+                    line += '; %d values inside the code they write translated' % values.get('values_changed', 0)
+                    left = len(values.get('unmapped', [])) + len(values.get('lui_conflicts', [])) + \
+                        len(values.get('stepped_bases', []))
+                    if left:
+                        line += ', %d left as they were' % left
+                res['codes'] = line
+                res['codes_translation'] = {
+                    'from': tr['from'], 'to': port, 'translated': True, 'map': map_from,
+                    'map_ranges': tr.get('map_ranges', []), 'lines': tr['lines'], 'translated_lines': tr['codes'],
+                    'dropped_lines': tr['dropped_lines'], 'units_split_by_overlay': tr.get('units_split_by_overlay', 0),
+                    'overlay_guards': tr.get('overlay_guards'),
+                    'values': ({'off': values['off']} if 'off' in values else
+                               {k: (len(values[k]) if isinstance(values.get(k), list) else values.get(k, 0))
+                                for k in ('values_changed', 'unmapped', 'lui_conflicts', 'stepped_bases')})}
+            elif codes.get('rom') != port:
+                why = map_why or 'no revision map'
+                res['codes'] = 'codes for %s not translated: %s; they stay off' % (revision_label(codes['rom']), why)
+                res['codes_translation'] = {'from': codes['rom'], 'to': port, 'translated': False, 'why': why}
+            else:
+                res['codes'] = "codes for the port's revision (%d lines)" % codes.get('lines', 0)
+        patch = parts.get('patch') or {}
+        if 'watch_codes' in patch:
+            res['watch_codes'] = patch['watch_codes']
+        if patch.get('watch_codes_note'):
+            res['watch_codes_note'] = patch['watch_codes_note']
+
     def build_bundle(self, src, res):
         conv = self.mod('aki_conv')
         folder, unpacked = self.bundle_folder(src)
@@ -1465,11 +1597,27 @@ class Builder:
             out = self.tmp('pj64-%s' % cid)
             shutil.rmtree(out, ignore_errors=True)
             os.makedirs(out)
+            # Codes for another revision than the port's (No Mercy Rev 0) are translated through that revision's map.
+            cheat_name = entry.get('cheat_name') or name
+            tag = self.bundle_code_tag(folder, conv, game, cheat_name, entry.get('include'))
+            map_path = map_from = map_why = None
+            map_range = []
+            if tag and tag != PORT_TAGS[game]:
+                map_range = entry.get('map_range', REVISION_MAP_RANGES.get(tag, []))
+                try:
+                    if not isinstance(map_range, list) or not all(isinstance(r, str) for r in map_range):
+                        raise ValueError('not a list of "LO,HI,DELTA" strings')
+                    conv.parse_map_ranges(map_range)
+                except ValueError as e:
+                    map_why = "the catalog's map_range %r: %s" % (map_range, e)
+                else:
+                    map_path, map_from, map_why = self.revision_map(game, tag, folder, port_path)
             a = argparse.Namespace(
-                folder=folder, game=game, id=cid, name=entry.get('cheat_name') or name, team='aki-import',
+                folder=folder, game=game, id=cid, name=cheat_name, team='aki-import',
                 version=self.version, author=list(self.authors), description=entry.get('description', ''),
                 credits=entry.get('credits', ''), permission=entry.get('permission', ''), url=entry.get('url', ''),
-                include=entry.get('include'), all_cheats=bool(entry.get('all_cheats')), map=None, textures=None,
+                include=entry.get('include'), all_cheats=bool(entry.get('all_cheats')), map=map_path,
+                map_range=list(map_range) if map_path else [], textures=None,
                 base_rom=None, port_rom=port_path, derelink=conv.DERELINK, bake_exclude=list(entry.get('bake_exclude', [])),
                 out=out, patch_mod_id=cid)
             ok, log = run_main(types.SimpleNamespace(main=lambda argv: conv.cmd_import_pj64(a)), [])
@@ -1482,6 +1630,7 @@ class Builder:
             at = log.rfind('\n{\n')
             report = json.loads(log[at + 1:] if at >= 0 else log[log.index('{'):]) if '{' in log else {}
             res.update(game=game, converter='import-pj64', parts=sorted(report.get('parts', {})))
+            self.codes_outcome(res, game, report.get('parts', {}), map_from, map_why)
             self.repack_pj64(res, game, cid, name, out, report)
         finally:
             if unpacked:

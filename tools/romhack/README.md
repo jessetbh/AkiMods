@@ -121,6 +121,17 @@ with `package`, `converter` and `aki_tier`:
 - `make_patch_mod` needs function tables to tell in-place hacks apart. Developers pass `--repo
   GAME=<game repo>` (its `RecompiledFuncs`); without tables the survey can't tell, and derelink
   (which has a layout for all six games) builds the hack.
+- **Codes for another revision** (a No Mercy bundle's Rev 0 cheats; the port runs Rev 1) are
+  translated the way the hand-made packs were: `import-pj64 --map` with the Rev 0 derelink map
+  and `--map-range 200800,400000,-1000` (a catalog entry's `map_range` list overrides it), which
+  also runs `translate-code-values` when a derelink layout matches the port's ROM. Then derelink's
+  watch codes join them. The map is `maps\nomercy-rev0.json` here when it ships (address ranges
+  only, no ROM bytes), else made once per batch with `derelink.py map` from a stock No Mercy (USA)
+  1.0 ROM: the player's (`--rom-dir`, or among the inputs) or one inside the bundle. Without one,
+  the codes keep their Rev 0 tag and stay off. Each item says what happened in `codes` (for example
+  `codes translated from Rev 0 (41 of 44 lines; 3 dropped); 12 values inside the code they write
+  translated`, or `codes for Rev 0 not translated: needs a stock ... ROM ...; they stay off`), with
+  the numbers in `codes_translation`, and `watch_codes` / `watch_codes_note` when a patch was built.
 - The tools run in the one worker process; a hacked ROM is on disk only while derelink reads it.
 - `.nrm` mods and existing packages stay `ready` (`route: install`): the launcher installs them as
   they are.

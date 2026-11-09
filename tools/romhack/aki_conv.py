@@ -594,12 +594,22 @@ def cmd_import_pj64(a):
             text = codes_txt(cheats, tag, name)
             port = PORT_TAG.get(a.game, a.game)
             if tag != port and a.map:
-                ranges = load_map(a.map)
+                # --map-range goes ahead of the map for the addresses and the values alike, so the two agree.
+                overrides = parse_map_ranges(getattr(a, 'map_range', None) or [])
+                ranges = overrides + load_map(a.map)
                 overlays, guard, guard_note = overlay_guard_setup(a)
                 text, done, bad = translate_codes(text, ranges, overlays, guard)
-                report['parts']['codes_translated'] = {'codes': done, 'dropped_lines': len(bad),
+                report['parts']['codes_translated'] = {'from': tag, 'codes': done, 'lines': done + len(bad),
+                                                       'dropped_lines': len(bad),
                                                        'units_split_by_overlay': translate_codes.last['units_split'],
-                                                       'overlay_guards': guard_note}
+                                                       'overlay_guards': guard_note,
+                                                       'map_ranges': list(getattr(a, 'map_range', None) or [])}
+                # The addresses inside the code the list writes (hooks, lui/low pairs) follow too (aki-roadmap#205).
+                try:
+                    text, values = translate_values_in(text, a, overrides)
+                except Exception as e:  # a list the value pass can't read keeps its values; the addresses stand
+                    values = {'off': '%s: %s' % (type(e).__name__, e)}
+                report['parts']['codes_translated']['values'] = values
                 # Every code left is at the port's addresses now: tag it so, or the engine would translate it again.
                 text = text.replace('# rom: %s' % tag, '# rom: %s\n# translated from %s by aki-conv (revision map)' % (port, tag), 1)
                 tag = port
@@ -1198,6 +1208,44 @@ def overlay_guard_setup(a):
     return overlay_ranges(m), overlay_guard(layout, port_rom), 'on (layout %s)' % layout.get('game', '?')
 
 
+def parse_map_ranges(specs):
+    """--map-range LO,HI,DELTA strings (hex RDRAM offsets, DELTA may start with -) -> [(lo, hi, delta)]."""
+    out = []
+    for r in specs:
+        parts = [x.strip() for x in r.split(',')]
+        if len(parts) != 3:
+            raise ValueError('--map-range %r is not LO,HI,DELTA' % r)
+        out.append(tuple(-int(x[1:], 16) if x.startswith('-') else int(x, 16) for x in parts))
+    return out
+
+
+def translate_values_in(text, a, overrides=()):
+    """(text, report) after translate-code-values on a list whose addresses are already translated: the map is
+    a.map (a derelink map), the layout found for a.port_rom. When that can't run, the text comes back unchanged and
+    the report says why ({'off': reason})."""
+    with open(a.map) as f:
+        m = json.load(f)
+    if 'main' not in m:
+        return text, {'off': 'the map is not a derelink map'}
+    if not (getattr(a, 'derelink', None) and getattr(a, 'port_rom', None)):
+        return text, {'off': 'needs --derelink and --port-rom'}
+    with open(a.port_rom, 'rb') as f:
+        port_rom = f.read()
+    layout = find_layout(a.derelink, port_rom)
+    if layout is None:
+        return text, {'off': 'no derelink layout matches the port ROM'}
+    if aki_conv_values.HEADER in text:
+        return text, {'off': 'already translated'}
+    new, report = aki_conv_values.translate_values(
+        text, aki_conv_values.Mapper(list(overrides) + map_from_derelink(m), overlay_ranges(m)),
+        aki_conv_values.Layout(layout, port_rom))
+    new, tagged = re.subn(r'(?m)^(# rom: *\S+)(\r?)$', lambda g: g.group(1) + g.group(2) + '\n' + aki_conv_values.HEADER
+                          + g.group(2), new, count=1)
+    if not tagged:
+        new = aki_conv_values.HEADER + '\n' + new
+    return new, report
+
+
 def load_map(path):
     """A revision map: ours ({"ranges": [{"start", "end", "delta"}]}, hex strings) or Track A's derelink map.json."""
     m = json.load(open(path))
@@ -1222,7 +1270,7 @@ def cmd_translate_values(a):
         text, n = aki_conv_values.move_writes(text, lo, hi, delta)
         moved += n
     # First match wins, so a --map-range goes ahead of the map.
-    ranges = [tuple(int(x, 16) if not x.startswith('-') else -int(x[1:], 16) for x in r.split(',')) for r in a.map_range]
+    ranges = parse_map_ranges(a.map_range)
     new, report = aki_conv_values.translate_values(text, aki_conv_values.Mapper(ranges + map_from_derelink(m), overlay_ranges(m)),
                                                    aki_conv_values.Layout(layout, port_rom))
     report['writes_moved'] = moved
@@ -1271,7 +1319,11 @@ def main():
     p.add_argument('--all-cheats', action='store_true',
                    help='import every cheat of the mod, not only those its Project64.cfg has ticked')
     p.add_argument('--map', help='revision map JSON to translate the codes: Track A\'s derelink map (with --derelink and '
-                                 '--port-rom, overlay-RAM codes are split by a guard too) or {"ranges": [{"start","end","delta"}]}')
+                                 '--port-rom, overlay-RAM codes are split by a guard too) or {"ranges": [{"start","end","delta"}]}; '
+                                 'with a derelink map and --port-rom the values inside the code the list writes follow too')
+    p.add_argument('--map-range', action='append', default=[],
+                   help='LO,HI,DELTA (hex RDRAM offsets, DELTA may start with -): overrides --map there, for the addresses '
+                        'and the values alike (No Mercy Rev 0 packs: 200800,400000,-1000)')
     p.add_argument('--textures', help='the hi-res texture folder, when it isn\'t inside FOLDER')
     p.add_argument('--base-rom', help='your own ROM the bundle\'s .rup patch is for (applied, MD5-checked)')
     p.add_argument('--port-rom', help='the port\'s ROM (base for de-relinking a patch made for another revision)')
