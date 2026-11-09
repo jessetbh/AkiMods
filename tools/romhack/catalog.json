@@ -620,6 +620,11 @@
    "version": "1.0.0",
    "tier": "verified",
    "converter": "derelink",
+   "inputs": {
+    "sha1": [
+     "F09EDAD035BF329A8EBF7AEE246B2B4FB94137D1"
+    ]
+   },
    "outputs": {
     "sha1": [
      "5C05406474A09D83AC6BE605D2B05EE706764131"
