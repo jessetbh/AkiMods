@@ -5,6 +5,7 @@ Subcommands (run `python aki-conv.py <cmd> -h` for details):
                        .mpk save, optionally a ROM or patch) -> a conversion package, plus a separate texture package
   pack-nrm NRM         a patch-mod .nrm (from make_patch_mod.py or Track A's derelink.py) -> a patch conversion package
   translate-codes      rewrite a codes.txt's RDRAM addresses through a revision map (e.g. No Mercy Rev 0 -> Rev 1)
+  translate-code-values  the addresses inside the code a translated list writes (hooks, lui/low pairs)
   bake-codes FOLDER    a pack's codes that edit game instructions (no effect as codes) -> its patch.nrm
 
 Packages are Thunderstore-shaped zips: manifest.json + icon.png + README.md + aki.json + the component files.
@@ -26,6 +27,7 @@ import zlib
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import aki_conv_bake  # noqa: E402
+import aki_conv_values  # noqa: E402
 
 TOOLS = os.path.dirname(os.path.abspath(__file__))
 # AkiMods/tools/romhack -> the depot that holds the AkiMods checkout and the game repos (developer runs only).
@@ -462,6 +464,11 @@ def stock_cht_key(game):
 
 # Base ROMs a patch may name by MD5 (the whole cartridge image, .z64 byte order).
 KNOWN_ROM_MD5 = {'04c492be7f89fc6f425238bd67629544': 'nomercy-rev0', '66b8ec24557a50514a814f15429bd559': 'nomercy-rev1'}
+def stock_rom(rom):
+    """The revision tag of a known unmodified cartridge (.z64 order), or None."""
+    return KNOWN_ROM_MD5.get(hashlib.md5(rom).hexdigest())
+
+
 JABO_NAME = re.compile(r'^[0-9a-fA-F]{32}\.(png|dds)$')
 
 
@@ -723,12 +730,16 @@ def cmd_import_pj64(a):
 
     # A pre-patched ROM in the bundle (Challenge 64 ships Roms\<hack>.z64): the patch is built from it against the
     # port's ROM, and the ROM itself never goes into the package.
+    # A bundle can also ship the unpatched cartridge next to its patch (Showdown 64: "No Mercy (U) (V1.0) (Not
+    # Patched).z64" beside the .rup): a stock ROM is never the hack (aki-roadmap#207). With a .rup and --base-rom the
+    # patch below is used instead, since it is MD5-checked against the player's own ROM.
     roms = [p for p in files if p.lower().endswith(('.z64', '.n64', '.v64')) and os.path.getsize(p) >= 0x800000]
-    if roms and 'patch' not in aki['components']:
+    has_rup = any(p.lower().endswith('.rup') for p in files)
+    if roms and 'patch' not in aki['components'] and not (has_rup and a.base_rom):
         port_rom = open(a.port_rom, 'rb').read() if a.port_rom else None
         for p in roms:
             hack = to_z64(open(p, 'rb').read())
-            if hack is None or (port_rom is not None and hack == port_rom):
+            if hack is None or (port_rom is not None and hack == port_rom) or stock_rom(hack):
                 continue
             summary = {'from': rel(p), 'size': len(hack), 'header': hack[0x20:0x34].decode('latin-1').strip(),
                        'header_revision': hack[0x3F], 'sha1': hashlib.sha1(hack).hexdigest().upper()}
@@ -736,6 +747,7 @@ def cmd_import_pj64(a):
                 summary['note'] = 'not built: pass --port-rom (and --derelink) to build the patch from it'
             else:
                 nrm, how = build_patch_nrm(a, hack, cid, name)
+                summary['watch_codes'] = add_watch_codes(a, aki, pkg_files)
                 summary['built_with'] = how
                 pkg_files['patch.nrm'] = nrm
                 aki['components']['patch'] = {'file': 'patch.nrm', 'mod_id': getattr(a, 'patch_mod_id', None) or cid + '_patch'}
@@ -760,6 +772,7 @@ def cmd_import_pj64(a):
             if summary['base'] != port and not a.derelink:
                 sys.exit('the patch is for %s and the port runs %s: pass --derelink' % (summary['base'], port))
             nrm, summary['built_with'] = build_patch_nrm(a, target, cid, name)
+            summary['watch_codes'] = add_watch_codes(a, aki, pkg_files)
             pkg_files['patch.nrm'] = nrm
             aki['components']['patch'] = {'file': 'patch.nrm', 'mod_id': getattr(a, 'patch_mod_id', None) or cid + '_patch'}
         else:
@@ -878,6 +891,20 @@ def to_z64(rom):
             b[i::4] = rom[3 - i::4]
         return bytes(b)
     return None
+
+
+def add_watch_codes(a, aki, pkg_files):
+    """derelink writes a codes.txt next to the patch that watches the code the hack rewrites itself (aki-roadmap#191);
+    the pack needs it as part of its codes. Appended to the pack's codes (or made its codes). Returns the line count."""
+    path = os.path.join(a.out, 'codes.txt')
+    if not os.path.isfile(path):
+        return 0
+    watch = open(path, encoding='utf8').read()
+    os.remove(path)  # one build's watch list never carries into the next
+    old = pkg_files.get('codes.txt', b'').decode()
+    pkg_files['codes.txt'] = (old.rstrip('\n') + '\n\n' + watch if old else watch).encode()
+    aki['components'].setdefault('codes', {'file': 'codes.txt', 'format': 'aki-codes', 'rom': PORT_TAG.get(a.game, a.game)})
+    return sum(1 for l in watch.splitlines() if l.strip() and not l.startswith(('#', '[')))
 
 
 def run_main(module, argv):
@@ -1169,6 +1196,35 @@ def load_map(path):
     return map_from_derelink(m)
 
 
+def cmd_translate_values(a):
+    """The addresses inside the code a list writes, for a list whose write addresses are already translated."""
+    m = json.load(open(a.map))
+    text = open(a.codes, encoding='utf-8', newline='').read()
+    if aki_conv_values.HEADER in text:
+        sys.exit('%s: its code values are already translated' % a.codes)
+    port_rom = open(a.port_rom, 'rb').read()
+    layout = find_layout(a.derelink, port_rom)
+    if layout is None:
+        sys.exit('no derelink layout matches the port ROM')
+    moved = 0
+    for r in a.move_writes:
+        lo, hi, delta = [int(x, 16) if not x.startswith('-') else -int(x[1:], 16) for x in r.split(',')]
+        text, n = aki_conv_values.move_writes(text, lo, hi, delta)
+        moved += n
+    # First match wins, so a --map-range goes ahead of the map.
+    ranges = [tuple(int(x, 16) if not x.startswith('-') else -int(x[1:], 16) for x in r.split(',')) for r in a.map_range]
+    new, report = aki_conv_values.translate_values(text, aki_conv_values.Mapper(ranges + map_from_derelink(m), overlay_ranges(m)),
+                                                   aki_conv_values.Layout(layout, port_rom))
+    report['writes_moved'] = moved
+    new, tagged = re.subn(r'(?m)^(# rom: *\S+)(\r?)$', lambda g: g.group(1) + g.group(2) + '\n' + aki_conv_values.HEADER + g.group(2),
+                          new, count=1)
+    if not tagged:
+        new = aki_conv_values.HEADER + '\n' + new
+    if not a.dry_run:
+        open(a.out or a.codes, 'w', encoding='utf-8', newline='').write(new)
+    print(json.dumps(report, indent=1))
+
+
 def cmd_translate(a):
     ranges = load_map(a.map)
     overlays, guard, note = overlay_guard_setup(a)
@@ -1247,6 +1303,19 @@ def main():
     p.add_argument('--to', help='the revision tag the codes are at afterwards (e.g. nomercy-rev1): retags "# rom:"')
     p.add_argument('-o', '--out', required=True)
     p.set_defaults(func=cmd_translate)
+    p = sub.add_parser('translate-code-values', help='translate the addresses inside code a translated list writes (hooks, lui/low pairs)')
+    p.add_argument('codes')
+    p.add_argument('--map', required=True, help="the derelink map of the revision the list was written for")
+    p.add_argument('--derelink', default=DERELINK, help='derelink.py (its layouts/ say where code is; default: next to this file)')
+    p.add_argument('--port-rom', required=True)
+    p.add_argument('--map-range', action='append', default=[],
+                   help='LO,HI,DELTA (hex RDRAM offsets, DELTA may start with -): overrides the map there, for a list whose '
+                        'addresses were translated with an older map; the values have to follow what its addresses did')
+    p.add_argument('--move-writes', action='append', default=[],
+                   help='LO,HI,DELTA: first move these write addresses, for a table a stepped_bases lui has to reach')
+    p.add_argument('--out', help='default: rewrite the list in place')
+    p.add_argument('--dry-run', action='store_true')
+    p.set_defaults(func=cmd_translate_values)
     a = ap.parse_args()
     a.func(a)
 
