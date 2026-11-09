@@ -23,6 +23,11 @@ NOP = (0).to_bytes(4, 'big')
 JR_RA = (0x03E00008).to_bytes(4, 'big')
 
 
+def randbytes(r, n):
+    """random.Random.randbytes (Python 3.9+) on 3.7 too: the same bytes, as CPython makes them."""
+    return r.getrandbits(n * 8).to_bytes(n, 'little') if n else b''
+
+
 def rom(code):
     data = bytearray(0x2000)
     data[0:4] = b'\x80\x37\x12\x40'
@@ -139,7 +144,7 @@ class TestBpsMovedData(unittest.TestCase):
         # ROM-like: random "compressed files" separated by zero padding, and a pointer table.
         data = bytearray()
         while len(data) < self.SIZE:
-            data += r.randbytes(r.randrange(0x400, 0x8000))
+            data += randbytes(r, r.randrange(0x400, 0x8000))
             data += bytes(r.randrange(0, 0x100) & ~3)
         self.base = bytes(data[:self.SIZE])
         self.rand = r
@@ -169,7 +174,7 @@ class TestBpsMovedData(unittest.TestCase):
         # Grow a "file" in the middle by 64 bytes, slide everything after it, rewrite a few
         # pointers after the move, and append the rewritten table at the end (file grows).
         at = 0x180000
-        hack = bytearray(self.base[:at] + self.rand.randbytes(64) + self.base[at:])
+        hack = bytearray(self.base[:at] + randbytes(self.rand, 64) + self.base[at:])
         for p in range(0x300000, 0x300040, 4):
             hack[p:p + 4] = (int.from_bytes(hack[p:p + 4], 'big') + 64 & 0xFFFFFFFF).to_bytes(4, 'big')
         hack += bytes(0x1000)
@@ -202,13 +207,13 @@ class TestBpsMovedData(unittest.TestCase):
         self.assertEqual(stats['target_read'], 0)
 
     def test_new_data_is_literal(self):
-        new = self.rand.randbytes(0x2000)
+        new = randbytes(self.rand, 0x2000)
         hack = self.base[:0x100000] + new + self.base[0x100000:]
         patch, stats = self.check(hack, 0x2000 + 256)
         self.assertEqual(stats['target_read'], len(new))
 
     def test_too_much_target_read_is_refused(self):
-        hack = self.base[:0x1000] + self.rand.randbytes(3 << 20) + self.base[0x1000:]
+        hack = self.base[:0x1000] + randbytes(self.rand, 3 << 20) + self.base[0x1000:]
         with self.assertRaises(mpm.TooMuchTargetRead):
             mpm.bps_encode(self.base, hack, max_target_read=2 << 20)
         # Under the limit it is written.
