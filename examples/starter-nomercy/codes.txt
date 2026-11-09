@@ -6,8 +6,8 @@
 # Lines:
 #   "# rom: <revision>"  the ROM revision the addresses are for (the first one counts). The port runs No Mercy
 #                        Rev 1; codes published for Rev 0 must be translated first (tools\romhack\aki_conv.py).
-#   "[Group\Name]"       starts a named code; the codes under it belong to it.
-#   "# default: on"      the code is on when the conversion starts.
+#   "[Group\Name]"       a name for the codes under it: a note for people (the engine ignores it).
+#   "# default: on"      also a note for people: every code in the file runs, all the time (no off switch).
 #   "#" anything else    a comment.
 #   XXXXXXXX YYYY        one code: type + address, then the value.
 # Code types used here:

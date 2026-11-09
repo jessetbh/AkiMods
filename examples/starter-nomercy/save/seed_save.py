@@ -25,7 +25,8 @@ Flash container (decoded in jessetbh/aki-roadmap#51): pages of 0x80 bytes:
 The image is 0x7170 bytes = 242 chunks. The output is a compacted log: chunks 0..241 on
 pages 1..242 (chunk 0 link 0x2000, each later page linking to the previous page), header
 on page 243 linking to page 242 with tail=1, head=243, generation = old+1. All other bytes
-are 0xFF. This is exactly the layout the game itself writes for a fresh save.
+are 0xFF. The game reads it like its own saves (its fresh save also keeps an old generation-1 header on page 0;
+this one doesn't, which the game doesn't need).
 """
 import struct
 import sys

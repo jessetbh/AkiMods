@@ -10,8 +10,8 @@ Writes, into OUT_DIR:
                            is its name, with no entry per texture
 
 Everything here is drawn by this script: shapes, a seeded noise weave and a 5x7 block font defined below. No game
-art, no font file. The same script always gives the same bytes (fixed seed, no timestamps), so the build can check
-the pack's sha256.
+art, no font file. On the same toolchain (Python, Pillow, zlib) the script always gives the same bytes (fixed seed,
+no timestamps), so the build can pin the pack's sha256.
 
 How the hashes were found: each name is the rt64 hash of the texture it replaces, from a texture dump of the Raw
 arena (Settings > Graphics > Texture dump in the AKI ports, or WCW_TEX_DUMP). A replacement can be any size: keep

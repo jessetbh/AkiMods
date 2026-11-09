@@ -3,8 +3,8 @@
 #   .\build.ps1 cheats             one mod, all its games
 #   .\build.ps1 cheats nomercy     one mod, one game
 #   .\build.ps1 camera nomercy -Define CAMERA_DEBUG    extra -D flags (debug builds)
-#   .uild.ps1 -ModsDir examples\starter-nomercy -Mod patch nomercy   a mod folder outside mods\ (the starter kit)
-# Output: build\<mod>\<game>\<mod id>.nrm
+#   .\build.ps1 -ModsDir examples\starter-nomercy -Mod patch nomercy   a mod folder outside mods\ (the starter kit)
+# Output: build\<mod>\<game>\<mod id>.nrm (with -ModsDir: build\_external\<mod>\<game>, which stage.ps1 never ships)
 param([string]$Mod = 'all', [string]$Game = 'all', [string[]]$Define = @(), [string]$ModsDir = '')
 # Native tools print warnings on stderr; failures are caught via $LASTEXITCODE below.
 $ErrorActionPreference = 'Continue'
@@ -42,7 +42,7 @@ foreach ($m in $selectedMods) {
     foreach ($g in ($targetGames | Sort-Object)) {
         $info = $games[$g] # not $game: PowerShell names are case-insensitive, and [string]$Game would coerce it
         $over = if ($cfg.PerGame -and $cfg.PerGame.ContainsKey($g)) { $cfg.PerGame[$g] } else { @{} }
-        $out = "$root\build\$m\$g"
+        $out = if ($ModsDir) { "$root\build\_external\$m\$g" } else { "$root\build\$m\$g" }
         New-Item -ItemType Directory -Force $out | Out-Null
 
         # Optional per-mod generator: writes headers into $out (on the include path) and

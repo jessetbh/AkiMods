@@ -30,12 +30,16 @@ checkout. For a test run, you also need AkiTools next to AkiMods.
 # Build and check the conversion. Output goes to build\starter-nomercy\.
 .\build.ps1 -BlankSave <your blank wwf.nomercy.us.bin>
 
-# Also install it into a game folder (a portable checkout, or %LOCALAPPDATA%\NoMercyRecompiled).
+# Also install it into a game folder (a portable checkout, or %LOCALAPPDATA%\NoMercyRecompiled for install only).
 .\build.ps1 -BlankSave <...> -GameDir <game folder>
 
 # Also run the game once (short, muted, windowed), then check the log for every part.
 .\build.ps1 -BlankSave <...> -GameDir <game folder> -Run
 ```
+
+`-Run` uses AkiTools `aki-run.ps1`, which needs a **portable** checkout (`portable.txt` in it; `aki-run.ps1
+-InitPortable` makes one) and refuses the main checkout `<depot>\NoMercyRecomp`: use a worktree such as
+`NoMercyRecomp-kit`.
 
 **About `-BlankSave`:** a No Mercy save holds data the game builds from the ROM, such as default attires and
 movesets. So the kit can't ship a save file. It ships `save/seed_save.py` instead, which makes the seed save from a
@@ -127,7 +131,7 @@ already there.
 ### Textures (`textures/make_textures.py`)
 
 Three images drawn entirely in code: shapes, seeded noise and a block font defined in the script. There's no game
-art and no font file, and the same run always gives the same bytes. Each file is named by the **rt64 hash** of the
+art and no font file, and on the same toolchain the same run always gives the same bytes. Each file is named by the **rt64 hash** of the
 texture it replaces (`"naming": "rt64"`). Find a texture's hash with a texture dump.
 
 Keep the original's aspect ratio and scale it up: 4x here. The kit puts the images in a separate **texture
