@@ -1955,7 +1955,7 @@ def payload_fixups(A, D, report):
 
 
 def patch_unsupported_instructions(D, functions, report):
-    """The live recompiler only reads COP0 Status. Hacks read COP0 Random (\$1) as a cheap random
+    """The live recompiler only reads COP0 Status. Hacks read COP0 Random ($1) as a cheap random
     number: replace `mfc0 rt, $Random` with `mflo rt` (LO, the last multiply's leftover, varies
     with game state too). [(vram, rom, size)]"""
     n = 0

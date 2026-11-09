@@ -541,5 +541,19 @@ class Worker(Base):
         self.assertEqual(sorted(l['status'] for l in lines[:2]), ['ready', 'unsupported'])
 
 
+class SourceHygiene(unittest.TestCase):
+    def test_tools_compile_without_warnings(self):
+        # aki-roadmap#268: under the launcher's Python 3.12 an invalid escape ('\$' in a docstring) logged a
+        # SyntaxWarning on every run (3.11 calls it a DeprecationWarning); warnings as errors catch both.
+        import warnings
+        for name in sorted(os.listdir(ROOT)):
+            if name.endswith('.py'):
+                with open(os.path.join(ROOT, name), encoding='utf-8') as f:
+                    text = f.read()
+                with warnings.catch_warnings():
+                    warnings.simplefilter('error')
+                    compile(text, name, 'exec')
+
+
 if __name__ == '__main__':
     unittest.main()
