@@ -389,6 +389,51 @@ class Rup(unittest.TestCase):
             aki_conv.KNOWN_ROM_MD5.clear()
             aki_conv.KNOWN_ROM_MD5.update(saved)
 
+    def test_map_ranges(self):
+        self.assertEqual(aki_conv.parse_map_ranges(['200800,400000,-1000', '10, 20 ,4']),
+                         [(0x200800, 0x400000, -0x1000), (0x10, 0x20, 4)])
+        with self.assertRaises(ValueError):
+            aki_conv.parse_map_ranges(['200800,400000'])
+
+    def test_values_follow_the_map_and_its_overrides(self):
+        # aki-roadmap#228: import-pj64 runs translate-code-values after the addresses, with the same --map-range. A
+        # hook into a cave whose addresses an override moved -0x1000 has to land on the cave where it now is.
+        import hashlib, tempfile, types
+        import aki_conv_values as v
+        j = lambda t: 0x08000000 | ((t & 0x0FFFFFFF) >> 2)
+        words = lambda addr, w: ['81%06X %04X' % (addr, w >> 16), '81%06X %04X' % (addr + 2, w & 0xFFFF)]
+        port = bytes(0x300000)
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, 'layouts'))
+            with open(os.path.join(d, 'layouts', 'x.json'), 'w') as f:
+                json.dump({'base_sha1': hashlib.sha1(port).hexdigest(), 'sections': [
+                    {'name': 'main', 'rom': 0x1000, 'text': 0x80000400, 'data': 0x80030000}]}, f)
+            open(os.path.join(d, 'derelink.py'), 'w').close()
+            with open(os.path.join(d, 'port.z64'), 'wb') as f:
+                f.write(port)
+            with open(os.path.join(d, 'map.json'), 'w') as f:
+                json.dump({'main': [[0x80000400, 0x80030000, -0x90, 'text'], [0x80200000, 0x80400000, 0, 'heap']],
+                           'overlays': {}, 'identity': [[0x80400000, 0x80800000]]}, f)
+            a = types.SimpleNamespace(map=os.path.join(d, 'map.json'), derelink=os.path.join(d, 'derelink.py'),
+                                      port_rom=os.path.join(d, 'port.z64'))
+            # Addresses already translated (hook 0x021C80 -> 0x021BF0, cave 0x300074 -> 0x2FF074); values not yet.
+            text = '\n'.join(['# rom: nomercy-rev0', '[Mod\\Hook]'] + words(0x021BF0, j(0x80300074)) +
+                             words(0x2FF074, j(0x80021C88))) + '\n'
+            out, rep = aki_conv.translate_values_in(text, a, aki_conv.parse_map_ranges(['200800,400000,-1000']))
+            self.assertIn(v.HEADER, out)
+            self.assertIn('81021BF0 %04X' % (j(0x802FF074) >> 16), out)
+            self.assertIn('81021BF2 %04X' % (j(0x802FF074) & 0xFFFF), out)    # the hook lands on the moved cave
+            self.assertIn('812FF076 %04X' % (j(0x80021BF8) & 0xFFFF), out)    # and its way back follows main text
+            self.assertGreaterEqual(rep['values_changed'], 2)
+            self.assertEqual(aki_conv.translate_values_in(out, a)[1], {'off': 'already translated'})
+            # Without a layout for the port's ROM (or a derelink map) the list comes back as it was, saying why.
+            with open(a.port_rom, 'wb') as f:
+                f.write(port + b'x')
+            self.assertEqual(aki_conv.translate_values_in(text, a), (text, {'off': 'no derelink layout matches the port ROM'}))
+            with open(a.map, 'w') as f:
+                json.dump({'ranges': []}, f)
+            self.assertEqual(aki_conv.translate_values_in(text, a)[1], {'off': 'the map is not a derelink map'})
+
     def test_cht_key_from_header(self):
         rom = bytearray(0x40)
         rom[0x10:0x18] = bytes.fromhex('4E4B06401B49BCFB')

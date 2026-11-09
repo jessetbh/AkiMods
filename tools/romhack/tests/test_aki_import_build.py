@@ -16,6 +16,7 @@ import zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+sys.path.insert(1, os.path.dirname(HERE))   # make_patch_mod for the stand-in derelink
 import test_aki_import as t  # noqa: E402  (fake ROMs, the fake patch format, Base)
 
 ai = t.ai
@@ -93,6 +94,13 @@ class BuildBase(t.Base):
         return items[0]
 
 
+# A synthetic Rev 0 -> Rev 1 derelink map: main moved -0x90 up to 0x80100000, the heap above in place, expansion RAM
+# identity. 0x80180000 isn't covered (a code there can't be translated).
+REV0_MAP = {'main': [[0x80000400, 0x80100000, -0x90, 'text'], [0x80200000, 0x80400000, 0, 'heap']], 'overlays': {},
+            'identity': [[0x80400000, 0x80800000]]}
+REV0_KEY = '4E4B0640-1B49BCFB-C:45'    # No Mercy (U) v1.0's Project64 section
+
+
 def fake_derelink(codes=None, fail=None, layout=True):
     """A stand-in derelink: main(argv) writes a patch .nrm (mod.json + a BPS from make_patch_mod) and, optionally,
     the code watch table next to it."""
@@ -104,6 +112,12 @@ def fake_derelink(codes=None, fail=None, layout=True):
         if fail:
             sys.exit(fail)
         args = dict(zip(argv[1::2], argv[2::2]))
+        if argv[0] == 'map':        # derelink map: the hack ROM's RAM ranges -> the port's
+            open(args['--hack'], 'rb').close()
+            with open(args['--out'], 'w') as f:
+                json.dump(REV0_MAP, f)
+            print('wrote', args['--out'])
+            return
         base = open(args['--base'], 'rb').read()
         hack = open(args['--hack'], 'rb').read()
         buf = io.BytesIO()
@@ -417,6 +431,114 @@ class Pj64Bundles(BuildBase):
             self.write('in/Mystery/Textures/X#%08X#0#2_all.png' % i, png(i))
         r = self.build_one([os.path.join(self.dir, 'in', 'Mystery')])
         self.assertEqual(r['status'], 'needs-game')
+
+
+class Rev0Codes(BuildBase):
+    """aki-roadmap#228: a bundle's codes for No Mercy Rev 0 are translated to the port's Rev 1 through the derelink
+    map (a shipped one, else made from a stock Rev 0 ROM), with the hand-made packs' --map-range."""
+
+    def bundle(self, root='in/My Mod', rom=None):
+        mod = root.rsplit('/', 1)[-1].replace(' ', '')     # the cheats' folder is the mod's name
+        self.write(root + '/Project64.cht', '\n'.join([
+            '[%s]' % REV0_KEY, 'Name=WWF No Mercy',
+            'Cheat0="' + mod + BS + 'Arena",810500E8 0933',     # main: -0x90
+            'Cheat1="' + mod + BS + 'Cave",81300000 1234',      # high RAM: the -0x1000 override
+            'Cheat2="' + mod + BS + 'Gone",81180000 0001', ''    # nothing maps it: dropped
+        ]).encode('latin-1'))
+        if rom:
+            self.write(root + '/Roms/No Mercy (U) (V1.0) (Not Patched).z64', rom)
+        return os.path.join(self.dir, *root.split('/'))
+
+    def codes(self, r):
+        with zipfile.ZipFile(r['package']) as z:
+            return z.read('conversion/codes.txt').decode(), json.loads(z.read('conversion/aki.json'))
+
+    def test_codes_are_translated_with_a_map_from_the_players_rev0_rom(self):
+        self.write('more/nm10.z64', t.REV0)
+        dl = fake_derelink()
+        r = self.build_one([self.bundle()], fakes={'derelink': dl}, rom_dirs=[os.path.join(self.dir, 'more')])
+        self.assertEqual(r['status'], 'converted', r)
+        self.assertEqual(r['codes'], 'codes translated from Rev 0 (2 of 3 lines; 1 dropped); values inside the code they '
+                                     'write not translated (no derelink layout matches the port ROM)')
+        tr = r['codes_translation']
+        self.assertEqual((tr['from'], tr['to'], tr['translated'], tr['lines'], tr['translated_lines'], tr['dropped_lines']),
+                         ('nomercy-rev0', 'nomercy-rev1', True, 3, 2, 1))
+        self.assertEqual(tr['map'], 'derelink map from your WWF No Mercy (USA) 1.0 ROM')
+        self.assertEqual(tr['map_ranges'], ['200800,400000,-1000'])
+        codes, aki = self.codes(r)
+        self.assertIn('# rom: nomercy-rev1', codes)
+        self.assertIn('81050058 0933', codes)
+        self.assertIn('812FF000 1234', codes)
+        self.assertIn('# dropped (no mapping): 81180000 0001', codes)
+        self.assertEqual(aki['components']['codes']['rom'], 'nomercy-rev1')
+        self.assertEqual([c[0] for c in dl.calls], ['map'])
+        self.assertEqual(dl.calls[0][dl.calls[0].index('--base') + 1], self.stock_path)
+        self.assertFalse(os.path.exists(dl.calls[0][dl.calls[0].index('--hack') + 1]))   # the Rev 0 ROM copy is gone
+        self.assertFalse(os.path.exists(os.path.join(self.dir, 'work', 'build')))
+
+    def test_without_a_rev0_rom_the_codes_stay_off_and_say_why(self):
+        dl = fake_derelink()
+        r = self.build_one([self.bundle()], fakes={'derelink': dl})
+        self.assertEqual(r['status'], 'converted', r)
+        self.assertTrue(r['codes'].startswith('codes for Rev 0 not translated: needs a stock WWF No Mercy (USA) 1.0 ROM '
+                                              'to make the Rev 0 -> Rev 1 map'), r['codes'])
+        self.assertEqual(r['codes_translation']['translated'], False)
+        codes, aki = self.codes(r)
+        self.assertIn('# rom: nomercy-rev0', codes)
+        self.assertIn('810500E8 0933', codes)
+        self.assertEqual(aki['components']['codes']['rom'], 'nomercy-rev0')
+        self.assertEqual(dl.calls, [])
+
+    def test_the_bundles_own_stock_rev0_rom_makes_the_map(self):
+        # Showdown 64 ships the unpatched cartridge beside its patch.
+        dl = fake_derelink()
+        r = self.build_one([self.bundle(rom=t.REV0)], fakes={'derelink': dl})
+        self.assertEqual(r['codes_translation']['map'], "derelink map from the bundle's WWF No Mercy (USA) 1.0 ROM")
+        self.assertIn('812FF000 1234', self.codes(r)[0])
+        # A hacked ROM in the bundle is not that dump.
+        dl = fake_derelink()
+        r = self.build_one([self.bundle('in/Other Mod', rom=t.fake_rom(revision=0, salt=9))], fakes={'derelink': dl})
+        self.assertFalse(r['codes_translation']['translated'])
+        self.assertEqual(dl.calls, [])
+
+    def test_a_shipped_map_needs_no_rom(self):
+        maps = os.path.join(self.dir, 'maps')
+        os.makedirs(maps)
+        with open(os.path.join(maps, 'nomercy-rev0.json'), 'w') as f:
+            json.dump(REV0_MAP, f)
+        saved, ai.MAPS_DIR = ai.MAPS_DIR, maps
+        try:
+            dl = fake_derelink()
+            r = self.build_one([self.bundle()], fakes={'derelink': dl})
+        finally:
+            ai.MAPS_DIR = saved
+        self.assertEqual(r['codes_translation']['map'], 'maps/nomercy-rev0.json')
+        self.assertIn('81050058 0933', self.codes(r)[0])
+        self.assertEqual(dl.calls, [])
+
+    def test_the_map_is_made_once_per_batch(self):
+        self.write('more/nm10.z64', t.REV0)
+        dl = fake_derelink()
+        real = ai.Builder.mod
+        ai.Builder.mod = lambda builder, name: dl if name == 'derelink' else real(builder, name)
+        try:
+            items, _ = self.build([self.bundle('in/A Mod'), self.bundle('in/B Mod')], rom_dirs=[os.path.join(self.dir, 'more')])
+        finally:
+            ai.Builder.mod = real
+        self.assertEqual([i['codes_translation']['translated'] for i in items], [True, True])
+        self.assertEqual(len(dl.calls), 1)
+
+    def test_a_failed_map_leaves_the_codes_off(self):
+        self.write('more/nm10.z64', t.REV0)
+        r = self.build_one([self.bundle()], fakes={'derelink': fake_derelink(fail='base ROM matches no layout')},
+                           rom_dirs=[os.path.join(self.dir, 'more')])
+        self.assertEqual(r['status'], 'converted', r)
+        self.assertIn('not translated: derelink map: base ROM matches no layout', r['codes'])
+
+    def test_port_revision_codes_say_so(self):
+        r = self.build_one([Pj64Bundles.bundle(self)])
+        self.assertEqual(r['codes'], "codes for the port's revision (1 lines)")
+        self.assertNotIn('codes_translation', r)
 
 
 class ReviewFixes(BuildBase):
