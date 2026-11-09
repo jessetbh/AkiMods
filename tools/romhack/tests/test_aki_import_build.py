@@ -715,6 +715,29 @@ class Rev0Codes(BuildBase):
         self.assertFalse(r['codes_translation']['translated'])
         self.assertEqual(dl.calls, [])
 
+    def test_cheats_for_several_games_take_the_game_of_the_bundles_rom(self):
+        # Showdown 64 (aki-roadmap#267): its Project64.cht names No Mercy, VPW64 and WM2000; its Roms\ folder holds the
+        # stock No Mercy 1.0 cartridge its .rup patches. That ROM decides; without it the bundle needs a game.
+        conv = ai.load_module('aki_conv')
+        wm = bytearray(t.fake_rom(code='NWXE', title='WRESTLEMANIA 2000', salt=3))
+        wm[0x10:0x18] = bytes.fromhex('1122334455667788')
+        b = ai.Builder({'out': self.out, 'work': os.path.join(self.dir, 'work')}, ai.Roms(), {})
+        b.roms.by_game = {'nomercy': (self.stock_path, t.STOCK), 'wm2k': ('wm2k.z64', bytes(wm))}
+        root = 'in/Show Mod'
+        self.write(root + '/Config/Project64.cht', '\n'.join([
+            '[%s]' % REV0_KEY, 'Name=WWF No Mercy', 'Cheat0="ShowMod' + BS + 'Arena",810500E8 0933',
+            '[%s]' % conv.cht_key(bytes(wm)), 'Name=WWF WrestleMania 2000', 'Cheat0="Other' + BS + 'Thing",81000000 0001',
+            '']).encode('latin-1'))
+        folder = os.path.join(self.dir, *root.split('/'))
+        with self.assertRaises(ai.NeedsGame):
+            b.bundle_game(folder, conv)
+        self.write(root + '/Roms/No Mercy (U) (V1.0) (Not Patched).z64', t.REV0)
+        self.assertEqual(b.bundle_game(folder, conv), 'nomercy')
+        # A hint still decides when the bundle's ROMs don't (two games' ROMs in it).
+        self.write(root + '/Roms/WM2000.z64', bytes(wm))
+        b.game_hint = 'wm2k'
+        self.assertEqual(b.bundle_game(folder, conv), 'wm2k')
+
     def test_a_shipped_map_needs_no_rom(self):
         maps = os.path.join(self.dir, 'maps')
         os.makedirs(maps)

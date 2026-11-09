@@ -1818,11 +1818,14 @@ class Builder:
 
     def bundle_game(self, folder, conv, named=None):
         """The game a bundle's cheats are for (their Project64 section), else a ROM header in it, else the game its
-        textures and save name (named, aki-roadmap#172), else "game"."""
+        textures and save name (named, aki-roadmap#172), else "game". Cheats for several games (a full Project64.cht:
+        Showdown 64's names No Mercy, VPW64 and WM2000) with ROMs in the bundle of exactly one of them: that one
+        (aki-roadmap#267; Showdown ships the stock No Mercy cartridge its .rup patches)."""
         keys = {k: g for k, g in ((k, conv.GAME_OF_TAG.get(t)) for k, t in conv.CHT_SECTIONS.items()) if g}
         for g, (_, rom) in self.roms.by_game.items():
             keys[conv.cht_key(rom)] = g
         found = set()
+        rom_games = set()
         for d, _, fs in os.walk(folder):
             for f in fs:
                 p = os.path.join(d, f)
@@ -1838,8 +1841,11 @@ class Builder:
                         g, region = game_for_code(rom_header(rom)['code'])
                         if g and not region:
                             found.add(g)
+                            rom_games.add(g)
         if len(found) == 1:
             return found.pop()
+        if len(rom_games) == 1:
+            return rom_games.pop()
         if not found and named in GAMES:
             return named
         if self.game_hint in GAMES:
