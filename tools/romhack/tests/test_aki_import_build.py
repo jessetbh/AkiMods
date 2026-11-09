@@ -400,6 +400,19 @@ class HackRoutes(BuildBase):
         self.assertTrue(os.path.isfile(again['package']))
         self.assertEqual(self.build_one([path], ledger=ledger)['status'], 'have-it')
 
+    def test_a_plan_never_drops_the_packages_a_build_recorded(self):
+        hack = bytearray(STOCK)
+        hack[0x2000] ^= 9
+        path = self.write('in/h.z64', bytes(hack))
+        ledger = os.path.join(self.dir, 'ledger.json')
+        first = self.build_one([path], ledger=ledger)
+        os.remove(first['package'])
+        items, _ = self.run_job([path], ledger=ledger, record=True)       # plan --record: ready, not have-it
+        self.assertEqual(items[0]['status'], 'ready')
+        entry = list(json.load(open(ledger))['entries'].values())[0]
+        self.assertEqual(entry['package'], first['package'])
+        self.assertEqual(self.build_one([path], ledger=ledger)['status'], 'converted')
+
     def test_rom_bytes_are_never_emitted(self):
         hack = bytearray(STOCK)
         hack[0x2000] ^= 1

@@ -1190,7 +1190,7 @@ def classify(src, roms, catalog, ledger, patchfmt, taken, keep=False, hint=None)
         prev = ledger.entries[key]
         built = ledger_packages(prev)
         kept = [p for p in built if os.path.isfile(p)]
-        if kept or not built:
+        if len(kept) == len(built):
             # The packages it built go with the line, so a launcher can install one again after it was removed
             # (aki-roadmap#272).
             out = dict(item=src.label, status='have-it', key=key, kind=prev.get('kind'), game=prev.get('game'),
@@ -1198,7 +1198,7 @@ def classify(src, roms, catalog, ledger, patchfmt, taken, keep=False, hint=None)
             if kept:
                 out.update(package=kept[0], packages=kept)
             return out, key
-        # Every package it built is gone (deleted from the Converted folder): convert it again, under its old id.
+        # A package it built is gone (deleted from the Converted folder): convert it again, under its old id.
         taken.discard(prev.get('id'))
     if res.get('status') == 'ready' and res.get('kind') in ('rom', 'patch', 'pj64-bundle', 'texture-pack'):
         res.setdefault('name', None)
@@ -2229,7 +2229,8 @@ def run_job(job, emit, patchfmt=None):
                 matched.setdefault((archive_of(s), res.get('base'), res.get('game')), res)
             counts[res['status']] = counts.get(res['status'], 0) + 1
             if ledger is not None and record and key and res['status'] in ('ready', 'converted'):
-                if builder is None or res['status'] == 'converted':
+                # A plan (no build) never overwrites an entry: it would drop the packages a build recorded (#272).
+                if (builder is None and key not in ledger.entries) or res['status'] == 'converted':
                     ledger.record(key, res)
             emit(dict(res, event='item'))
 
