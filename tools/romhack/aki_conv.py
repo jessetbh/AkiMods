@@ -598,6 +598,7 @@ def cmd_import_pj64(a):
                 overrides = parse_map_ranges(getattr(a, 'map_range', None) or [])
                 ranges = overrides + load_map(a.map)
                 overlays, guard, guard_note = overlay_guard_setup(a)
+                overlays = overlays_with_overrides(overlays, overrides)
                 text, done, bad = translate_codes(text, ranges, overlays, guard)
                 report['parts']['codes_translated'] = {'from': tag, 'codes': done, 'lines': done + len(bad),
                                                        'dropped_lines': len(bad),
@@ -1020,6 +1021,8 @@ def pak_image(data):
 DOC_SKIP_DIRS = {'plugin', 'plugins', 'config', 'lang', 'logs', 'save', 'saves', 'screenshots', 'textures',
                  'hires_texture', 'cache', 'roms', 'tools', 'scripts'}
 DOC_LIMIT = 40
+# Emulator and plugin logs left in a bundle (Showdown 64 ships Project64's "d3d syslog.txt"): not the author's docs.
+DOC_SKIP_NAME = re.compile(r'syslog|(^|[\s_.-])log\.txt$|^(debug|error|crash)[\s_-]?log', re.I)
 
 
 def texture_dirs(files, min_images=5):
@@ -1045,7 +1048,8 @@ def doc_files(files, folder):
         if not p.lower().endswith('.txt'):
             continue
         parts = os.path.relpath(p, folder).split(os.sep)[:-1]
-        if in_dirs(p, tex_dirs) or any(d.lower() in DOC_SKIP_DIRS for d in parts):
+        if in_dirs(p, tex_dirs) or any(d.lower() in DOC_SKIP_DIRS for d in parts) or \
+                DOC_SKIP_NAME.search(os.path.basename(p)):
             continue
         out.append(p)
     out.sort(key=lambda p: (os.path.relpath(p, folder).count(os.sep), p.lower()))
@@ -1206,6 +1210,15 @@ def overlay_guard_setup(a):
     if layout is None:
         return None, None, 'off: no derelink layout matches the port ROM'
     return overlay_ranges(m), overlay_guard(layout, port_rom), 'on (layout %s)' % layout.get('game', '?')
+
+
+def overlays_with_overrides(overlays, overrides):
+    """translate_codes' per-overlay maps with the --map-range overrides ahead of each, as they are ahead of the plain
+    map: a unit split by overlay is translated with those maps alone, and without this its other writes (Showdown 64's
+    high-RAM writes behind overlay-RAM conditionals, aki-roadmap#228) missed the override."""
+    if not overlays or not overrides:
+        return overlays
+    return {k: list(overrides) + list(v) for k, v in overlays.items()}
 
 
 def parse_map_ranges(specs):
