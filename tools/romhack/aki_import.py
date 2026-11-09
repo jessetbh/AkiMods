@@ -339,7 +339,9 @@ def bundle_root(names, zipped=False):
     (Config/Project64.cfg). Distributions often wrap it once more, beside their read-me files and a launcher exe
     (WWF Legends: Challenge 64, 'Ch64 - Public/Project64/Project64.exe', aki-roadmap#265): exactly one subfolder
     holding the markers counts too: in a zip, or in a folder with files of its own beside it (a distribution's
-    read-me and launcher; a plain folder of folders is walked instead, so its bundle keeps its own name). Not deeper, and not two such subfolders: a folder of several bundles isn't one."""
+    read-me and launcher; a plain folder of folders is walked instead, so its bundle keeps its own name). Not deeper, and not two such subfolders: a folder of several bundles isn't one. And only when nothing outside that
+    subfolder is something to import on its own (a ROM, patch, archive, mod, image or save): a downloads folder with a
+    hack next to a Project64 folder is walked, so the hack stays an item of its own."""
     lower = [n.lower() for n in (strip_root(names) if zipped else names)]
     if any(_pj64_marker(n) for n in lower):
         return ''
@@ -349,6 +351,9 @@ def bundle_root(names, zipped=False):
     if len(subs) != 1:
         return None
     sub = subs.pop()
+    own = ROM_EXTS + PATCH_EXTS + IMAGE_EXTS + tuple(SAVE_EXTS) + ('.zip', '.7z', '.rar', '.nrm', '.rtz', '.hts', '.htc')
+    if any(os.path.splitext(n)[1] in own for n in lower if not n.startswith(sub + '/')):
+        return None
     # The original spelling of that folder (names are matched lower-case).
     for n in (strip_root(names) if zipped else names):
         if n.split('/', 1)[0].lower() == sub:
@@ -1676,7 +1681,9 @@ class Builder:
             return name, None, None
         # One cheat folder for the game, under another name than the mod's (WWF Legends: Challenge 64's bundle is
         # 'Ch64 - Public', its cheats 'WWF Legends\\...', aki-roadmap#265): those are the mod's cheats.
-        if include is None and len(tops) == 1:
+        foldered = any(conv.BS in c['name'] for _, sec in self.game_cheat_sections(folder, conv, game)
+                       for c in sec['cheats'])
+        if include is None and len(tops) == 1 and foldered:
             tag = self.bundle_code_tag(folder, conv, game, tops[0], include)
             if tag:
                 return tops[0], tag, None

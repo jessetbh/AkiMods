@@ -448,6 +448,22 @@ class Hostile(Base):
         self.assertEqual(ai.bundle_root([k.split('/', 1)[1] for k in files]), 'Project64/')  # files of its own beside it
         self.assertIsNone(ai.bundle_root(['Wrapped/Project64.exe', 'Wrapped/Save/a.fla']))     # folders only: walked
 
+    def test_a_hack_beside_a_project64_folder_stays_its_own_item(self):
+        # The review case for aki-roadmap#265: a downloads folder with a hack, a patch and a texture pack next to a
+        # Project64 folder is walked (four items), not swallowed as one bundle named after the folder.
+        self.write('in/Downloads/MyHack.z64', fake_rom(salt=7))
+        self.write('in/Downloads/other.bps', b'x')
+        self.write('in/Downloads/Project64/Project64.exe', b'x')
+        self.write('in/Downloads/Project64/Config/Project64.cfg', b'x')
+        for i in range(5):
+            self.write('in/Downloads/Tex/WWF NO MERCY#%08X#0#2_all.png' % i, b'x')
+        items, _ = self.run_job([os.path.join(self.dir, 'in', 'Downloads')])
+        kinds = sorted(i.get('kind') or '' for i in items)
+        self.assertIn('pj64-bundle', kinds)
+        self.assertIn('rom', kinds)
+        self.assertTrue(len(items) >= 3, items)
+        self.assertIsNone(ai.bundle_root(['Hack.z64', 'Project64/Project64.exe'], zipped=True))
+
     def test_two_wrapped_bundles_are_not_one(self):
         names = ['A/Project64.exe', 'A/Config/Project64.cfg', 'B/Project64.exe', 'B/Config/Project64.cfg']
         self.assertIsNone(ai.bundle_root(names, zipped=True))

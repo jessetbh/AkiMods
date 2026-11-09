@@ -477,6 +477,14 @@ class Pj64Bundles(BuildBase):
         self.assertIn('810500E8 0933', codes)
         self.assertEqual(len([n for n in names if n.startswith('conversion/textures/') and n.endswith('.png')]), 6)
         self.assertFalse(any('Help Files' in n or n.endswith('.reg') for n in names))
+        # The unpack itself leaves the read-me tree out (its paths can pass 260 characters): only Project64\ is written.
+        src = t.ai.Source('in/Ch64 - Public v2.zip', 'folder', names=[], path=self.write('in/c2.zip', buf.getvalue()))
+        src.zip_path = src.path
+        b = t.ai.Builder({'out': os.path.join(self.dir, 'out2'), 'work': os.path.join(self.dir, 'work2')}, t.ai.Roms(), {})
+        folder, unpacked = b.bundle_folder(src)
+        self.assertTrue(folder.replace('\\', '/').endswith('/Project64'), folder)
+        self.assertFalse(os.path.exists(os.path.join(unpacked, 'Help Files & Setup')))
+        self.assertTrue(os.path.exists(os.path.join(folder, 'Project64.exe')))
 
     def test_bundle_for_no_known_game_needs_one(self):
         self.write('in/Mystery/Project64.cht', b'[12345678-9ABCDEF0-C:45]\nName=Something\n')
