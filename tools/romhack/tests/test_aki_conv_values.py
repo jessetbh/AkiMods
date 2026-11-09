@@ -345,5 +345,69 @@ class MovedCaves(unittest.TestCase):
         self.assertEqual(rep['pointers'], 0)
 
 
+def lw(rt, base, lo): return 0x8C000000 | base << 21 | rt << 16 | lo
+
+
+A2 = 6
+
+
+class LuiOnly(unittest.TestCase):
+    """A list rewriting only a game lui's upper half relies on the game's low half after it (Legends' Body Shapes,
+    aki-roadmap#205): `lui a2,0x8005; addu a2,a2,v1; lw a2,OFF(a2)` with OFF -0x74E8 in Rev 0 and -0x7588 in Rev 1."""
+    PORT_LUI = 0x80018C54                     # port addresses; the old revision's main text sits 0x90 higher
+
+    def setUp(self):
+        base = self.PORT_LUI - 0x80000400 + 0x1000
+        self.port = rom([(base, lui(A2, 0x8005)), (base + 4, addu(A2, A2, V1)), (base + 8, lw(A2, A2, 0x8A78)),
+                         (base + 12, JR_RA)])
+        ob = base + 0x90
+        self.old = v.OldRom(rom([(ob, lui(A2, 0x8005)), (ob + 4, addu(A2, A2, V1)), (ob + 8, lw(A2, A2, 0x8B18)),
+                                 (ob + 12, JR_RA)]))
+        self.layout = v.Layout({'sections': SECTIONS}, self.port)
+
+    def list_(self, hi, conds=()):
+        return ['D1%06X %04X' % c for c in conds] + ['81%06X %04X' % ((self.PORT_LUI + 2) & 0xFFFFFF, hi)]
+
+    def test_listed_without_the_old_rom(self):
+        text, rep = run(self.list_(0x803F), self.layout)
+        self.assertEqual(rep['lui_only'], ['80018C54'])
+        self.assertEqual(rep['lui_game_lows'], [])
+        self.assertEqual(text.splitlines()[1:], self.list_(0x803F))   # nothing changed
+
+    def test_body_shapes_low_half_differs_reported_not_written(self):
+        text, rep = v.translate_values('\n'.join(['[g]'] + self.list_(0x803F)), MAPPER, self.layout, old=self.old)
+        self.assertEqual(rep['lui_game_lows'], ["80018C5C: 8A78 here, 8B18 in the list's revision (lui 80018C54)"])
+        self.assertEqual(rep['lui_lows_written'], 0)
+        self.assertEqual(text.splitlines()[1:], self.list_(0x803F))
+
+    def test_body_shapes_fix_writes_the_old_low_half_behind_the_same_conditions(self):
+        conds = ((0x018C50, 0x2400),)
+        text, rep = v.translate_values('\n'.join(['[g]'] + self.list_(0x803F, conds)), MAPPER, self.layout,
+                                       old=self.old, fix=True)
+        # 0x803F0000 - 0x74E8 = 0x803E8B18, in RAM the map leaves alone: the old low half, the same upper half.
+        self.assertEqual(text.splitlines()[1:], self.list_(0x803F, conds) + ['D1018C50 2400', '81018C5E 8B18'])
+        self.assertEqual(rep['lui_lows_written'], 1)
+
+    def test_target_that_moves_with_the_map_needs_nothing(self):
+        # The stock pair: 0x80050000 - 0x74E8 = 0x80048B18 (old main data) maps to 0x80048A78, the port's own low half.
+        text, rep = v.translate_values('\n'.join(['[g]'] + self.list_(0x8005)), MAPPER, self.layout, old=self.old, fix=True)
+        self.assertEqual(rep['lui_only'], ['80018C54'])
+        self.assertEqual(rep['lui_game_lows'], [])
+        self.assertEqual(text.splitlines()[1:], self.list_(0x8005))
+
+    def test_a_low_half_the_list_writes_is_the_lists_own(self):
+        lines = self.list_(0x803F) + ['81%06X %04X' % ((self.PORT_LUI + 10) & 0xFFFFFF, 0x1234)]
+        text, rep = v.translate_values('\n'.join(['[g]'] + lines), MAPPER, self.layout, old=self.old, fix=True)
+        self.assertEqual(rep['lui_only'], [])
+        self.assertEqual(rep['lui_lows_written'], 0)
+
+    def test_old_instruction_that_doesnt_match_is_left_and_reported(self):
+        ob = self.PORT_LUI - 0x80000400 + 0x1000 + 0x90
+        old = v.OldRom(rom([(ob + 8, lw(V0, A2, 0x8B18))]))     # another register: not the same instruction
+        text, rep = v.translate_values('\n'.join(['[g]'] + self.list_(0x803F)), MAPPER, self.layout, old=old, fix=True)
+        self.assertEqual(rep['lui_lows_written'], 0)
+        self.assertTrue(any('80018C5C' in u for u in rep['unmapped']))
+
+
 if __name__ == '__main__':
     unittest.main()
