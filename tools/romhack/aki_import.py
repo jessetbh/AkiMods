@@ -33,7 +33,7 @@ Result status per item:
 
 Routes (build): a hack ROM or applied patch is surveyed (aki_hack.survey_rom against the port's ROM): in-place hacks
 (patch-data / patch-code) go to make_patch_mod, moved or reshaped code (rev0-layout / relinked / restructured) to
-derelink, and derelink also takes what make_patch_mod refuses; different-base is refused. A Project64 bundle goes
+derelink, and derelink also takes what make_patch_mod refuses; different-base is refused (unless a catalog recipe for that exact ROM names derelink). A Project64 bundle goes
 through aki_conv import-pj64 with an automatic id and name. The tools run in this process.
 
 Patch files are applied by patchfmt.py next to this file (aki-roadmap#228: xdelta/VCDIFF, BPS, IPS, UPS, APS;
@@ -1208,7 +1208,11 @@ class Builder:
         if tier == 'stock':
             res.update(status='stock', why='the stock ROM: nothing to convert')
             return
-        if tier in REFUSED_TIERS or survey.get('game') not in (None, game):
+        # A catalog recipe for this exact ROM (inputs.sha1) that names derelink overrides a different-base verdict:
+        # the AKI team built and tested it that way (9 Underground: World Tour rev 1 code, de-relinked onto the rev 0
+        # port; the survey finds too few port functions and calls it another release).
+        refused = tier in REFUSED_TIERS and entry.get('converter') != 'derelink'
+        if refused or survey.get('game') not in (None, game):
             raise BuildError('%s: %s' % (tier, '; '.join(survey.get('reasons', [])) or 'another release'))
         converter = entry.get('converter')
         if converter not in ('make_patch_mod', 'derelink'):

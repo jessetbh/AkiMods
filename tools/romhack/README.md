@@ -110,7 +110,7 @@ with `package`, `converter` and `aki_tier`:
 
 | Input | Converter | Package |
 |---|---|---|
-| hack ROM, or a patch applied to its base | `aki_hack.survey_rom` against the port's ROM: `patch-data` / `patch-code` -> `make_patch_mod`; `rev0-layout` / `relinked` / `restructured` -> `derelink` (also when make_patch_mod refuses); `different-base` refused | conversion: `conversion/aki.json` + `conversion/patch.nrm` (its mod id is the conversion id), + `codes.txt` when derelink writes a code watch table |
+| hack ROM, or a patch applied to its base | `aki_hack.survey_rom` against the port's ROM: `patch-data` / `patch-code` -> `make_patch_mod`; `rev0-layout` / `relinked` / `restructured` -> `derelink` (also when make_patch_mod refuses); `different-base` refused unless the catalog has a derelink recipe for that exact ROM (9 Underground) | conversion: `conversion/aki.json` + `conversion/patch.nrm` (its mod id is the conversion id), + `codes.txt` when derelink writes a code watch table |
 | Project64 bundle (folder or zip) | `aki_conv` import-pj64 with the item's id and name; the game from the bundle's cheat sections or a ROM in it, else `game` | conversion (codes, saves, docs, patch, and the textures inside it at `conversion/textures/`: the game reads a conversion's textures from its own folder, while a texture-pack package installs to `mods\`) |
 | texture pack (rt64, Rice, Jabo, `.hts`) | images copied, an `rt64.json` added for Rice/Jabo (`autoPath`), `.hts` exported to Rice PNGs | texture-pack (`payload.folder: textures/`) |
 
