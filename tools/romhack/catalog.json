@@ -17,8 +17,8 @@
    "tier": "verified",
    "converter": "import-pj64",
    "known_issues": [
-    "aki-roadmap#121",
-    "aki-roadmap#187"
+    "The attract demo never starts",
+    "Codes that change the game's code while it runs do nothing"
    ],
    "note": "No attract demo: press Start.",
    "outputs": {
@@ -38,8 +38,8 @@
    "tier": "experimental",
    "converter": "derelink",
    "known_issues": [
-    "aki-roadmap#197",
-    "aki-roadmap#156"
+    "Rare freeze when the attract demo loads",
+    "Model packs do not load"
    ],
    "note": "The attract demo can freeze. Model packs do not load.",
    "inputs": {
@@ -64,7 +64,7 @@
    "tier": "verified",
    "converter": "import-pj64",
    "known_issues": [
-    "aki-roadmap#195"
+    "The attract demo can pick a different venue and teams than the original"
    ],
    "outputs": {
     "codes_sha1": [
@@ -80,10 +80,10 @@
    "tier": "experimental",
    "converter": "import-pj64",
    "known_issues": [
-    "aki-roadmap#204",
-    "aki-roadmap#205",
-    "aki-roadmap#187",
-    "aki-roadmap#198"
+    "The in-match pause screen draws noise",
+    "Some codes made for the original release do not work",
+    "Codes that change the game's code while it runs do nothing",
+    "Can crash in the menus after a while"
    ],
    "note": "The pause screen draws noise. Ropes, body shapes and extra attires do not apply. Can crash on a save in a certain state.",
    "outputs": {
@@ -103,11 +103,11 @@
    "tier": "verified",
    "converter": "import-pj64",
    "known_issues": [
-    "aki-roadmap#208",
-    "aki-roadmap#187",
-    "aki-roadmap#195"
+    "Move codes are not checked against the original",
+    "Codes that change the game's code while it runs do nothing",
+    "The attract demo can pick a different venue and teams than the original"
    ],
-   "note": "Menu art needs runtime code writes (#187).",
+   "note": "Menu art needs runtime code writes.",
    "outputs": {
     "sha1": [
      "9B80D00D0723B5E2406A0D5821263B10678E258A"
@@ -125,7 +125,7 @@
    "tier": "verified",
    "converter": "import-pj64",
    "known_issues": [
-    "aki-roadmap#195"
+    "The attract demo can pick a different venue and teams than the original"
    ],
    "outputs": {
     "sha1": [
@@ -144,8 +144,8 @@
    "tier": "verified",
    "converter": "derelink",
    "known_issues": [
-    "aki-roadmap#156",
-    "aki-roadmap#195"
+    "Model packs do not load",
+    "The attract demo can pick a different venue and teams than the original"
    ],
    "note": "Pillarboxed menus are correct. Model packs do not load.",
    "outputs": {
@@ -165,8 +165,8 @@
    "tier": "verified",
    "converter": "derelink",
    "known_issues": [
-    "aki-roadmap#156",
-    "aki-roadmap#195"
+    "Model packs do not load",
+    "The attract demo can pick a different venue and teams than the original"
    ],
    "note": "Model packs do not load.",
    "outputs": {
@@ -186,8 +186,8 @@
    "tier": "verified",
    "converter": "derelink",
    "known_issues": [
-    "aki-roadmap#156",
-    "aki-roadmap#195"
+    "Model packs do not load",
+    "The attract demo can pick a different venue and teams than the original"
    ],
    "note": "Model packs do not load.",
    "outputs": {
@@ -207,7 +207,7 @@
    "tier": "verified",
    "converter": "make_patch_mod",
    "known_issues": [
-    "aki-roadmap#195"
+    "The attract demo can pick a different venue and teams than the original"
    ],
    "inputs": {
     "sha1": [
@@ -228,7 +228,7 @@
    "tier": "experimental",
    "converter": "derelink",
    "known_issues": [
-    "aki-roadmap#182"
+    "Built before the latest converter fixes"
    ],
    "note": "Expect an unreadable pause menu; a second-boot hang and a Quit Match freeze are likely.",
    "outputs": {
@@ -249,8 +249,8 @@
    "converter": "import-pj64",
    "tier_proposed": true,
    "known_issues": [
-    "aki-roadmap#207",
-    "aki-roadmap#187"
+    "Runs without its ROM patch",
+    "Codes that change the game's code while it runs do nothing"
    ],
    "note": "Its ROM patch has not been applied yet: not the full hack.",
    "outputs": {
@@ -270,9 +270,9 @@
    "tier": "verified",
    "converter": "import-pj64",
    "known_issues": [
-    "aki-roadmap#208",
-    "aki-roadmap#187",
-    "aki-roadmap#195"
+    "Move codes are not checked against the original",
+    "Codes that change the game's code while it runs do nothing",
+    "The attract demo can pick a different venue and teams than the original"
    ],
    "note": "The pack notes warn of a possible Mall freeze.",
    "outputs": {
@@ -292,7 +292,7 @@
    "tier": "verified",
    "converter": "import-pj64",
    "known_issues": [
-    "aki-roadmap#195"
+    "The attract demo can pick a different venue and teams than the original"
    ],
    "outputs": {
     "sha1": [
@@ -311,7 +311,7 @@
    "tier": "verified",
    "converter": "import-pj64",
    "known_issues": [
-    "aki-roadmap#195"
+    "The attract demo can pick a different venue and teams than the original"
    ],
    "outputs": {
     "codes_sha1": [
@@ -327,7 +327,7 @@
    "tier": "verified",
    "converter": "import-pj64",
    "known_issues": [
-    "aki-roadmap#189"
+    "The Arena tab's off-screen list shows in the Expand side area"
    ],
    "note": "The off-screen arena list shows in Expand.",
    "outputs": {
@@ -360,7 +360,7 @@
    "tier": "verified",
    "converter": "derelink",
    "known_issues": [
-    "aki-roadmap#119"
+    "Stalls about 16 seconds in"
    ],
    "note": "Intro runs faster than on an emulator.",
    "outputs": {
@@ -377,7 +377,7 @@
    "tier": "verified",
    "converter": "derelink",
    "known_issues": [
-    "aki-roadmap#203"
+    "Entrance pyro never varies"
    ],
    "note": "Entrance pyro never varies.",
    "outputs": {
@@ -438,7 +438,7 @@
    "tier": "verified",
    "converter": "derelink",
    "known_issues": [
-    "aki-roadmap#195"
+    "The attract demo can pick a different venue and teams than the original"
    ],
    "outputs": {
     "sha1": [
@@ -454,8 +454,8 @@
    "tier": "verified",
    "converter": "derelink",
    "known_issues": [
-    "aki-roadmap#195",
-    "aki-roadmap#209"
+    "The attract demo can pick a different venue and teams than the original",
+    "Contour lines during entrance camera fades"
    ],
    "outputs": {
     "sha1": [
@@ -484,8 +484,8 @@
    "tier": "verified",
    "converter": "make_patch_mod",
    "known_issues": [
-    "aki-roadmap#213",
-    "aki-roadmap#195"
+    "Keeps the stock boot image",
+    "The attract demo can pick a different venue and teams than the original"
    ],
    "note": "Start a new save to get the hack's default save data.",
    "inputs": {
@@ -507,7 +507,7 @@
    "tier": "verified",
    "converter": "make_patch_mod",
    "known_issues": [
-    "aki-roadmap#195"
+    "The attract demo can pick a different venue and teams than the original"
    ],
    "inputs": {
     "sha1": [
@@ -546,7 +546,7 @@
    "tier": "verified",
    "converter": "derelink",
    "known_issues": [
-    "aki-roadmap#195"
+    "The attract demo can pick a different venue and teams than the original"
    ],
    "outputs": {
     "sha1": [
@@ -576,8 +576,8 @@
    "tier": "verified",
    "converter": "make_patch_mod",
    "known_issues": [
-    "aki-roadmap#213",
-    "aki-roadmap#215"
+    "Keeps the stock boot image",
+    "The Controller Pak note prompt never appears"
    ],
    "note": "Old saves keep Japanese names: reset the save.",
    "inputs": {
@@ -599,7 +599,7 @@
    "tier": "verified",
    "converter": "derelink",
    "known_issues": [
-    "aki-roadmap#183"
+    "A thin strip of art shows past the 4:3 edge in Expand"
    ],
    "note": "Overlapping menu text and the red flame screen are the hack's own.",
    "inputs": {
@@ -648,7 +648,7 @@
    "tier": "experimental",
    "converter": "derelink",
    "known_issues": [
-    "aki-roadmap#120"
+    "Can crash about 10 seconds in"
    ],
    "note": "Plays, but the hack's own roster and arenas are unchecked.",
    "outputs": {
