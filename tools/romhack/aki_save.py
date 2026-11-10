@@ -350,7 +350,10 @@ def port_files(path, game, kind='auto', order='auto', pak=None, force=False):
             raise SaveError('%s: the .srm holds nothing %s uses (used sections: %s; %s saves to %s)'
                             % (path, game, ', '.join(used) or 'none', game, ' + '.join(g['files'])))
     elif info['kind'] == 'pak4':
-        idx = pak if pak is not None else next((p['index'] for p in info['paks'] if p['notes']), 0)
+        # The pak carrying this game's note, else the first with any note, else pak 0.
+        idx = pak if pak is not None else next(
+            (i for i in range(4) if game in game_signature(info['raw'][i * PAK:(i + 1) * PAK], 'pak')),
+            next((p['index'] for p in info['paks'] if p['notes']), 0))
         pieces.append(('pak', info['raw'][idx * PAK:(idx + 1) * PAK], 'mpk pak %d' % idx))
     else:
         k = 'eep' if info['kind'].startswith('eep') else info['kind']

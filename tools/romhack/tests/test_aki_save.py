@@ -333,6 +333,14 @@ class ConvertTests(Base):
         self.assertEqual(self.get(os.path.join(out, 'vpw.vpw64.jp.bin')), aki_sram(0x19971021))
         self.assertEqual(self.get(os.path.join(out, 'vpw.vpw64.jp.pak.bin')), pak(VPW64_NOTE))
 
+    def test_4_pak_mpk_picks_the_games_note(self):
+        # a mupen .mpk with No Mercy's note in pak 0 and VPW64's in pak 1: VPW64 gets pak 1 without --pak
+        data = pak(NM_NOTE, seed=5) + pak(VPW64_NOTE, seed=6) + bytes(S.PAK) + bytes(S.PAK)
+        src = self.put('mixed.mpk', data)
+        self.assertEqual(S.port_files(src, 'vpw64')[0][0][1], pak(VPW64_NOTE, seed=6))
+        self.assertEqual(S.port_files(src, 'nomercy')[0][0][1], pak(NM_NOTE, seed=5))
+        self.assertEqual(S.port_files(src, 'vpw64', pak=0)[0][0][1], pak(NM_NOTE, seed=5))
+
     def test_pak_from_4_pak_mpk_by_index(self):
         data = pak(NM_NOTE, seed=5) + pak(NM_NOTE, seed=6) + bytes(S.PAK) + bytes(S.PAK)
         src = self.put('NM.mpk', data)
@@ -461,11 +469,15 @@ class GamesTableTests(unittest.TestCase):
             path = os.path.join(depot, repo, 'src', 'main', 'main.cpp')
             if not os.path.isfile(path):
                 continue
-            # The shipped source (origin/main) when the checkout has it: a local main can lag behind a release
-            # (VPW64's separate pak, aki-roadmap#215, shipped in 0.3.0).
-            r = subprocess.run(['git', '-C', os.path.join(depot, repo), 'show', 'origin/main:src/main/main.cpp'],
-                               capture_output=True)
-            if r.returncode == 0:
+            # The shipped source (origin/main, as of the last fetch) when the checkout has it: a local main can lag
+            # behind a release (VPW64's separate pak, aki-roadmap#215, shipped in 0.3.0). Unpushed local work is
+            # not what players run, so it's ignored. No git, or no remote: the checkout's own file.
+            try:
+                r = subprocess.run(['git', '-C', os.path.join(depot, repo), 'show', 'origin/main:src/main/main.cpp'],
+                                   capture_output=True)
+            except OSError:
+                r = None
+            if r is not None and r.returncode == 0:
                 src = r.stdout.decode('utf-8', 'replace')
             else:
                 with open(path, encoding='utf-8', errors='replace') as f:
