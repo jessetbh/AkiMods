@@ -93,6 +93,12 @@
     "legends_fb_relocate",
     "legends_unpark"
    ],
+   "codes_leave_out": [
+    {
+     "section": "WWF Legends\\Interface\\Main Menu\\Main Screen\\Navigation\\Selection Pointers",
+     "why": "writes Rev 0 pointer values the translation cannot place"
+    }
+   ],
    "known_issues": [
     "The in-match pause screen draws noise",
     "Some codes made for the original release do not work",
@@ -107,7 +113,7 @@
     ],
     "codes_sha1": [
      "9C32DDE6E48ED87859BAD28A057AA156E4C5E64D",
-     "A2E83248CC1DC5A07DABBB68BA481C61C8003D7E"
+     "85362A5A7A4208EFC2847329D87E49612DA9B34A"
     ]
    }
   },

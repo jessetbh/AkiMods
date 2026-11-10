@@ -1283,10 +1283,12 @@ class CatalogBundles(BuildBase):
         self.rom = t.fake_rom(revision=0, salt=9)
         self.rom_sha1 = hashlib.sha1(self.rom).hexdigest().upper()
 
-    def bundle(self, root='in/Ch64 - Public', cheat='810500E8 0933'):
+    def bundle(self, root='in/Ch64 - Public', cheat='810500E8 0933', more=()):
         # The distribution's shape: read-me pictures and a launcher exe beside its Project64 folder.
+        cheats = ['Cheat0="WWF Legends' + BS + 'Arena",' + cheat] + \
+            ['Cheat%d="WWF Legends%s%s",%s' % (n + 1, BS, name, codes) for n, (name, codes) in enumerate(more)]
         self.write(root + '/Project64/Config/Project64.cht', '\n'.join([
-            '[%s]' % REV0_KEY, 'Name=WWF No Mercy', 'Cheat0="WWF Legends' + BS + 'Arena",' + cheat, '']).encode('latin-1'))
+            '[%s]' % REV0_KEY, 'Name=WWF No Mercy'] + cheats + ['']).encode('latin-1'))
         self.write(root + '/Project64/Project64.exe', b'x')
         self.write(root + '/Project64/Roms/WWF Legends - Challenge 64.z64', self.rom)
         self.write(root + '/Cheat Code Settings.jpg', b'x')
@@ -1352,6 +1354,50 @@ class CatalogBundles(BuildBase):
         self.assertFalse(os.listdir(os.path.join(self.out, 'nomercy')) if os.path.isdir(os.path.join(self.out, 'nomercy'))
                          else [])
 
+    def test_the_entrys_codes_to_leave_out_are_taken_out_after_its_fixes(self):
+        """aki-roadmap#300: the tested Legends pack leaves out its main-menu Selection Pointers (Rev 0 pointer values the
+        translation can't place); kept on, the main menu stops. The build takes it out after the fixes, notes why."""
+        sel = 'Main Menu' + BS + 'Selection Pointers'
+        leave = [{'section': 'WWF Legends' + BS + sel, 'why': 'writes Rev 0 pointer values the translation cannot place'}]
+        r = self.build_one([self.bundle(more=[(sel, '812B75FE D3E0'), ('Ring', '810500EC 0934')])],
+                           fakes={'derelink': fake_derelink()}, catalog=self.entry(codes_leave_out=leave))
+        self.assertEqual((r['status'], r['codes_fixups']), ('converted', ['tfix']), r)
+        self.assertEqual(r['codes_left_out'], ['WWF Legends' + BS + sel])
+        codes, aki = self.codes(r)
+        self.assertNotIn('812B75FE', codes)
+        self.assertNotIn('\n[WWF Legends' + BS + sel + ']', codes)      # only the note names it
+        self.assertIn('# left out (writes Rev 0 pointer values the translation cannot place):\n#   [WWF Legends' +
+                      BS + sel + ']\n', codes)
+        self.assertIn('810500E8 0933', codes)       # the other cheats stay
+        self.assertIn('810500EC 0934', codes)
+        self.assertIn('# tagged by tfix', codes)    # the fixes still ran
+        self.assertEqual(aki['survey']['codes_left_out'], ['WWF Legends' + BS + sel])
+        self.assertEqual(r['codes_sha1'], hashlib.sha1(codes.encode()).hexdigest().upper())
+
+    def test_a_section_to_leave_out_that_the_list_lacks_fails_the_build(self):
+        leave = [{'section': 'WWF Legends' + BS + 'No Such Cheat', 'why': 'x'}]
+        r = self.build_one([self.bundle()], fakes={'derelink': fake_derelink()},
+                           catalog=self.entry(codes_leave_out=leave))
+        self.assertEqual(r['status'], 'failed', r)
+        self.assertIn('codes to leave out not in the list: WWF Legends' + BS + 'No Such Cheat', r['why'])
+
+    def test_leave_out_sections_notes_them_above_the_hack_code_writes_block(self):
+        text = '\n'.join(['# head', '', '[A]', '# default: on', '81000000 0001', '', '[B]', '# default: on',
+                          'D0000001 0002', '81000002 0003', '', '[C]', '81000004 0005', '', '',
+                          '# Watches code the hack rewrites itself (aki-roadmap#191).', '# rom: nomercy-rev1', '',
+                          ai.HACK_WRITES_SECTION, '# default: on', 'D1000400 3C09', '810F295C 0000', ''])
+        out, missing = ai.leave_out_sections(text, [{'section': 'B', 'why': 'w'}, {'section': 'Z', 'why': 'w'}])
+        self.assertEqual(missing, ['Z'])
+        self.assertNotIn('D0000001 0002', out)
+        self.assertIn('[A]\n# default: on\n81000000 0001\n\n[C]\n81000004 0005\n\n\n'
+                      '# left out (w):\n#   [B]\n\n\n# Watches code', out)
+        self.assertTrue(out.endswith('D1000400 3C09\n810F295C 0000\n'))
+        # no watch block: the note goes at the end; CRLF lists keep CRLF; nothing found leaves the text alone
+        out, _ = ai.leave_out_sections('[A]\r\n81000000 0001\r\n\r\n[B]\r\n81000002 0003\r\n',
+                                       [{'section': 'B', 'why': 'w'}])
+        self.assertEqual(out, '[A]\r\n81000000 0001\r\n\r\n# left out (w):\r\n#   [B]\r\n\r\n')
+        self.assertEqual(ai.leave_out_sections(text, [{'section': 'Z'}]), (text, ['Z']))
+
     def test_the_shipped_legends_entry_names_registered_fixes(self):
         cat = json.load(open(ai.DEFAULT_CATALOG, encoding='utf-8'))
         legends = [e for e in cat['entries'] if e['id'] == 'legends_c64'][0]
@@ -1363,6 +1409,10 @@ class CatalogBundles(BuildBase):
             for s in steps:
                 self.assertTrue(callable(getattr(mod, s)), (n, s))
         self.assertEqual(legends['bake_exclude'], ['Wrestler Info Icon\\Mapping'])
+        # aki-roadmap#300: the main-menu Selection Pointers stay out, as in the tested pack (kept, the menu stops)
+        self.assertEqual([i['section'] for i in legends['codes_leave_out']],
+                         ['WWF Legends\\Interface\\Main Menu\\Main Screen\\Navigation\\Selection Pointers'])
+        self.assertNotIn('A2E83248CC1DC5A07DABBB68BA481C61C8003D7E', legends['outputs']['codes_sha1'])
         # The fixes refuse a list that isn't Legends': a synthetic list fails, it isn't silently changed.
         with self.assertRaises(ValueError):
             ai.load_module('legends_park_hooks', os.path.join(os.path.dirname(ai.DEFAULT_CATALOG), 'fixups',

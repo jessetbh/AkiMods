@@ -1357,6 +1357,45 @@ TEXTURE_EXTS = ('.png', '.dds')
 PACKAGE_ID = re.compile(r'^[a-z0-9_.-]{1,48}$')
 
 
+HACK_WRITES_SECTION = '[Conversion\\Hack code writes]'
+
+
+def leave_out_sections(text, items):
+    """codes.txt without the sections named in items ([{"section": header without brackets, "why": reason}]), and the
+    names not found. Each removed section is listed in a comment block per reason, as the hand-made packs did
+    ("# left out (<why>):" then "#   [<section>]"), placed before the hack code-writes watch block (#191) when the
+    list has one, else at the end. Line endings and every other line are kept."""
+    newline = '\r\n' if '\r\n' in text else '\n'
+    want = {'[%s]' % i['section']: i.get('why', 'left out by the catalog') for i in items}
+    lines = text.split(newline)
+    out, skip, found = [], False, []
+    for line in lines:
+        if line.startswith('['):
+            skip = line.rstrip() in want
+            if skip:
+                found.append(line.rstrip())
+        if not skip:
+            out.append(line)
+    missing = [h[1:-1] for h in want if h not in found]
+    if not found:
+        return text, missing
+    note = []
+    for why in dict.fromkeys(want[h] for h in found):
+        note += ['# left out (%s):' % why] + ['#   %s' % h for h in found if want[h] == why] + ['', '']
+    at = next((n for n, l in enumerate(out) if l.rstrip() == HACK_WRITES_SECTION), None)
+    if at is None:
+        while out and out[-1] == '':
+            out.pop()
+        out += [''] + note
+    else:
+        while at > 0 and (out[at - 1].startswith('#') or out[at - 1] == ''):
+            at -= 1     # above the watch block's own comment lines, which belong to it...
+        while out[at] == '':
+            at += 1     # ...and below the blank lines that end the code before it
+        out[at:at] = note
+    return newline.join(out), missing
+
+
 def revision_label(tag):
     """'nomercy-rev0' -> 'Rev 0'."""
     return 'Rev %s' % tag.rsplit('-rev', 1)[1] if '-rev' in tag else tag
@@ -2231,6 +2270,23 @@ class Builder:
         files['conversion/codes.txt'] = text.encode('utf-8')
         res['codes_fixups'] = list(names)
 
+    def apply_codes_leave_out(self, res, files, entry):
+        """The catalog entry's "codes_leave_out" (aki-roadmap#300): codes the tested pack leaves out, taken out of the
+        conversion's codes.txt after its fixes (leave_out_sections). WWF Legends' main-menu Selection Pointers writes
+        Rev 0 pointer values the translation can't place: kept on, the main menu stops and the game falls into a broken
+        attract match. A named section the list doesn't have fails the build, like a fix that refuses the list."""
+        items = entry.get('codes_leave_out') or []
+        if not items:
+            return
+        if 'conversion/codes.txt' not in files:
+            raise BuildError('the catalog leaves codes out (%s) but the bundle gave no codes' %
+                             ', '.join(i['section'] for i in items))
+        text, missing = leave_out_sections(files['conversion/codes.txt'].decode('utf-8'), items)
+        if missing:
+            raise BuildError('codes to leave out not in the list: %s' % ', '.join(missing))
+        files['conversion/codes.txt'] = text.encode('utf-8')
+        res['codes_left_out'] = [i['section'] for i in items]
+
     def repack_pj64(self, res, game, cid, name, out, report):
         """import-pj64's Thunderstore-shaped zips -> one #154 conversion package (aki.json + its files under
         conversion/). The bundle's textures go inside it, at conversion/textures/ (components.textures.dir): the game
@@ -2258,6 +2314,9 @@ class Builder:
         self.apply_codes_fixups(res, files, self.catalog_entry(res) or {})
         if res.get('codes_fixups'):
             aki['survey']['codes_fixups'] = list(res['codes_fixups'])
+        self.apply_codes_leave_out(res, files, self.catalog_entry(res) or {})
+        if res.get('codes_left_out'):
+            aki['survey']['codes_left_out'] = list(res['codes_left_out'])
         tex = aki['components'].get('textures')
         if not (tex and tex_zips):
             aki['components'].pop('textures', None)
