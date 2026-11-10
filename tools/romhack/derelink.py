@@ -2619,15 +2619,22 @@ def fix_unreachable_lo(A, D, area, report):
         nw = [word(D, rom + i) for i in range(0, hi - lo, 4)]
         got = {l: a for h, l, a in mips.hilo_refs(nw)}
         targets = {mips.branch_target(w, lo + 4 * i) for i, w in enumerate(nw)} - {None}
-        for h, l, a in mips.hilo_refs(hw):
+        href = list(mips.hilo_refs(hw))
+        for h, l, a in href:
             cs = A.map.candidates(a, ctx)
             if not cs or got.get(l) in cs or cs[0] == a and got.get(l) == a:
                 continue     # rewrite() reached one of them (it may pick a later one for a shift all uses share)
-            want, w = cs[0], nw[l]
+            # Several candidates (overlays with different shifts): take the one whose shift rewrite() gave the other
+            # uses of this lui that it could encode (No Mercy Plus V3's entrance code reads the walking-path tables
+            # at 0x801479AA etc. through a lui shared with 0x8014F814: both shift -0x1500, aki-roadmap#309).
+            shifts = {(got[l2] - a2) & 0xFFFFFFFF for h2, l2, a2 in href
+                      if h2 == h and l2 != l and got.get(l2) is not None and got[l2] != a2}
+            agree = [c for c in cs if (c - a) & 0xFFFFFFFF in shifts]
+            want, w = (agree or cs)[0], nw[l]
             op, rs, rt = w >> 26, (w >> 21) & 31, (w >> 16) & 31
             if l == 0 or l + 2 > len(nw):
                 continue
-            if (op in mips.LOAD_GPR or op == 0x09) and rt and len(cs) == 1:
+            if (op in mips.LOAD_GPR or op == 0x09) and rt and (len(cs) == 1 or agree):
                 base = rt
             elif op in mips.STORE_OPS:
                 after = nw[l + 1:]
