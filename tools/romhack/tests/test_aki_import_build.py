@@ -1398,6 +1398,33 @@ class CatalogBundles(BuildBase):
         self.assertEqual(out, '[A]\r\n81000000 0001\r\n\r\n# left out (w):\r\n#   [B]\r\n\r\n')
         self.assertEqual(ai.leave_out_sections(text, [{'section': 'Z'}]), (text, ['Z']))
 
+    def test_leave_out_sections_keeps_what_belongs_to_the_next_block(self):
+        """Review of #300: the section just before the watch block keeps none of the block's own comment lines when
+        removed, and a section ending in comment lines never gets the note inside it."""
+        watch = ['# Watches code the hack rewrites itself (aki-roadmap#191).', '# rom: nomercy-rev1', '',
+                 ai.HACK_WRITES_SECTION, 'D1000400 3C09', '']
+        text = '\n'.join(['[A]', '81000000 0001', '', '[B]', '81000002 0003', '', ''] + watch)
+        out, _ = ai.leave_out_sections(text, [{'section': 'B', 'why': 'w'}])
+        self.assertEqual(out, '\n'.join(['[A]', '81000000 0001', '', '# left out (w):', '#   [B]', '', ''] + watch))
+        # [A] ends in its own comment line and the watch block has no comment of its own: the note goes right above
+        # the block's header, not between [A]'s code and its comment
+        text = '\n'.join(['[A]', '81000000 0001', '# off until #205: 81000004 0005', '', '[B]', '81000002 0003', '',
+                          ai.HACK_WRITES_SECTION, 'D1000400 3C09', ''])
+        out, _ = ai.leave_out_sections(text, [{'section': 'B', 'why': 'w'}])
+        self.assertEqual(out, '\n'.join(['[A]', '81000000 0001', '# off until #205: 81000004 0005', '',
+                                         '# left out (w):', '#   [B]', '', '', ai.HACK_WRITES_SECTION,
+                                         'D1000400 3C09', '']))
+        # a "# skipped" note between sections stays when the section before it goes
+        text = '\n'.join(['[A]', '81000000 0001', '', '# skipped (no codes): X', '[C]', '81000004 0005', ''])
+        out, _ = ai.leave_out_sections(text, [{'section': 'A', 'why': 'w'}])
+        self.assertIn('# skipped (no codes): X\n[C]', out)
+
+    def test_a_malformed_codes_leave_out_fails_with_a_clear_message(self):
+        r = self.build_one([self.bundle()], fakes={'derelink': fake_derelink()},
+                           catalog=self.entry(codes_leave_out=['WWF Legends' + BS + 'Arena']))
+        self.assertEqual(r['status'], 'failed', r)
+        self.assertIn('codes_leave_out must list', r['why'])
+
     def test_the_shipped_legends_entry_names_registered_fixes(self):
         cat = json.load(open(ai.DEFAULT_CATALOG, encoding='utf-8'))
         legends = [e for e in cat['entries'] if e['id'] == 'legends_c64'][0]
