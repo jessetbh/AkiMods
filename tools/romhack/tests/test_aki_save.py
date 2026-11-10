@@ -86,6 +86,7 @@ def pak(note=None, seed=3):
 
 NM_NOTE = (0x3738, b'NW4E')
 VPW2_NOTE = (0x4538, b'NA2J')
+VPW64_NOTE = (0x4538, b'NVPJ')
 
 
 class Base(unittest.TestCase):
@@ -312,6 +313,26 @@ class ConvertTests(Base):
         files, _ = S.port_files(self.put('WCW_Cont_1.mpk', pak((0x3738, b'NWNE'))), 'wt')
         self.assertEqual(files[0][0], 'main')
 
+    def test_vpw64_pak_gets_its_own_file(self):
+        # VPW64's pak has its own <game id>.pak.bin since 0.3.0 (aki-roadmap#215); its note is 4538/NVPJ
+        src = self.put('VPW64_Cont_1.mpk', pak(VPW64_NOTE))
+        self.assertEqual(S.game_signature(pak(VPW64_NOTE), 'pak'), ['vpw64'])
+        files, info = S.port_files(src, 'vpw64')
+        self.assertEqual([(t, r) for t, r, _ in files], [('pak', pak(VPW64_NOTE))])
+        self.assertFalse(info.get('notes'))
+        self.assertEqual(S.port_name('vpw64', 'pak'), 'vpw.vpw64.jp.pak.bin')
+        # a pak without the VPW64 note still installs, with a note saying so
+        _, info = S.port_files(self.put('other.mpk', pak(NM_NOTE)), 'vpw64')
+        self.assertIn('no vpw64 note', ' '.join(info['notes']))
+
+    def test_vpw64_srm_sram_and_pak(self):
+        src = self.put('VPW64.srm', make_srm(sram=aki_sram(0x19971021), paks=(pak(VPW64_NOTE), None, None, None)))
+        out = os.path.join(self.d, 'out')
+        os.makedirs(out)
+        run('convert', src, '--game', 'vpw64', '-o', out)
+        self.assertEqual(self.get(os.path.join(out, 'vpw.vpw64.jp.bin')), aki_sram(0x19971021))
+        self.assertEqual(self.get(os.path.join(out, 'vpw.vpw64.jp.pak.bin')), pak(VPW64_NOTE))
+
     def test_pak_from_4_pak_mpk_by_index(self):
         data = pak(NM_NOTE, seed=5) + pak(NM_NOTE, seed=6) + bytes(S.PAK) + bytes(S.PAK)
         src = self.put('NM.mpk', data)
@@ -406,6 +427,16 @@ class InstallTests(Base):
         self.assertEqual(S.saves_root('vpw2', localappdata='C:\\LAD'), os.path.join('C:\\LAD', 'Vpw2Recompiled',
                                                                                      'saves'))
 
+    def test_install_vpw64_sram_and_pak(self):
+        sra = self.put('in/vpw64.sra', ws32(aki_sram(0x19971021, seed=12)))
+        mpk = self.put('in/vpw64.mpk', pak(VPW64_NOTE, seed=13))
+        res = S.install([sra, mpk], 'vpw64', 'vpw64_pack', root=self.root, ignore_running=True, now=self.WHEN)
+        folder = os.path.join(self.root, 'vpw64_pack')
+        self.assertEqual(self.get(os.path.join(folder, 'vpw.vpw64.jp.bin')), aki_sram(0x19971021, seed=12))
+        self.assertEqual(self.get(os.path.join(folder, 'vpw.vpw64.jp.pak.bin')), pak(VPW64_NOTE, seed=13))
+        self.assertEqual([f['action'] for f in res['files']], ['write', 'write'])
+        self.stock_untouched()
+
     def test_cli_install_json(self):
         port = os.path.join(self.d, 'portable')
         os.makedirs(port)
@@ -421,8 +452,8 @@ class InstallTests(Base):
 
 class GamesTableTests(unittest.TestCase):
     def test_matches_ports(self):
-        """GAMES game ids / save types agree with each port's main.cpp when the checkouts are next to AkiTools."""
-        depot = os.path.dirname(ROOT)
+        """GAMES game ids / save types agree with each port's main.cpp when the checkouts are next to AkiMods."""
+        depot = os.path.dirname(os.path.dirname(os.path.dirname(ROOT)))   # <depot>/AkiMods/tools/romhack
         repos = {'wt': 'WcwNwoWorldTour', 'revenge': 'WcwRevengeRecomp', 'wm2k': 'Wm2kRecomp',
                  'vpw64': 'Vpw64Recomp', 'nomercy': 'NoMercyRecomp', 'vpw2': 'Vpw2Recomp'}
         checked = 0
@@ -430,8 +461,15 @@ class GamesTableTests(unittest.TestCase):
             path = os.path.join(depot, repo, 'src', 'main', 'main.cpp')
             if not os.path.isfile(path):
                 continue
-            with open(path, encoding='utf-8', errors='replace') as f:
-                src = f.read()
+            # The shipped source (origin/main) when the checkout has it: a local main can lag behind a release
+            # (VPW64's separate pak, aki-roadmap#215, shipped in 0.3.0).
+            r = subprocess.run(['git', '-C', os.path.join(depot, repo), 'show', 'origin/main:src/main/main.cpp'],
+                               capture_output=True)
+            if r.returncode == 0:
+                src = r.stdout.decode('utf-8', 'replace')
+            else:
+                with open(path, encoding='utf-8', errors='replace') as f:
+                    src = f.read()
             self.assertIn('game.game_id = u8"%s"' % S.GAMES[g]['game_id'], src, g)
             flash = 'SaveType::Flashram' in src
             self.assertEqual(flash, 'flash' in S.GAMES[g]['files'], g)
@@ -439,7 +477,7 @@ class GamesTableTests(unittest.TestCase):
             self.assertEqual(sep, S.GAMES[g]['files'].get('pak') == 'pak', g)
             checked += 1
         if not checked:
-            self.skipTest('no port checkouts next to AkiTools')
+            self.skipTest('no port checkouts next to AkiMods')
 
 
 if __name__ == '__main__':

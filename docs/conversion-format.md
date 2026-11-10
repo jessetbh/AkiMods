@@ -272,8 +272,8 @@ Source of truth: `tools/romhack/aki_conv.py` (`codes_txt`, `add_watch_codes`, `c
 
 - `file`: a save in the port's own format and name: `<game id>.bin` (cartridge save) or `<game id>.pak.bin`
   (Controller Pak). The game ids are `wcw.nwo.worldtour.us`, `wcw.nwo.revenge.us`, `wwf.wm2k.us`, `vpw.vpw64.jp`,
-  `wwf.nomercy.us` and `vpw.vpw2.jp`. Only WrestleMania 2000, No Mercy and VPW2 have a separate `.pak.bin`; World
-  Tour keeps its Controller Pak in `<game id>.bin`, and Revenge and VPW64 have no separate pak file.
+  `wwf.nomercy.us` and `vpw.vpw2.jp`. WrestleMania 2000, VPW64 (since 0.3.0), No Mercy and VPW2 have a separate
+  `.pak.bin`; World Tour keeps its Controller Pak in `<game id>.bin`, and Revenge has no separate pak file.
 - `kind`: `flash`, `sram` or `pak` (`eep` exists in the tool, though none of the six games uses it). No Mercy saves
   to flash; Revenge, WrestleMania 2000, VPW64 and VPW2 to SRAM; World Tour has only a Controller Pak. A note for
   people and tools: neither the launcher nor the game reads it.

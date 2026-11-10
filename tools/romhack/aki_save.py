@@ -52,8 +52,9 @@ ORDER_NAMES = {'be': 'raw N64 / big-endian (ports, cart dumps)',
 # Per game: game id (save file stem, src/main/main.cpp game.game_id), the app folder name, and what each save kind
 # becomes in the port. 'main' = <game id>.bin, 'pak' = <game id>.pak.bin. WT has no cart save: its Controller Pak
 # lives in <game id>.bin (wcw_pak_separate_backing = false, SaveType::Sram used as the pak's 32 KB buffer).
-# Revenge and VPW64 save to cart SRAM (32 KB in <game id>.bin); their pak emulation shares that buffer, so a
-# separate pak image is not supported for them.
+# Revenge saves to cart SRAM (32 KB in <game id>.bin); its pak emulation shares that buffer, so a separate pak
+# image is not supported for it. VPW64 is cart SRAM plus a pak note (player records, company 0x4538 'NVPJ', the
+# osPfsFindFile call at 0x800B62B0); its pak got its own <game id>.pak.bin in 0.3.0 (aki-roadmap#215).
 GAMES = {
     'wt':      dict(game_id='wcw.nwo.worldtour.us', appdata='WCWRecompiled', exe='WCWRecompiled',
                     files={'pak': 'main'}, pak_note=(0x3738, b'NWNE')),
@@ -62,7 +63,7 @@ GAMES = {
     'wm2k':    dict(game_id='wwf.wm2k.us', appdata='Wm2kRecompiled', exe='Wm2kRecompiled',
                     files={'sram': 'main', 'pak': 'pak'}, magic=0x19990901),
     'vpw64':   dict(game_id='vpw.vpw64.jp', appdata='Vpw64Recompiled', exe='Vpw64Recompiled',
-                    files={'sram': 'main'}, magic=0x19971021),
+                    files={'sram': 'main', 'pak': 'pak'}, magic=0x19971021, pak_note=(0x4538, b'NVPJ')),
     'nomercy': dict(game_id='wwf.nomercy.us', appdata='NoMercyRecompiled', exe='NoMercyRecompiled',
                     files={'flash': 'main', 'pak': 'pak'}, pak_note=(0x3738, b'NW4E')),
     'vpw2':    dict(game_id='vpw.vpw2.jp', appdata='Vpw2Recompiled', exe='Vpw2Recompiled',
