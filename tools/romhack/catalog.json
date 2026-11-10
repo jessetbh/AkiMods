@@ -293,7 +293,7 @@
    "known_issues": [
     "Not yet compared with the original on an emulator"
    ],
-   "note": "The full hack, ROM patch included. Not yet compared with the original on an emulator.",
+   "note": "The full hack, ROM patch included.",
    "outputs": {
     "sha1": [
      "B230E544CE1EE66263BA084E125835B3BA4C9334"
