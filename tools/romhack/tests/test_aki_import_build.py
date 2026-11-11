@@ -415,6 +415,115 @@ class HackRoutes(BuildBase):
         self.assertEqual(entry['package'], first['package'])
         self.assertEqual(self.build_one([path], ledger=ledger)['status'], 'converted')
 
+    # aki-roadmap#314: a converter fix never reached a hack imported before it (have-it handed back the old package).
+    def old_ledger(self, ledger, **change):
+        """The ledger as an older converter left it: its entries' keys changed or (value None) dropped."""
+        raw = json.load(open(ledger))
+        for e in raw['entries'].values():
+            for k, v in change.items():
+                if v is None:
+                    e.pop(k, None)
+                else:
+                    e[k] = v
+        json.dump(raw, open(ledger, 'w'))
+
+    def test_a_derelink_build_from_an_older_converter_is_built_again(self):
+        hack = bytearray(STOCK)
+        hack[0x2000] ^= 11
+        path = self.write('in/h.z64', bytes(hack))
+        ledger = os.path.join(self.dir, 'ledger.json')
+        fakes = {'derelink': fake_derelink()}
+        first = self.build_one([path], fakes=fakes, ledger=ledger, repos={})
+        self.assertEqual((first['converter'], first['version']), ('derelink', '1.0.0'))
+        entry = list(json.load(open(ledger))['entries'].values())[0]
+        self.assertEqual(entry['build'], ai.CONVERTER_BUILDS['derelink'])
+        self.assertEqual(self.build_one([path], fakes=fakes, ledger=ledger, repos={})['status'], 'have-it')
+        self.old_ledger(ledger, build=None, output_sha1=None)      # recorded before the ledger kept a build number
+        again = self.build_one([path], fakes=fakes, ledger=ledger, repos={})
+        # Same id, the next patch version (the launcher upgrades the installed conversion), the old package gone.
+        self.assertEqual((again['status'], again['id'], again['version']), ('converted', first['id'], '1.0.1'), again)
+        self.assertEqual(again['rebuild']['why'], 'built by an older converter')
+        self.assertEqual(again['package'], os.path.join(self.out, 'nomercy', '%s-1.0.1.zip' % first['id']))
+        self.assertFalse(os.path.exists(first['package']))
+        m, aki, _ = check_package(self, again['package'], 'conversion')
+        self.assertEqual((m['version'], aki['version']), ('1.0.1', '1.0.1'))
+        entry = list(json.load(open(ledger))['entries'].values())[0]
+        self.assertEqual((entry['package'], entry['version'], entry['build']), (again['package'], '1.0.1', 2))
+        self.assertEqual(self.build_one([path], fakes=fakes, ledger=ledger, repos={})['status'], 'have-it')
+
+    def test_a_route_whose_build_did_not_change_stays_have_it(self):
+        hack = bytearray(STOCK)
+        hack[0x2000] ^= 9
+        path = self.write('in/h.z64', bytes(hack))
+        ledger = os.path.join(self.dir, 'ledger.json')
+        first = self.build_one([path], ledger=ledger)              # make_patch_mod
+        self.old_ledger(ledger, build=None)
+        again = self.build_one([path], ledger=ledger)
+        self.assertEqual((again['status'], again['package']), ('have-it', first['package']))
+
+    def test_a_superseded_catalog_output_is_built_again(self):
+        hack = bytearray(STOCK)
+        hack[0x2000] ^= 3
+        sha1 = hashlib.sha1(bytes(hack)).hexdigest().upper()
+        path = self.write('in/k.z64', bytes(hack))
+        ledger = os.path.join(self.dir, 'ledger.json')
+        entry = {'id': 'known-hack', 'name': 'Known Hack', 'game': 'nomercy', 'tier': 'verified',
+                 'inputs': {'sha1': [sha1]}, 'outputs': {'sha1': [sha1]}}
+        first = self.build_one([path], ledger=ledger, catalog=self.catalog([entry]))
+        self.assertEqual((first['status'], first['aki_tier']), ('converted', 'verified'))
+        # A converter fix changed this hack's build: the catalog lists the old output as superseded. The entry was made
+        # before the ledger kept output hashes, so the old package's own survey tells.
+        fixed = dict(entry, outputs={'sha1': ['0' * 40], 'superseded_sha1': [sha1]})
+        self.old_ledger(ledger, output_sha1=None)
+        again = self.build_one([path], ledger=ledger, catalog=self.catalog([fixed]))
+        self.assertEqual((again['status'], again['id'], again['version']), ('converted', 'known-hack', '1.0.1'), again)
+        self.assertIn('older converter made of Known Hack', again['rebuild']['why'])
+        # This stand-in converter still builds the old output: never Verified, and it says why.
+        self.assertEqual(again['aki_tier'], 'untested')
+        self.assertIn('older converter', again['tier_note'])
+        self.assertFalse(os.path.exists(first['package']))
+
+    def test_a_plan_says_an_older_build_will_be_built_again(self):
+        hack = bytearray(STOCK)
+        hack[0x2000] ^= 11
+        path = self.write('in/h.z64', bytes(hack))
+        ledger = os.path.join(self.dir, 'ledger.json')
+        first = self.build_one([path], fakes={'derelink': fake_derelink()}, ledger=ledger, repos={})
+        self.old_ledger(ledger, build=1)
+        items, _ = self.run_job([path], ledger=ledger)
+        self.assertEqual((items[0]['status'], items[0]['id'], items[0]['rebuild']['replaces']),
+                         ('ready', first['id'], [first['package']]))
+        self.assertTrue(os.path.isfile(first['package']))          # a plan touches nothing
+
+    def test_a_rebuild_only_drops_its_own_old_package(self):
+        hack = bytearray(STOCK)
+        hack[0x2000] ^= 11
+        path = self.write('in/h.z64', bytes(hack))
+        ledger = os.path.join(self.dir, 'ledger.json')
+        fakes = {'derelink': fake_derelink()}
+        first = self.build_one([path], fakes=fakes, ledger=ledger, repos={})
+        outside = self.write('elsewhere/h-1.0.0.zip', open(first['package'], 'rb').read())
+        self.old_ledger(ledger, build=1, package=outside, packages=[first['package'], outside])
+        self.build_one([path], fakes=fakes, ledger=ledger, repos={})
+        self.assertFalse(os.path.exists(first['package']))
+        self.assertTrue(os.path.isfile(outside))                    # not under Converted: kept
+
+    def test_next_version(self):
+        self.assertEqual(ai.next_version('1.0.0'), '1.0.1')
+        self.assertEqual(ai.next_version('2.3.9'), '2.3.10')
+        self.assertIsNone(ai.next_version('1.0'))
+        self.assertIsNone(ai.next_version(None))
+
+    def test_shipped_catalog_supersedes_the_pre_fix_outputs(self):
+        cat = ai.load_catalog()
+        old = {'btbw': '1764DBE1787A1EEC47A200C06EA3C68E45742333',
+               'nmp_v3': '4D6C499D20DFCF54B593E71C05546075678278F8',
+               'nmp_v3_sc': '64264DC78F0CA9693F98526E0FB043263A64CF56'}
+        for cid, h in old.items():
+            self.assertNotIn(h, cat.outputs, cid)                   # an old build no longer reads as the tested one
+            self.assertEqual(cat.superseded[h]['id'], cid)
+        self.assertFalse(set(cat.superseded) & set(cat.outputs))
+
     def test_rom_bytes_are_never_emitted(self):
         hack = bytearray(STOCK)
         hack[0x2000] ^= 1

@@ -63,6 +63,12 @@ import zipfile
 
 TOOLS = os.path.dirname(os.path.abspath(__file__))
 ENGINE_VERSION = '0.1.0'
+# aki-roadmap#314: each converter route's build number, raised whenever a converter fix changes the packages that route
+# makes. The ledger records it; an entry built at a lower number is built again when its input is imported again (at
+# the next patch version, so the launcher upgrades the installed package) instead of answering have-it with the old
+# package. derelink 2 / import-pj64 2 = 0.3.2 (No Mercy Plus V3 entrances #309, WCW Saturday Night Remastered #307;
+# import-pj64 builds a bundle's ROM patch with derelink). A converter the ledger didn't record takes the highest.
+CONVERTER_BUILDS = {'derelink': 2, 'import-pj64': 2, 'make_patch_mod': 1, 'texture-pack': 1}
 
 # The six ports: header game code (0x3B, media + id + region) and the port ROM's SHA-1 (.z64 order), as AKI
 # Launcher's assets/games.json. A ROM with this SHA-1 is the stock game.
@@ -821,7 +827,7 @@ class Catalog(dict):
     def __init__(self, cat=None):
         super().__init__()
         cat = cat or {}
-        self.outputs, self.codes, self.contents = {}, {}, {}
+        self.outputs, self.codes, self.contents, self.superseded = {}, {}, {}, {}
         self.tiers = cat.get('tiers', {})
         for e in cat.get('entries', []):
             for h in e.get('inputs', {}).get('sha1', []):
@@ -830,6 +836,9 @@ class Catalog(dict):
                 self.outputs[h.upper()] = e
             for h in e.get('outputs', {}).get('content_sha1', []):
                 self.contents[h.upper()] = e
+            for h in e.get('outputs', {}).get('superseded_sha1', []):
+                # aki-roadmap#314: what an older converter built for this entry (the broken build a fix replaced).
+                self.superseded[h.upper()] = e
             for h in e.get('outputs', {}).get('codes_sha1', []):
                 # The same codes.txt in several tested packs (No Mercy Plus V3, V3 SC, POE) says nothing alone.
                 self.codes[h.upper()] = None if h.upper() in self.codes else e
@@ -837,7 +846,8 @@ class Catalog(dict):
 
 def load_catalog(path=DEFAULT_CATALOG):
     """Recipes for tested conversions: {"entries": [{"id", "name", "game", "tier", "converter", "known_issues",
-    "note", "inputs": {"sha1": [...]}, "outputs": {"sha1": [...], "codes_sha1": [...], "content_sha1": [...]}}]} -> Catalog. The job's
+    "note", "inputs": {"sha1": [...]}, "outputs": {"sha1": [...], "codes_sha1": [...], "content_sha1": [...],
+    "superseded_sha1": [...]}}]} -> Catalog. The job's
     "catalog" names another file; "" or false turns it off; without the key, catalog.json next to this file."""
     if not path or not os.path.isfile(path):
         return Catalog()
@@ -851,6 +861,44 @@ def ledger_packages(entry):
     if not pkgs and entry.get('package'):
         pkgs = [entry['package']]
     return pkgs
+
+
+def converter_build(converter):
+    """The build number of a converter route (CONVERTER_BUILDS); an unknown or unrecorded one takes the highest."""
+    return CONVERTER_BUILDS.get(converter, max(CONVERTER_BUILDS.values()))
+
+
+def next_version(version):
+    """x.y.z -> x.y.(z+1); anything else -> None."""
+    m = VERSION.match(version or '')
+    if not m:
+        return None
+    x, y, z = version.split('.')
+    return '%s.%s.%d' % (x, y, int(z) + 1)
+
+
+def version_key(version):
+    return tuple(int(x) for x in version.split('.'))
+
+
+def stale_build(prev, packages, catalog):
+    """Why a ledger entry's packages are an older converter's build (aki-roadmap#314), or None when they are current:
+    built at a lower converter build number than its route has now, or a package whose built ROM the catalog lists as
+    superseded (the old output of a hack a fix changed; read from the package for entries made before the ledger kept
+    it)."""
+    if not packages:
+        return None
+    if (prev.get('build') or 1) < converter_build(prev.get('converter')):
+        return 'built by an older converter'
+    superseded = getattr(catalog, 'superseded', None) or {}
+    if superseded:
+        outs = [prev.get('output_sha1')] if prev.get('output_sha1') else \
+            [package_survey(p).get('output_sha1') for p in packages]
+        for out in outs:
+            e = superseded.get((out or '').upper())
+            if e is not None:
+                return 'the build an older converter made of %s' % (e.get('name') or e.get('id'))
+    return None
 
 
 class Ledger:
@@ -868,8 +916,10 @@ class Ledger:
 
     def record(self, key, result):
         self.entries[key] = {k: result.get(k) for k in ('status', 'kind', 'game', 'id', 'name', 'route', 'tier', 'item',
-                                                         'package', 'packages', 'version', 'aki_tier', 'converter')}
-        self.entries[key].update(engine=ENGINE_VERSION, time=time.strftime('%Y-%m-%dT%H:%M:%S'))
+                                                         'package', 'packages', 'version', 'aki_tier', 'converter',
+                                                         'output_sha1', 'codes_sha1', 'content_sha1')}
+        self.entries[key].update(engine=ENGINE_VERSION, build=converter_build(result.get('converter')),
+                                 time=time.strftime('%Y-%m-%dT%H:%M:%S'))
 
     def save(self):
         if not self.path:
@@ -1299,7 +1349,8 @@ def classify(src, roms, catalog, ledger, patchfmt, taken, keep=False, hint=None)
         prev = ledger.entries[key]
         built = ledger_packages(prev)
         kept = [p for p in built if os.path.isfile(p)]
-        if len(kept) == len(built):
+        stale = stale_build(prev, kept, catalog) if len(kept) == len(built) else None
+        if len(kept) == len(built) and not stale:
             # The packages it built go with the line, so a launcher can install one again after it was removed
             # (aki-roadmap#272).
             out = dict(item=src.label, status='have-it', key=key, kind=prev.get('kind'), game=prev.get('game'),
@@ -1309,6 +1360,13 @@ def classify(src, roms, catalog, ledger, patchfmt, taken, keep=False, hint=None)
             return out, key
         # A package it built is gone (deleted from the Converted folder): convert it again, under its old id.
         taken.discard(prev.get('id'))
+        if stale and res.get('status') == 'ready':
+            # aki-roadmap#314: an older converter's build is built again under its old id, at the next patch version
+            # (Builder.build), and replaces the old package: the launcher upgrades the installed conversion.
+            res['rebuild'] = dict(why=stale, version=prev.get('version') or '1.0.0', replaces=kept,
+                                  time=prev.get('time'))
+            if prev.get('id'):
+                res['id'] = prev['id']
     if res.get('status') == 'ready' and res.get('kind') in ('rom', 'patch', 'pj64-bundle', 'texture-pack'):
         res.setdefault('name', None)
         if not res['name']:
@@ -1614,6 +1672,36 @@ class Builder:
         needs-rom / needs-game with why. Never raises."""
         rom = res.pop('_rom', None)
         self._key = res.get('key') or res.get('sha1')
+        version = self.version
+        rebuild = res.get('rebuild') or {}
+        later = next_version(rebuild.get('version'))
+        if later and version_key(later) > version_key(version):
+            self.version = later      # aki-roadmap#314: a rebuild is newer than the package it replaces
+        try:
+            self.build_kind(src, res, rom)
+        finally:
+            self.version = version
+        if res.get('status') == 'converted':
+            self.drop_replaced(res, rebuild.get('replaces') or [])
+        return res
+
+    def drop_replaced(self, res, replaces):
+        """A rebuild's old packages in Converted (aki-roadmap#314), once the new ones are written: only zips under the
+        Converted folder that this input built, and not one the rebuild wrote over."""
+        out = os.path.normcase(os.path.abspath(self.out))
+        new = {os.path.normcase(os.path.abspath(p)) for p in res.get('packages') or []}
+        for p in replaces:
+            full = os.path.normcase(os.path.abspath(p))
+            if full in new or not full.startswith(out + os.sep) or not os.path.isfile(p):
+                continue
+            if package_input(p) != self._key:
+                continue
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+
+    def build_kind(self, src, res, rom):
         try:
             kind = res.get('kind')
             if kind in ('rom', 'patch'):
@@ -1623,7 +1711,7 @@ class Builder:
             elif kind == 'texture-pack':
                 self.build_textures(src, res)
             else:
-                return res   # .nrm and packages: the launcher installs them as they are
+                return       # .nrm and packages: the launcher installs them as they are
         except NeedsRom as e:
             res.update(status='needs-rom', needs=str(e), why='needs %s' % e)
         except NeedsGame as e:
@@ -1681,6 +1769,11 @@ class Builder:
             got = None
         if got is not None and got.get('game') in (None, game):
             return got.get('tier') or UNTESTED, got, None
+        old = getattr(self.catalog, 'superseded', {}).get(res.get('output_sha1') or '')
+        if old is not None and old.get('game') in (None, game):
+            # aki-roadmap#314: the broken build a converter fix replaced (an old derelink with a newer catalog).
+            return UNTESTED, old, ('the build an older converter made of %s, which the AKI team replaced with a fixed '
+                                   'one: update the launcher and import it again' % (old.get('name') or old.get('id')))
         known = self.catalog_entry(res)
         if known:
             return UNTESTED, known, ('built differently from the build the AKI team tested as %s (a newer or older '
@@ -2410,6 +2503,18 @@ def png_content_sha1(data):
     except (struct.error, zlib.error):
         return None
     return h.hexdigest().upper()
+
+
+def package_survey(path):
+    """A conversion package's survey (conversion/aki.json), or {} (a texture pack, or not a readable package)."""
+    try:
+        with zipfile.ZipFile(path) as z:
+            if 'conversion/aki.json' in set(z.namelist()):
+                survey = json.loads(z.read('conversion/aki.json')).get('survey')
+                return survey if isinstance(survey, dict) else {}
+    except Exception:
+        pass
+    return {}
 
 
 def package_input(path):
