@@ -118,9 +118,14 @@ python -I tools\romhack\aki_import.py build C:\Downloads\wrestling --rom nomercy
   `outputs.superseded_sha1` (the old build of a hack a fix changed), is not `have-it`: it is
   built again under its old id at the next patch version (`1.0.0` -> `1.0.1`, so the launcher
   upgrades the installed conversion), the result carries `rebuild` (`why`, the old `version`,
-  the packages it `replaces`), and the old package in the Converted folder is deleted once the
-  new one is written. A `plan` says `ready` with `rebuild` and touches nothing. When a fix changes
-  a tested hack's output, move its old hash from `outputs.sha1` to `outputs.superseded_sha1`.
+  the packages it `replaces`), and once the new package is written the old one moves to
+  `Converted\.replaced\` (`rebuild.moved`: old path -> new path), so an Undo can bring it back.
+  The id stays the old one even when the catalog now knows the build by its output, so the
+  launcher upgrades that conversion instead of adding a second one. A rebuild that can't happen
+  (no port ROM, a failed build) answers `have-it` with the old packages and `rebuild_skipped`.
+  A build that still makes a superseded output is recorded as such and not rebuilt on every
+  import. A `plan` says `ready` with `rebuild` and touches nothing. When a fix changes a tested
+  hack's output, move its old hash from `outputs.sha1` to `outputs.superseded_sha1`.
 - **Archives:** zip members are read on demand (nothing is extracted); members over 128 MB or
   inflating more than 100:1 are refused. 7z needs `7zr.exe` (`bin\7zr.exe` here, PATH, or
   `--sevenzip`) and unpacks into `--work` (keyed by the archive's content), or into a temp folder

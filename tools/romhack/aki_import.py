@@ -69,6 +69,7 @@ ENGINE_VERSION = '0.1.0'
 # package. derelink 2 / import-pj64 2 = 0.3.2 (No Mercy Plus V3 entrances #309, WCW Saturday Night Remastered #307;
 # import-pj64 builds a bundle's ROM patch with derelink). A converter the ledger didn't record takes the highest.
 CONVERTER_BUILDS = {'derelink': 2, 'import-pj64': 2, 'make_patch_mod': 1, 'texture-pack': 1}
+REPLACED_DIR = '.replaced'      # Converted\.replaced\: the packages a rebuild replaced (kept for an Undo)
 
 # The six ports: header game code (0x3B, media + id + region) and the port ROM's SHA-1 (.z64 order), as AKI
 # Launcher's assets/games.json. A ROM with this SHA-1 is the stock game.
@@ -891,7 +892,8 @@ def stale_build(prev, packages, catalog):
     if (prev.get('build') or 1) < converter_build(prev.get('converter')):
         return 'built by an older converter'
     superseded = getattr(catalog, 'superseded', None) or {}
-    if superseded:
+    if superseded and not prev.get('superseded_output'):
+        # (An entry the current converter built and found superseded already: building it again changes nothing.)
         outs = [prev.get('output_sha1')] if prev.get('output_sha1') else \
             [package_survey(p).get('output_sha1') for p in packages]
         for out in outs:
@@ -917,7 +919,8 @@ class Ledger:
     def record(self, key, result):
         self.entries[key] = {k: result.get(k) for k in ('status', 'kind', 'game', 'id', 'name', 'route', 'tier', 'item',
                                                          'package', 'packages', 'version', 'aki_tier', 'converter',
-                                                         'output_sha1', 'codes_sha1', 'content_sha1')}
+                                                         'output_sha1', 'codes_sha1', 'content_sha1',
+                                                         'superseded_output')}
         self.entries[key].update(engine=ENGINE_VERSION, build=converter_build(result.get('converter')),
                                  time=time.strftime('%Y-%m-%dT%H:%M:%S'))
 
@@ -1350,21 +1353,25 @@ def classify(src, roms, catalog, ledger, patchfmt, taken, keep=False, hint=None)
         built = ledger_packages(prev)
         kept = [p for p in built if os.path.isfile(p)]
         stale = stale_build(prev, kept, catalog) if len(kept) == len(built) else None
-        if len(kept) == len(built) and not stale:
-            # The packages it built go with the line, so a launcher can install one again after it was removed
-            # (aki-roadmap#272).
-            out = dict(item=src.label, status='have-it', key=key, kind=prev.get('kind'), game=prev.get('game'),
-                       id=prev.get('id'), name=prev.get('name'), why='imported before (%s)' % prev.get('time', '?'))
-            if kept:
-                out.update(package=kept[0], packages=kept)
-            return out, key
+        # The packages it built go with the line, so a launcher can install one again after it was removed
+        # (aki-roadmap#272).
+        have = dict(item=src.label, status='have-it', key=key, kind=prev.get('kind'), game=prev.get('game'),
+                    id=prev.get('id'), name=prev.get('name'), why='imported before (%s)' % prev.get('time', '?'))
+        if kept:
+            have.update(package=kept[0], packages=kept)
+        if len(kept) == len(built) and not (stale and res.get('status') == 'ready'):
+            if stale:       # an older build that can't be built again now (a base ROM missing): keep the old one
+                have.update(rebuild_skipped=stale, why='%s; %s, and this import could not build it again (%s)' % (
+                    have['why'], stale, res.get('why') or res.get('status')))
+            return have, key
         # A package it built is gone (deleted from the Converted folder): convert it again, under its old id.
         taken.discard(prev.get('id'))
-        if stale and res.get('status') == 'ready':
+        if stale:
             # aki-roadmap#314: an older converter's build is built again under its old id, at the next patch version
-            # (Builder.build), and replaces the old package: the launcher upgrades the installed conversion.
+            # (Builder.build), and replaces the old package: the launcher upgrades the installed conversion. If the
+            # build doesn't happen, run_job answers have-it as before.
             res['rebuild'] = dict(why=stale, version=prev.get('version') or '1.0.0', replaces=kept,
-                                  time=prev.get('time'))
+                                  time=prev.get('time'), have_it=have)
             if prev.get('id'):
                 res['id'] = prev['id']
     if res.get('status') == 'ready' and res.get('kind') in ('rom', 'patch', 'pj64-bundle', 'texture-pack'):
@@ -1686,20 +1693,29 @@ class Builder:
         return res
 
     def drop_replaced(self, res, replaces):
-        """A rebuild's old packages in Converted (aki-roadmap#314), once the new ones are written: only zips under the
-        Converted folder that this input built, and not one the rebuild wrote over."""
+        """A rebuild's old packages (aki-roadmap#314), once the new ones are written, move to Converted\\.replaced\\
+        (same relative path): out of the have-it and target paths, but kept so an Undo can install the old build
+        again (res["rebuild"]["moved"]: {old path: new path}). Only zips under the Converted folder that this input
+        built, and not one the rebuild wrote over."""
         out = os.path.normcase(os.path.abspath(self.out))
         new = {os.path.normcase(os.path.abspath(p)) for p in res.get('packages') or []}
+        moved = {}
         for p in replaces:
             full = os.path.normcase(os.path.abspath(p))
             if full in new or not full.startswith(out + os.sep) or not os.path.isfile(p):
                 continue
             if package_input(p) != self._key:
                 continue
+            rel = os.path.relpath(os.path.abspath(p), os.path.abspath(self.out))
+            dest = os.path.join(self.out, REPLACED_DIR, rel)
             try:
-                os.remove(p)
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                os.replace(p, dest)
+                moved[p] = dest
             except OSError:
                 pass
+        if moved and isinstance(res.get('rebuild'), dict):
+            res['rebuild']['moved'] = moved
 
     def build_kind(self, src, res, rom):
         try:
@@ -1772,6 +1788,7 @@ class Builder:
         old = getattr(self.catalog, 'superseded', {}).get(res.get('output_sha1') or '')
         if old is not None and old.get('game') in (None, game):
             # aki-roadmap#314: the broken build a converter fix replaced (an old derelink with a newer catalog).
+            res['superseded_output'] = True
             return UNTESTED, old, ('the build an older converter made of %s, which the AKI team replaced with a fixed '
                                    'one: update the launcher and import it again' % (old.get('name') or old.get('id')))
         known = self.catalog_entry(res)
@@ -1790,7 +1807,8 @@ class Builder:
         new_id, new_name = entry.get('id'), entry.get('name')
         if not (new_id or new_name) or res.get('catalog') == new_id:
             return cid, name, files
-        if new_id and package_id(new_id) != cid:
+        if new_id and package_id(new_id) != cid and not res.get('rebuild'):
+            # (A rebuild keeps its old id, aki-roadmap#314: the launcher upgrades that conversion, not a second one.)
             taken = self.taken
             taken.discard(cid)
             want = package_id(new_id)
@@ -2623,6 +2641,15 @@ def run_job(job, emit, patchfmt=None):
                 res.update(status='needs-rom', needs=need, why='needs %s' % need)
             if builder is not None and res.get('status') == 'ready':
                 builder.build(s, res)
+            rebuild = res.get('rebuild')
+            if rebuild and res.get('status') not in ('ready', 'converted'):
+                # aki-roadmap#314: the older build stays (and can be installed again) when the new one can't be made.
+                have = dict(rebuild['have_it'])
+                have.update(rebuild_skipped=rebuild['why'], why='%s; %s, and this import could not build it again (%s)'
+                            % (have['why'], rebuild['why'], res.get('why') or res.get('status')))
+                res = have
+            elif rebuild:
+                rebuild.pop('have_it', None)
             res = {k: v for k, v in res.items() if not k.startswith('_')}
             if out and first is None and res['status'] in ('ready', 'converted'):
                 outputs[out] = res

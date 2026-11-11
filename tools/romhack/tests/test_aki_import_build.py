@@ -418,14 +418,16 @@ class HackRoutes(BuildBase):
     # aki-roadmap#314: a converter fix never reached a hack imported before it (have-it handed back the old package).
     def old_ledger(self, ledger, **change):
         """The ledger as an older converter left it: its entries' keys changed or (value None) dropped."""
-        raw = json.load(open(ledger))
+        with open(ledger) as f:
+            raw = json.load(f)
         for e in raw['entries'].values():
             for k, v in change.items():
                 if v is None:
                     e.pop(k, None)
                 else:
                     e[k] = v
-        json.dump(raw, open(ledger, 'w'))
+        with open(ledger, 'w') as f:
+            json.dump(raw, f)
 
     def test_a_derelink_build_from_an_older_converter_is_built_again(self):
         hack = bytearray(STOCK)
@@ -445,6 +447,11 @@ class HackRoutes(BuildBase):
         self.assertEqual(again['rebuild']['why'], 'built by an older converter')
         self.assertEqual(again['package'], os.path.join(self.out, 'nomercy', '%s-1.0.1.zip' % first['id']))
         self.assertFalse(os.path.exists(first['package']))
+        # ... moved aside (Converted\.replaced\), not deleted: an Undo can install the old build again.
+        aside = os.path.join(self.out, '.replaced', 'nomercy', '%s-1.0.0.zip' % first['id'])
+        self.assertEqual(again['rebuild']['moved'], {first['package']: aside})
+        self.assertTrue(os.path.isfile(aside))
+        self.assertNotIn('have_it', again['rebuild'])
         m, aki, _ = check_package(self, again['package'], 'conversion')
         self.assertEqual((m['version'], aki['version']), ('1.0.1', '1.0.1'))
         entry = list(json.load(open(ledger))['entries'].values())[0]
@@ -482,6 +489,46 @@ class HackRoutes(BuildBase):
         self.assertEqual(again['aki_tier'], 'untested')
         self.assertIn('older converter', again['tier_note'])
         self.assertFalse(os.path.exists(first['package']))
+        # ... and that build isn't built again on every import (it would only make the same output again).
+        third = self.build_one([path], ledger=ledger, catalog=self.catalog([fixed]))
+        self.assertEqual((third['status'], third['package']), ('have-it', again['package']))
+
+    def test_a_rebuild_keeps_its_id_when_the_catalog_now_knows_it_by_output(self):
+        hack = bytearray(STOCK)
+        hack[0x2000] ^= 13
+        sha1 = hashlib.sha1(bytes(hack)).hexdigest().upper()
+        path = self.write('in/Some Hack.z64', bytes(hack))
+        ledger = os.path.join(self.dir, 'ledger.json')
+        fakes = {'derelink': fake_derelink()}
+        first = self.build_one([path], fakes=fakes, ledger=ledger, repos={})
+        self.assertEqual((first['id'], first['aki_tier']), ('some-hack', 'untested'))
+        self.old_ledger(ledger, build=1)
+        # The fixed build is one the catalog knows by its output alone (nmp_v21, starrcade, wmx64 have no inputs).
+        cat = self.catalog([{'id': 'tested', 'name': 'Tested Hack', 'game': 'nomercy', 'tier': 'verified',
+                             'outputs': {'sha1': [sha1]}}])
+        again = self.build_one([path], fakes=fakes, ledger=ledger, repos={}, catalog=cat)
+        # The launcher upgrades the conversion it has (some-hack), not a second one next to it.
+        self.assertEqual((again['status'], again['id'], again['version'], again['aki_tier'], again['name']),
+                         ('converted', 'some-hack', '1.0.1', 'verified', 'Tested Hack'), again)
+        check_package(self, again['package'], 'conversion')
+
+    def test_an_older_build_that_cannot_be_built_again_stays_have_it(self):
+        hack = bytearray(STOCK)
+        hack[0x2000] ^= 11
+        path = self.write('in/h.z64', bytes(hack))
+        ledger = os.path.join(self.dir, 'ledger.json')
+        fakes = {'derelink': fake_derelink()}
+        first = self.build_one([path], fakes=fakes, ledger=ledger, repos={})
+        self.old_ledger(ledger, build=1)
+        # No port ROM this time (needs-rom), then a converter that fails: the old build is still offered both times.
+        for job in (dict(roms={}), dict(fakes={'derelink': fake_derelink(fail='boom')})):
+            r = self.build_one([self.write('in/h.z64', bytes(hack))], ledger=ledger, repos={},
+                               **dict(dict(fakes=fakes), **job))
+            self.assertEqual((r['status'], r['package'], r['packages'], r['id']),
+                             ('have-it', first['package'], [first['package']], first['id']), job)
+            self.assertEqual(r['rebuild_skipped'], 'built by an older converter')
+            self.assertIn('could not build it again', r['why'])
+            self.assertTrue(os.path.isfile(first['package']))
 
     def test_a_plan_says_an_older_build_will_be_built_again(self):
         hack = bytearray(STOCK)
