@@ -357,7 +357,9 @@ class HackRoutes(BuildBase):
             self.assertRegex(e['id'], ID_RE)
             self.assertIn(e['tier'], raw['tiers'])
             self.assertIn(e['game'], ai.GAMES)
-            for hashes in list(e.get('inputs', {}).values()) + list(e['outputs'].values()):
+            # an unsupported ROM has no tested output, only its input (aki-roadmap#307)
+            self.assertTrue(e.get('outputs') or (e['tier'] == 'unsupported' and e.get('inputs', {}).get('sha1')), e['id'])
+            for hashes in list(e.get('inputs', {}).values()) + list(e.get('outputs', {}).values()):
                 for h in hashes:
                     self.assertRegex(h, r'^[0-9A-F]{40}$')
         self.assertLess(os.path.getsize(ai.DEFAULT_CATALOG), 64 << 10)
@@ -1083,6 +1085,25 @@ class ReviewFixes(BuildBase):
         r = self.build_one([self.write('in/k.z64', bytes(hack))], fakes={'derelink': fake_derelink()}, catalog=cat,
                            repos={})
         self.assertEqual((r['status'], r['converter']), ('converted', 'derelink'))
+
+    def test_catalog_unsupported_rom_is_refused_with_its_note(self):
+        # aki-roadmap#307: a ROM the catalog lists as unsupported (by its own SHA-1) is not built
+        hack = bytearray(STOCK)
+        hack[0x2000] ^= 7
+        sha1 = hashlib.sha1(bytes(hack)).hexdigest().upper()
+        cat = self.write('catalog.json', json.dumps({'entries': [{'id': 'u', 'name': 'U', 'game': 'nomercy',
+            'tier': 'unsupported', 'converter': 'derelink', 'note': 'Not supported yet: its loader.',
+            'inputs': {'sha1': [sha1]}}]}).encode())
+        r = self.build_one([self.write('in/u.z64', bytes(hack))], fakes={'derelink': fake_derelink()}, catalog=cat,
+                           repos={})
+        self.assertEqual((r['status'], r['why'], r['catalog']), ('unsupported', 'Not supported yet: its loader.', 'u'))
+        self.assertNotIn('package', r)
+        # another ROM of the same hack still builds
+        other = bytearray(STOCK)
+        other[0x2000] ^= 9
+        r = self.build_one([self.write('in/v.z64', bytes(other))], fakes={'derelink': fake_derelink()}, catalog=cat,
+                           repos={})
+        self.assertEqual(r['status'], 'converted')
 
     def test_byte_swapped_port_rom_copy_is_removed(self):
         port = self.write('roms/nm.v64', t.v64(STOCK))

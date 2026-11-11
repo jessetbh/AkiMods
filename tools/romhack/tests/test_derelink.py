@@ -467,6 +467,51 @@ class MapTests(unittest.TestCase):
         runs = d.runs_from_pairs(pairs, 0x80040000, 0x80060000)
         self.assertEqual([r[2] for r in runs], [(-0xA0) & 0xFFFFFFFF, (-0x90) & 0xFFFFFFFF])
 
+    def test_replace_sync(self):
+        # aki-roadmap#307: `sync` (any stype) becomes a nop inside the functions given, nothing else changes
+        D = bytearray(0x40)
+        put(D, 0x10, [0x8D0B0000, 0x0000000F, 0x0000004F, 0x3C048043])
+        put(D, 0x30, [0x0000000F])          # outside every function: left alone
+        report = {}
+        d.replace_sync(D, [(0x80001000, 0x10, 0x10)], report)
+        self.assertEqual([d.word(D, 0x10 + 4 * i) for i in range(4)], [0x8D0B0000, 0, 0, 0x3C048043])
+        self.assertEqual(d.word(D, 0x30), 0x0000000F)
+        self.assertEqual(report['sync_replaced'], 2)
+
+    def test_moved_cave_jump(self):
+        # aki-roadmap#307: padding code copied in place jumps into a cave derelink moved to the new-code area
+        A = d.Analysis.__new__(d.Analysis)
+        A.new_blocks = [('cave', None, 0x8003A470, 0x8003A4A0, 0x8F000038), ('reshaped', 'ovl_a', 0x80100000, 0x80100100, 0x8F001000)]
+        j = 0x08000000 | ((0x8003A478 >> 2) & 0x3FFFFFF)
+        self.assertEqual(d.mips.jump_target(d.moved_cave_jump(A, j, 0x800336D8), 0x800336D8), 0x8F000040)
+        jal = 0x0C000000 | ((0x8003A478 >> 2) & 0x3FFFFFF)
+        self.assertEqual(d.moved_cave_jump(A, jal, 0x800336D8) >> 26, 3)
+        self.assertEqual(d.mips.jump_target(d.moved_cave_jump(A, jal, 0x800336D8), 0x800336D8), 0x8F000040)
+        # a jump elsewhere, a reshaped chunk's address (not a cave) and a non-jump stay as they are
+        other = 0x08000000 | ((0x80033700 >> 2) & 0x3FFFFFF)
+        self.assertEqual(d.moved_cave_jump(A, other, 0x800336D8), other)
+        resh = 0x08000000 | ((0x80100010 >> 2) & 0x3FFFFFF)
+        self.assertEqual(d.moved_cave_jump(A, resh, 0x800336D8), resh)
+        self.assertEqual(d.moved_cave_jump(A, 0x3C098040, 0x800336D8), 0x3C098040)
+
+    def test_padding_table_refs(self):
+        # aki-roadmap#307: WCW Saturday Night Remastered repoints loads at its own table in the stock ROM's zero padding;
+        # data a relinked hack moved (stock contents at the new address) stays evidence
+        TEXT, ROM, size = 0x80038000, 0x1000, 0x20000
+        base, hack = bytearray(ROM + size), bytearray(ROM + size)
+        rom_of = lambda v: ROM + (v - TEXT)
+        put(base, rom_of(0x800467E8), [0x11111111, 0x22222222, 0x33333333, 0x44444444])   # stock table
+        put(hack, rom_of(0x8003A970), [0x55555555, 0x66666666, 0x77777777, 0x88888888])   # the hack's own, in padding
+        put(base, rom_of(0x80040000), [0xAAAAAAAA, 0xBBBBBBBB, 0xCCCCCCCC, 0xDDDDDDDD])   # stock data ...
+        put(hack, rom_of(0x80041000), [0xAAAAAAAA, 0xBBBBBBBB, 0xCCCCCCCC, 0xDDDDDDDD])   # ... moved by a relink
+        put(base, rom_of(0x80042000), [0x12345678] * 4)                                   # stock data, hack edits it
+        put(hack, rom_of(0x80042000), [0x87654321] * 4)
+        repointed, moved, edited = (0x800467E8, 0x8003A970), (0x80040000, 0x80041000), (0x80042000, 0x80042000)
+        got = d.padding_table_refs([repointed, moved, edited], bytes(base), bytes(hack), rom_of, rom_of)
+        self.assertEqual(got, {repointed})
+        # a target outside either ROM is left alone
+        self.assertEqual(d.padding_table_refs([(0x800467E8, 0x80100000)], bytes(base), bytes(hack), rom_of, rom_of), set())
+
     def test_runs_from_pairs_keeps_a_first_shift_many_references_agree_on(self):
         pairs = [(0x80040000, 0x800400A0)] * 40
         pairs += [(0x80050000 + 4 * i, 0x80050000 + 4 * i) for i in range(5)]
