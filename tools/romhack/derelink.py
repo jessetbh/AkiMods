@@ -1897,7 +1897,9 @@ def payload_data_owners(A, get, spans):
     # the hack's changed overlay functions can read a table it moved into the payload too: No Mercy Plus V3's ovl_b
     # 0x8011045C (stock 0x8010EF5C) looks up the entrance walking paths in a pointer table at 0x80471290 instead of
     # ovl_b's own; translated without that overlay (ovl_e's -0x1530, not ovl_b's -0x1500) every path started 0x30
-    # bytes early and the wrestler walked in from far off camera (aki-roadmap#309)
+    # bytes early and the wrestler walked in from far off camera (aki-roadmap#309). They only decide words no payload
+    # code owns (a payload hook's ownership, aki-roadmap#223, stays as it was).
+    unit_owners = {}
     for name, units in getattr(A, 'units', {}).items():
         if name in ('main', 'entry') or name not in getattr(A, 'place', {}):
             continue
@@ -1906,19 +1908,28 @@ def payload_data_owners(A, get, spans):
             words = [word(A.hack, srom + (h - stext) + 4 * i) for i in range(z // 4)]
             for hh, l, a in mips.hilo_refs(words):
                 if hh is not None and p['ram'] <= a < p['ram'] + p['size'] and not in_code(a):
-                    owners.setdefault(a & ~3, set()).add(name)
-    refs = sorted(owners)
+                    unit_owners.setdefault(a & ~3, set()).add(name)
+
+    def lookup(table, v):
+        refs = sorted(table)
+        def at(v):
+            i = bisect.bisect_right(refs, v) - 1
+            if i < 0 or v - refs[i] >= PAYLOAD_DATA_REACH or any(refs[i] < b <= v for a, b in spans):
+                return False, None
+            return True, table[refs[i]]
+        return at
+    by_code, by_unit = lookup(owners, None), lookup(unit_owners, None)
 
     def ctx_at(v):
-        """The one overlay owning the word at v, a frozenset when several do (the caller takes their translation when
-        they agree), or None."""
-        i = bisect.bisect_right(refs, v) - 1
-        if i < 0 or v - refs[i] >= PAYLOAD_DATA_REACH or any(refs[i] < b <= v for a, b in spans):
+        """The one overlay owning the word at v, a frozenset when several changed overlay functions do (the caller
+        takes their translation when they agree), or None."""
+        found, cs = by_code(v)
+        if found:
+            return next(iter(cs)) if len(cs) == 1 else None
+        found, cs = by_unit(v)
+        if not found:
             return None
-        cs = owners[refs[i]]
-        if len(cs) == 1:
-            return next(iter(cs))
-        return frozenset(cs) if None not in cs else None
+        return next(iter(cs)) if len(cs) == 1 else frozenset(cs)
     return ctx_at
 
 
@@ -2491,7 +2502,8 @@ def stub_over(A, D, area, P, first, words_at, targets):
         return None
     if not (_jumpish(w_prev) or _jumpish(w_next) or (P + 4) in targets) and P + 8 < owner.vram + owner.size:
         J, body, back = P, list(first) + [w_next], P + 8
-    elif (P + 4) in targets and not (_jumpish(w_prev) or _jumpish(words_at(P - 8)) or P in targets)             and owner.vram <= P - 4 and P + 4 < owner.vram + owner.size:
+    elif (P + 4) in targets and not (_jumpish(w_prev) or _jumpish(words_at(P - 8)) or P in targets) \
+            and owner.vram <= P - 4 and P + 4 < owner.vram + owner.size:
         # the instruction after P is a branch target, so it can't be the j's delay slot: the j goes on the
         # instruction before P instead, which moves into the stub ahead of P's stand-in (NM+ V3, aki-roadmap#309)
         J, body, back = P - 4, [w_prev] + list(first), P + 4
@@ -2680,6 +2692,10 @@ def fix_unreachable_lo(A, D, area, report):
                 kl = (k, dlt - k)
             with_lo = lambda b, L: (w & 0xFC1F0000) | (b << 21) | (L & 0xFFFF)
             addiu_ = lambda d_, s_, k_: (0x09 << 26) | (s_ << 21) | (d_ << 16) | (k_ & 0xFFFF)
+            if op in (0x1A, 0x1B, 0x22, 0x26):
+                # lwl/lwr/ldl/ldr merge into rt: building the address in rt would spoil the half already loaded
+                report.setdefault('unreachable_lo_left', []).append(lo + 4 * l)
+                continue
             is_load = (op in mips.LOAD_GPR or op == 0x09) and rt and (len(cs) == 1 or agree)
             if is_load and not indexed:
                 first = [(0x0F << 26) | (rt << 16) | (((want + 0x8000) >> 16) & 0xFFFF), with_lo(rt, want)]

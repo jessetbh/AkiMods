@@ -1067,6 +1067,40 @@ class PayloadStubTests(unittest.TestCase):
         self.assertEqual(wd(D, A, 0x80400040), 0x80148E90)
         self.assertEqual(report['payload_pointers_by_owner'], 0)
 
+    def test_payload_hook_keeps_its_table_when_a_changed_function_reads_it_too(self):
+        # aki-roadmap#223 stays: an ovl_e hook's table keeps ovl_e even if a changed ovl_b function also reads it
+        A, D = self.owned_table({0x80400000: 'ovl_e'})
+        hack = bytearray(A.hack)
+        put(hack, 0x10C0, [lui(self.T1, 0x8040), lw(self.T2, 0x40, self.T1)])
+        A.hack = bytes(hack)
+        A.place = {'ovl_b': (0x10C0, 0x80108000)}
+        A.units = {'ovl_b': [(0x80106B00, 0x80108000, 8)]}
+        report = {}
+        d.payload_fixups(A, D, report)
+        self.assertEqual(wd(D, A, 0x80400040), 0x80148E90)
+
+    def test_payload_table_built_by_two_overlays_payload_code_stays_ambiguous(self):
+        A, D = self.owned_table({0x80400000: 'ovl_e'})
+        hack = bytearray(A.hack)
+        put(hack, 0x1080, [lui(self.T1, 0x8040), addiu(self.T1, self.T1, 0x40), jr(RA), NOP])
+        A.hack = bytes(hack)
+        A.extras.append(d.Extra('payload', 0x80400080, 0x80400080, 0x10))
+        A.region_ctx = {0x80400000: 'ovl_e', 0x80400080: 'ovl_b'}
+        get = lambda v: d.word(A.hack, A.payload['rom'] + (v - A.payload['ram']))
+        own = d.payload_data_owners(A, get, d.code_spans(A.extras, 'payload'))
+        self.assertIsNone(own(0x80400040))
+
+    def test_partial_load_no_hi_reaches_is_left(self):
+        # lwl merges into rt: a stub building the address in rt would spoil the word (aki-roadmap#309 review)
+        A, D = self.odd_load()
+        lwl = (0x22 << 26) | (self.T1 << 21) | (self.T3 << 16) | (-0x1F42 & 0xFFFF)
+        put(D, 0x1000 + 0xC, [lwl])
+        A.hack = bytes(A.hack[:0x100C]) + lwl.to_bytes(4, 'big') + bytes(A.hack[0x1010:])
+        area, report = bytearray(), {}
+        d.fix_unreachable_lo(A, D, area, report)
+        self.assertEqual(report['unreachable_lo_fixed'], [])     # (hilo_refs doesn't pair partial loads today)
+        self.assertEqual(len(area), 0)
+
     def test_payload_data_owner_reach(self):
         A, D = self.owned_table({0x80400000: 'ovl_e'})
         get = lambda v: d.word(A.hack, A.payload['rom'] + (v - A.payload['ram']))
