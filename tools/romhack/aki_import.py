@@ -2648,6 +2648,8 @@ def run_job(job, emit, patchfmt=None):
                 have.update(rebuild_skipped=rebuild['why'], why='%s; %s, and this import could not build it again (%s)'
                             % (have['why'], rebuild['why'], res.get('why') or res.get('status')))
                 res = have
+                if have.get('id'):
+                    taken.add(have['id'])       # its old id stays held for the rest of the batch
             elif rebuild:
                 rebuild.pop('have_it', None)
             res = {k: v for k, v in res.items() if not k.startswith('_')}
