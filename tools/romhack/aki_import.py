@@ -1756,6 +1756,13 @@ class Builder:
             raise BuildError('no port for this game')
         port_path, port_rom = self.port(game)
         entry = self.catalog_entry(res) or {}
+        if entry.get('tier') == 'unsupported' and (res.get('sha1') or '').upper() in [
+                s.upper() for s in entry.get('inputs', {}).get('sha1', [])]:
+            # a ROM the AKI team found doesn't convert yet (aki-roadmap#307): say why instead of building a pack that
+            # crashes. Only the exact input ROM: another build of the same hack still converts.
+            res.update(status='unsupported', game=game, catalog=entry.get('id'),
+                       why=entry.get('note') or "the AKI team found this ROM doesn't convert yet")
+            return
         aki_hack = self.mod('aki_hack')
         stock = aki_hack.Stock(roms={game: port_rom}, tables=self.tables)
         survey = aki_hack.survey_rom(res['item'].split('!')[-1], rom, stock) or {}

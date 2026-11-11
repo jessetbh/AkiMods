@@ -754,6 +754,20 @@
      "869F65C454EA6CFE16338E03FC78FD2C4F653A54"
     ]
    }
+  },
+  {
+   "id": "hulkamania64_beta",
+   "name": "WWF Hulkamania 64 - Beta",
+   "game": "wm2k",
+   "version": "0.0.0",
+   "tier": "unsupported",
+   "converter": "derelink",
+   "note": "Not supported yet: this beta loads its own code in several stages and keeps it among the graphics microcode's data, which the converter can't rebuild yet (aki-roadmap#307).",
+   "inputs": {
+    "sha1": [
+     "3636C068BF8268BF29AFE5FDB1C0DA76DA70D3E1"
+    ]
+   }
   }
  ]
 }
