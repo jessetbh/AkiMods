@@ -1894,14 +1894,42 @@ def payload_data_owners(A, get, spans):
         for h, l, a in mips.hilo_refs(words):
             if h is not None and p['ram'] <= a < p['ram'] + p['size'] and not in_code(a):
                 owners.setdefault(a & ~3, set()).add(ctx)
-    refs = sorted(owners)
+    # the hack's changed overlay functions can read a table it moved into the payload too: No Mercy Plus V3's ovl_b
+    # 0x8011045C (stock 0x8010EF5C) looks up the entrance walking paths in a pointer table at 0x80471290 instead of
+    # ovl_b's own; translated without that overlay (ovl_e's -0x1530, not ovl_b's -0x1500) every path started 0x30
+    # bytes early and the wrestler walked in from far off camera (aki-roadmap#309). They only decide words no payload
+    # code owns (a payload hook's ownership, aki-roadmap#223, stays as it was).
+    unit_owners = {}
+    for name, units in getattr(A, 'units', {}).items():
+        if name in ('main', 'entry') or name not in getattr(A, 'place', {}):
+            continue
+        srom, stext = A.place[name][:2]
+        for s, h, z in units:
+            words = [word(A.hack, srom + (h - stext) + 4 * i) for i in range(z // 4)]
+            for hh, l, a in mips.hilo_refs(words):
+                if hh is not None and p['ram'] <= a < p['ram'] + p['size'] and not in_code(a):
+                    unit_owners.setdefault(a & ~3, set()).add(name)
+
+    def lookup(table, v):
+        refs = sorted(table)
+        def at(v):
+            i = bisect.bisect_right(refs, v) - 1
+            if i < 0 or v - refs[i] >= PAYLOAD_DATA_REACH or any(refs[i] < b <= v for a, b in spans):
+                return False, None
+            return True, table[refs[i]]
+        return at
+    by_code, by_unit = lookup(owners, None), lookup(unit_owners, None)
 
     def ctx_at(v):
-        i = bisect.bisect_right(refs, v) - 1
-        if i < 0 or v - refs[i] >= PAYLOAD_DATA_REACH or any(refs[i] < b <= v for a, b in spans):
+        """The one overlay owning the word at v, a frozenset when several changed overlay functions do (the caller
+        takes their translation when they agree), or None."""
+        found, cs = by_code(v)
+        if found:
+            return next(iter(cs)) if len(cs) == 1 else None
+        found, cs = by_unit(v)
+        if not found:
             return None
-        cs = owners[refs[i]]
-        return next(iter(cs)) if len(cs) == 1 else None
+        return next(iter(cs)) if len(cs) == 1 else frozenset(cs)
     return ctx_at
 
 
@@ -1942,7 +1970,11 @@ def payload_fixups(A, D, report):
         w = get(v)
         if 0x80000400 <= w < 0x80400000 and w & 3 == 0:
             ctx = data_ctx(v)
-            c = A.map.translate(w, ctx)
+            if isinstance(ctx, frozenset):
+                ts = {A.map.translate(w, x) for x in ctx}
+                ctx, c = (next(iter(ctx)), ts.pop()) if len(ts) == 1 else (None, A.map.translate(w))
+            else:
+                c = A.map.translate(w, ctx)
             if ctx is not None and c != A.map.translate(w):
                 owned += 1
             if c is not None and c != w:
@@ -2460,25 +2492,34 @@ def _jumpish(w):
 def stub_over(A, D, area, P, first, words_at, targets):
     """Replace payload instruction P (and the one after it, which would sit in the j's delay slot)
     by a jump to a new-code-area stub: `first` (instructions standing in for P), the instruction
-    after P, then back to P + 8 (registered as a payload entry). None if P can't be moved."""
+    after P, then back to P + 8 (registered as a payload entry). When the instruction after P is a branch
+    target, the j goes on the instruction before P instead (it runs first in the stub; back to P + 4).
+    None if P can't be moved."""
     p = A.payload
     w_prev, w_next = words_at(P - 4), words_at(P + 4)
-    if _jumpish(w_prev) or _jumpish(w_next) or (P + 4) in targets:
-        return None
     owner = next((x for x in A.extras if x.kind == 'payload' and x.vram and x.vram <= P < x.vram + x.size), None)
-    if owner is None or P + 8 >= owner.vram + owner.size:
+    if owner is None:
+        return None
+    if not (_jumpish(w_prev) or _jumpish(w_next) or (P + 4) in targets) and P + 8 < owner.vram + owner.size:
+        J, body, back = P, list(first) + [w_next], P + 8
+    elif (P + 4) in targets and not (_jumpish(w_prev) or _jumpish(words_at(P - 8)) or P in targets) \
+            and owner.vram <= P - 4 and P + 4 < owner.vram + owner.size:
+        # the instruction after P is a branch target, so it can't be the j's delay slot: the j goes on the
+        # instruction before P instead, which moves into the stub ahead of P's stand-in (NM+ V3, aki-roadmap#309)
+        J, body, back = P - 4, [w_prev] + list(first), P + 4
+    else:
         return None
     off = (len(area) + 15) & ~15
     area.extend(bytes(off - len(area)))
     sv = NEW_CODE_VRAM + off
-    code = list(first) + [w_next, mips.with_jump_target(0x08000000, P + 8), 0]
+    code = body + [mips.with_jump_target(0x08000000, back), 0]
     for c in code:
         area.extend(c.to_bytes(4, 'big'))
-    rom = p['rom'] + (P - p['ram'])
+    rom = p['rom'] + (J - p['ram'])
     put_word(D, rom, mips.with_jump_target(0x08000000, sv))
     put_word(D, rom + 4, 0)
     A.extras.append(Extra('refresh', None, sv, 4 * len(code)))
-    A.extras.append(Extra('payload', P + 8, P + 8, owner.vram + owner.size - (P + 8)))
+    A.extras.append(Extra('payload', back, back, owner.vram + owner.size - back))
     return sv
 
 
@@ -2619,28 +2660,69 @@ def fix_unreachable_lo(A, D, area, report):
         nw = [word(D, rom + i) for i in range(0, hi - lo, 4)]
         got = {l: a for h, l, a in mips.hilo_refs(nw)}
         targets = {mips.branch_target(w, lo + 4 * i) for i, w in enumerate(nw)} - {None}
-        for h, l, a in mips.hilo_refs(hw):
+        href = list(mips.hilo_refs(hw))
+        odd = {l for h, l, a in href if (lambda cs: cs and not (got.get(l) in cs or cs[0] == a and got.get(l) == a))(
+            A.map.candidates(a, ctx))}
+        for h, l, a in href:
             cs = A.map.candidates(a, ctx)
             if not cs or got.get(l) in cs or cs[0] == a and got.get(l) == a:
                 continue     # rewrite() reached one of them (it may pick a later one for a shift all uses share)
-            want, w = cs[0], nw[l]
+            # Several candidates (overlays with different shifts): take the one whose shift rewrite() gave the other
+            # uses of this lui that it could encode (No Mercy Plus V3's entrance code reads the walking-path tables
+            # at 0x801479AA etc. through a lui shared with 0x8014F814: both shift -0x1500, aki-roadmap#309).
+            shifts = {(got[l2] - a2) & 0xFFFFFFFF for h2, l2, a2 in href
+                      if h2 == h and l2 != l and got.get(l2) is not None and got[l2] != a2}
+            agree = [c for c in cs if (c - a) & 0xFFFFFFFF in shifts]
+            want, w = (agree or cs)[0], nw[l]
             op, rs, rt = w >> 26, (w >> 21) & 31, (w >> 16) & 31
             if l == 0 or l + 2 > len(nw):
                 continue
-            if (op in mips.LOAD_GPR or op == 0x09) and rt and len(cs) == 1:
-                base = rt
+            # rs holds the lui's value plus whatever `addu` added on the way (an array index): a stub that builds
+            # the address from a fresh lui would drop it (NM+ V3's `lui at; addu at, at, v0; lw s2, %lo(at)`, #309).
+            # Those go as rs + delta from the %hi rewrite() chose: addiu k, then the instruction with %lo L.
+            lw_ = nw[h]
+            indexed = (hw[h] >> 16) & 31 != rs or any(
+                x >> 26 == 0 and (x & 0x3F) in (0x20, 0x21, 0x2C, 0x2D) and (x >> 11) & 31 == rs for x in hw[h + 1:l])
+            dlt = ((want - ((lw_ & 0xFFFF) << 16)) & 0xFFFFFFFF) if lw_ >> 26 == 0x0F else None
+            if dlt is not None and dlt >= 0x80000000:
+                dlt -= 0x100000000
+            kl = None
+            if dlt is not None and -0x10000 <= dlt <= 0xFFFE:
+                k = max(-0x8000, min(0x7FFF, dlt))
+                kl = (k, dlt - k)
+            with_lo = lambda b, L: (w & 0xFC1F0000) | (b << 21) | (L & 0xFFFF)
+            addiu_ = lambda d_, s_, k_: (0x09 << 26) | (s_ << 21) | (d_ << 16) | (k_ & 0xFFFF)
+            if op in (0x1A, 0x1B, 0x22, 0x26):
+                # lwl/lwr/ldl/ldr merge into rt: building the address in rt would spoil the half already loaded
+                report.setdefault('unreachable_lo_left', []).append(lo + 4 * l)
+                continue
+            is_load = (op in mips.LOAD_GPR or op == 0x09) and rt and (len(cs) == 1 or agree)
+            if is_load and not indexed:
+                first = [(0x0F << 26) | (rt << 16) | (((want + 0x8000) >> 16) & 0xFFFF), with_lo(rt, want)]
+            elif is_load:
+                if kl is None:
+                    report.setdefault('unreachable_lo_left', []).append(lo + 4 * l)
+                    continue
+                first = [addiu_(rt, rs, kl[0]), with_lo(rt, kl[1])]
             elif op in mips.STORE_OPS:
                 after = nw[l + 1:]
                 value = set() if op in FPR_RT_OPS else {rt}
                 base = next((r for r in (rs, AT) if r and r not in value and overwritten_before_read(after, r)), None)
-                if base is None:
+                if base is not None and not indexed:
+                    first = [(0x0F << 26) | (base << 16) | (((want + 0x8000) >> 16) & 0xFFFF), with_lo(base, want)]
+                elif kl is not None and base is not None:
+                    first = [addiu_(base, rs, kl[0]), with_lo(base, kl[1])]
+                elif kl is not None and rs not in value and l + 1 not in odd:
+                    # no free scratch register: move rs itself to the target and back after the store (NM+ V3's
+                    # entrance code stores through s1, which it reads again; aki-roadmap#309). Not when the next
+                    # instruction is another odd use: it would ride along unfixed in this stub's delay slot copy.
+                    first = [addiu_(rs, rs, kl[0]), with_lo(rs, kl[1]), addiu_(rs, rs, -kl[0])]
+                else:
                     report.setdefault('unreachable_lo_left', []).append(lo + 4 * l)
                     continue
             else:
                 continue
             P = lo + 4 * l
-            first = [(0x0F << 26) | (base << 16) | (((want + 0x8000) >> 16) & 0xFFFF),
-                     (w & 0xFC1F0000) | (base << 21) | (want & 0xFFFF)]
             pw = lambda v: word(D, p['rom'] + (v - p['ram']))
             if stub_over(A, D, area, P, first, pw, targets) is None:
                 report.setdefault('unreachable_lo_left', []).append(P)

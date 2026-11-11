@@ -887,24 +887,76 @@ class PayloadStubTests(unittest.TestCase):
         self.assertEqual([d.word(area, 4 * i) for i in range(3)],
                          [lui(d.AT, 0x8013), self.SH(self.T3, -0x3442, d.AT), addiu(self.T2, 0, 1)])
 
-    def test_store_is_left_when_no_scratch_register_is_free(self):
-        # t1 is read after the store and $at is never overwritten before the jr
+    def test_store_with_no_free_scratch_moves_its_base_and_back(self):
+        # t1 is read after the store and $at is never overwritten before the jr: the store goes through t1 itself,
+        # moved to the target (k + L = 0x8012CBBE - 0x80120000) and back (No Mercy Plus V3, aki-roadmap#309)
         A, D = self.relinked_stores([addiu(self.T2, 0, 1), (self.T1 << 21) | (self.T2 << 11) | 0x21, jr(RA), NOP])   # addu t2, t1, zero
+        area, report = bytearray(), {}
+        d.fix_unreachable_lo(A, D, area, report)
+        self.assertEqual(report['unreachable_lo_fixed'], [(0x8040000C, 0x8012E0BE, 0x8012CBBE)])
+        self.assertEqual(wd(D, A, 0x8040000C), j(d.NEW_CODE_VRAM))
+        self.assertEqual([d.word(area, 4 * i) for i in range(6)],
+                         [addiu(self.T1, self.T1, 0x7FFF), self.SH(self.T3, 0x4BBF, self.T1), addiu(self.T1, self.T1, -0x7FFF),
+                          addiu(self.T2, 0, 1), j(0x80400014), NOP])
+
+    def test_store_is_left_when_its_value_is_its_base_and_no_scratch_is_free(self):
+        A, D = self.relinked_stores([addiu(self.T2, 0, 1), (self.T1 << 21) | (self.T2 << 11) | 0x21, jr(RA), NOP])
+        sh_t1 = self.SH(self.T1, -0x1F42, self.T1)
+        put(D, 0x1000 + 0xC, [sh_t1])
+        A.hack = bytes(A.hack[:0x100C]) + sh_t1.to_bytes(4, 'big') + bytes(A.hack[0x1010:])
         area, report = bytearray(), {}
         d.fix_unreachable_lo(A, D, area, report)
         self.assertEqual(report['unreachable_lo_fixed'], [])
         self.assertEqual(report['unreachable_lo_left'], [0x8040000C])
         self.assertEqual(len(area), 0)
-        self.assertEqual(wd(D, A, 0x8040000C), self.SH(self.T3, -0x1F42, self.T1))
+        self.assertEqual(wd(D, A, 0x8040000C), sh_t1)
 
-    def test_load_with_two_candidates_is_still_left_alone(self):
-        # loads keep the old rule (one candidate only), so packs the store fix doesn't concern don't change
+    def odd_load(self):
         A, D = self.relinked_stores()
         put(D, 0x1000 + 0xC, [lw(self.T3, -0x1F42, self.T1)])
         A.hack = bytes(A.hack[:0x100C]) + lw(self.T3, -0x1F42, self.T1).to_bytes(4, 'big') + bytes(A.hack[0x1010:])
+        return A, D
+
+    def test_load_with_two_candidates_takes_the_shift_its_lui_got(self):
+        # the other uses of t1's lui got -0x1500, so the load takes that candidate (aki-roadmap#309)
+        A, D = self.odd_load()
+        area, report = bytearray(), {}
+        d.fix_unreachable_lo(A, D, area, report)
+        self.assertEqual(report['unreachable_lo_fixed'], [(0x8040000C, 0x8012E0BE, 0x8012CBBE)])
+        self.assertEqual([d.word(area, 4 * i) for i in range(2)], [lui(self.T3, 0x8013), lw(self.T3, -0x3442, self.T3)])
+
+    def test_load_with_two_candidates_and_no_agreeing_shift_is_left_alone(self):
+        A, D = self.odd_load()
+        put(D, 0x1000, [lui(self.T1, 0x8012), self.SH(self.T3, 0x70F0 - 0x7, self.T1), self.SH(self.T5, 0x7800 - 0x7, self.T1)])
         area, report = bytearray(), {}
         d.fix_unreachable_lo(A, D, area, report)
         self.assertEqual(report['unreachable_lo_fixed'], [])
+        self.assertEqual(len(area), 0)
+
+    def test_indexed_load_keeps_its_index_and_jumps_from_before_a_branch_target(self):
+        # No Mercy Plus V3 entrance code (aki-roadmap#309, synthetic words): lui at, 0x8015; addu at, at, v0;
+        # lbu s3, %lo(at); lw s2, %lo(at), and the instruction after the lw is a branch target. After -0x1500 the
+        # lbu needs %hi 0x8014 and the lw 0x8015. The stub must add to at (keeping v0's index), not build a fresh
+        # address, and its j can't have a branch target as its delay slot, so it goes on the lbu.
+        AT, V0, S2, S3, T2 = d.AT, 2, 18, 19, 10
+        addu = lambda rd, rs, rt: (rs << 21) | (rt << 16) | (rd << 11) | 0x21
+        lbu = lambda rt, off, rs: (0x24 << 26) | (rs << 21) | (rt << 16) | (off & 0xFFFF)
+        b_back = (4 << 26) | 0xFFFD                             # b 0x80400010 from 0x80400018
+        hack = {0x80400000: lui(AT, 0x8015), 0x80400004: addu(AT, AT, V0), 0x80400008: lbu(S3, -0x6DD9, AT),
+                0x8040000C: lw(S2, -0x650C, AT), 0x80400010: addu(T2, S2, S3), 0x80400014: NOP,
+                0x80400018: b_back, 0x8040001C: NOP, 0x80400020: jr(RA), 0x80400024: NOP}
+        shift = lambda a, ctx=None: [a - 0x1500, a - 0x1530] if 0x80140000 <= a < 0x80160000 else []
+        A, D = fake_payload(hack, [(0x80400000, 0x28)], shift)
+        put(D, 0x1000, [lui(AT, 0x8014), addu(AT, AT, V0), lbu(S3, 0x7D27, AT)])   # what rewrite() could do
+        area, report = bytearray(), {}
+        d.fix_unreachable_lo(A, D, area, report)
+        self.assertEqual(report['unreachable_lo_fixed'], [(0x8040000C, 0x80149AF4, 0x801485F4)])
+        self.assertEqual(wd(D, A, 0x80400008), j(d.NEW_CODE_VRAM))
+        self.assertEqual(wd(D, A, 0x8040000C), NOP)
+        self.assertEqual(wd(D, A, 0x80400010), addu(T2, S2, S3))      # the branch target is untouched
+        self.assertEqual([d.word(area, 4 * i) for i in range(5)],
+                         [lbu(S3, 0x7D27, AT), addiu(S2, AT, 0x7FFF), lw(S2, 0x05F5, S2), j(0x80400010), NOP])
+        self.assertIn(0x80400010, [x.vram for x in A.extras if x.kind == 'payload'])
 
     def test_gpr_read_and_overwritten_before_read(self):
         sh = self.SH
@@ -921,8 +973,9 @@ class PayloadStubTests(unittest.TestCase):
     def test_store_rewrite_reached_through_a_later_candidate_is_left_alone(self):
         # rewrite()'s common shift can encode the second candidate for every use: that store is right as it is
         A, D = self.relinked_stores()
-        put(D, 0x1000, [lui(self.T1, 0x8013), self.SH(self.T3, -0x7A10 - 0x1530, self.T1),
-                        self.SH(self.T5, -0x7300 - 0x1530, self.T1), self.SH(self.T3, -0x1F42 - 0x1530, self.T1)])
+        A.map.candidates = lambda a, ctx=None: [a - 0x1500, a + 0x100] if 0x80106760 <= a < 0x80170000 else []
+        put(D, 0x1000, [lui(self.T1, 0x8013), self.SH(self.T3, -0x7A10 + 0x100, self.T1),
+                        self.SH(self.T5, -0x7300 + 0x100, self.T1), self.SH(self.T3, -0x1F42 + 0x100, self.T1)])
         area, report = bytearray(), {}
         d.fix_unreachable_lo(A, D, area, report)
         self.assertEqual(report['unreachable_lo_fixed'], [])
@@ -977,6 +1030,76 @@ class PayloadStubTests(unittest.TestCase):
         d.payload_fixups(A, D, report)
         self.assertEqual([wd(D, A, 0x80400040), wd(D, A, 0x80400044)], [0x80148EC0, 0x80148EC4])
         self.assertEqual(report['payload_pointers_by_owner'], 0)
+
+    def unit_owned_table(self, owners):
+        # No Mercy Plus V3 (aki-roadmap#309, synthetic words): the hack's changed ovl_b function reads a pointer table
+        # it moved into the payload (lui t1, 0x8040 / lw t2, 0x40(t1)); no payload code builds that address.
+        # 0x8014A3C0 is ovl_b data (-0x1500) and ovl_e data (-0x1530, the default here) at once.
+        hack = {0x80400000: jr(RA), 0x80400004: NOP, 0x80400040: 0x8014A3C0, 0x80400044: 0x8014A3C4}
+        code = [lui(self.T1, 0x8040), lw(self.T2, 0x40, self.T1)]
+        for k, name in enumerate(owners):
+            for i, w in enumerate(code):
+                hack[0x804000C0 + 0x10 * k + 4 * i] = w
+        A, D = fake_payload(hack, [(0x80400000, 0x8)])
+        shifts = {'ovl_b': -0x1500, 'ovl_d': -0x1500, 'ovl_e': -0x1530}
+        A.map.translate = lambda a, ctx=None: (a + shifts.get(ctx, -0x1530)) & 0xFFFFFFFF if 0x80140000 <= a < 0x80150000 else None
+        A.place = {name: (0x10C0 + 0x10 * k, 0x80108000) for k, name in enumerate(owners)}
+        A.units = {name: [(0x80106B00, 0x80108000, 8)] for name in owners}
+        return A, D
+
+    def test_payload_table_read_by_a_changed_overlay_function_takes_that_overlay(self):
+        A, D = self.unit_owned_table(['ovl_b'])
+        report = {}
+        d.payload_fixups(A, D, report)
+        self.assertEqual([wd(D, A, 0x80400040), wd(D, A, 0x80400044)], [0x80148EC0, 0x80148EC4])
+        self.assertEqual(report['payload_pointers_by_owner'], 2)
+
+    def test_payload_table_owners_that_agree_share_their_translation(self):
+        A, D = self.unit_owned_table(['ovl_b', 'ovl_d'])
+        report = {}
+        d.payload_fixups(A, D, report)
+        self.assertEqual(wd(D, A, 0x80400040), 0x80148EC0)
+
+    def test_payload_table_owners_that_disagree_keep_the_default(self):
+        A, D = self.unit_owned_table(['ovl_b', 'ovl_e'])
+        report = {}
+        d.payload_fixups(A, D, report)
+        self.assertEqual(wd(D, A, 0x80400040), 0x80148E90)
+        self.assertEqual(report['payload_pointers_by_owner'], 0)
+
+    def test_payload_hook_keeps_its_table_when_a_changed_function_reads_it_too(self):
+        # aki-roadmap#223 stays: an ovl_e hook's table keeps ovl_e even if a changed ovl_b function also reads it
+        A, D = self.owned_table({0x80400000: 'ovl_e'})
+        hack = bytearray(A.hack)
+        put(hack, 0x10C0, [lui(self.T1, 0x8040), lw(self.T2, 0x40, self.T1)])
+        A.hack = bytes(hack)
+        A.place = {'ovl_b': (0x10C0, 0x80108000)}
+        A.units = {'ovl_b': [(0x80106B00, 0x80108000, 8)]}
+        report = {}
+        d.payload_fixups(A, D, report)
+        self.assertEqual(wd(D, A, 0x80400040), 0x80148E90)
+
+    def test_payload_table_built_by_two_overlays_payload_code_stays_ambiguous(self):
+        A, D = self.owned_table({0x80400000: 'ovl_e'})
+        hack = bytearray(A.hack)
+        put(hack, 0x1080, [lui(self.T1, 0x8040), addiu(self.T1, self.T1, 0x40), jr(RA), NOP])
+        A.hack = bytes(hack)
+        A.extras.append(d.Extra('payload', 0x80400080, 0x80400080, 0x10))
+        A.region_ctx = {0x80400000: 'ovl_e', 0x80400080: 'ovl_b'}
+        get = lambda v: d.word(A.hack, A.payload['rom'] + (v - A.payload['ram']))
+        own = d.payload_data_owners(A, get, d.code_spans(A.extras, 'payload'))
+        self.assertIsNone(own(0x80400040))
+
+    def test_partial_load_no_hi_reaches_is_left(self):
+        # lwl merges into rt: a stub building the address in rt would spoil the word (aki-roadmap#309 review)
+        A, D = self.odd_load()
+        lwl = (0x22 << 26) | (self.T1 << 21) | (self.T3 << 16) | (-0x1F42 & 0xFFFF)
+        put(D, 0x1000 + 0xC, [lwl])
+        A.hack = bytes(A.hack[:0x100C]) + lwl.to_bytes(4, 'big') + bytes(A.hack[0x1010:])
+        area, report = bytearray(), {}
+        d.fix_unreachable_lo(A, D, area, report)
+        self.assertEqual(report['unreachable_lo_fixed'], [])     # (hilo_refs doesn't pair partial loads today)
+        self.assertEqual(len(area), 0)
 
     def test_payload_data_owner_reach(self):
         A, D = self.owned_table({0x80400000: 'ovl_e'})
