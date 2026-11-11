@@ -545,10 +545,11 @@ def main_data_evidence(main, pairs):
     return [p for ps in pairs.values() for p in ps if main.data <= p[0] < main.end]
 
 
-PADDING_PROBE = 16      # bytes compared at a reference's target by padding_table_refs
+PADDING_PROBE = 16      # bytes of the hack's table compared with stock's by padding_table_refs
+PADDING_ZERO_RUN = 0x40 # how much stock zero padding the table has to start in (Remastered's: 0x58 bytes)
 
 
-def padding_table_refs(pairs, base, hack, stock_rom_of, hack_rom_of):
+def padding_table_refs(pairs, base, hack, stock_rom_of, hack_rom_of, stock_data_end=None):
     """The (stock, hack) pairs whose hack target is a table the hack wrote into space that is zero in the stock ROM, with
     other contents than stock's at the paired address: the hack repointed code at a table of its own in padding, so the
     pair says nothing about where stock's data went. GM Spectre's WrestleMania 2000 SK hacks keep the stock layout and
@@ -556,15 +557,18 @@ def padding_table_refs(pairs, base, hack, stock_rom_of, hack_rom_of):
     Remastered points four loads at 0x8003A970 (stock table 0x800467E8), which read as main's early data moving by
     +0xBE78: the main-data cave search then stopped short of the payload loader at 0x8004A3C0, and 145 changed data
     words landed on the wrong addresses and were dropped (jessetbh/aki-roadmap#307). Data a relinked hack really moved
-    holds stock's contents at its new address, so its pairs stay."""
+    holds stock's contents at its new address, so its pairs stay. Only pairs whose stock address is initialised data
+    (below stock_data_end: bss has no ROM bytes to compare) and whose target starts PADDING_ZERO_RUN zero bytes of stock."""
     out = set()
     zero = bytes(PADDING_PROBE)
     for s, h in pairs:
+        if stock_data_end is not None and (s >= stock_data_end or h >= stock_data_end):
+            continue
         hr, sh, ss = hack_rom_of(h), stock_rom_of(h), stock_rom_of(s)
-        if min(hr, sh, ss) < 0 or max(hr, sh, ss) + PADDING_PROBE > min(len(hack), len(base)):
+        if min(hr, sh, ss) < 0 or max(hr, sh, ss) + PADDING_ZERO_RUN > min(len(hack), len(base)):
             continue
         new = hack[hr:hr + PADDING_PROBE]
-        if base[sh:sh + PADDING_PROBE] == zero and new != zero and new != base[ss:ss + PADDING_PROBE]:
+        if base[sh:sh + PADDING_ZERO_RUN] == bytes(PADDING_ZERO_RUN) and new != zero and new != base[ss:ss + PADDING_PROBE]:
             out.add((s, h))
     return out
 
@@ -699,7 +703,7 @@ class Analysis:
             if name == 'main':
                 ev = main_data_evidence(self.byname['main'], pairs)
                 mst = self.byname['main']
-                drop = padding_table_refs(ev, self.base, self.hack, mst.rom_of, lambda v: hrom + (v - htext))
+                drop = padding_table_refs(ev, self.base, self.hack, mst.rom_of, lambda v: hrom + (v - htext), mst.bss)
                 ev = [p for p in ev if p not in drop]
             else:
                 ev = pairs[name]
@@ -2267,8 +2271,10 @@ def kseg1_fixups(A, D, area, ports, report):
     fix(lambda v: word(area, v - NEW_CODE_VRAM), lambda v, w: put_word(area, v - NEW_CODE_VRAM, w),
         NEW_CODE_VRAM, NEW_CODE_VRAM + len(area) // 4 * 4)
     # payload code (in D at the payload's ROM offset): WCW Saturday Night Remastered's payload writes through 0xA0520000
-    # (jessetbh/aki-roadmap#307)
-    if A.payload:
+    # (jessetbh/aki-roadmap#307). Only the loader form hooked past the entry code (the SK hacks'): other payloads
+    # (Revenge Starrcade 2.0, No Mercy Plus) keep their code as it was converted and tested.
+    entry_end = A.place['entry'][2] if 'entry' in getattr(A, 'place', {}) else 0x80000400
+    if A.payload and A.payload.get('hook', 0x80000400) >= entry_end:
         p = A.payload
         for lo, hi in code_spans(A.extras, 'payload'):
             fix(lambda v: word(D, p['rom'] + (v - p['ram'])), lambda v, w: put_word(D, p['rom'] + (v - p['ram']), w), lo, hi)

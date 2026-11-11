@@ -467,6 +467,24 @@ class MapTests(unittest.TestCase):
         runs = d.runs_from_pairs(pairs, 0x80040000, 0x80060000)
         self.assertEqual([r[2] for r in runs], [(-0xA0) & 0xFFFFFFFF, (-0x90) & 0xFFFFFFFF])
 
+    def test_payload_copy_loop_past_the_entry_code(self):
+        # aki-roadmap#307 (WCW Saturday Night Remastered): `j cave` at 0x800004A0, past the entry code; the cave waits
+        # on osMemSize, copies 0x1000 WORDS from the cart through the uncached alias 0xA040C000, then jumps on
+        hack = bytearray(0x50000)
+        put(hack, 0x1000 + (0x80000444 - 0x80000400), [0x08000000 | ((0x80003CCC >> 2) & 0x3FFFFFF)])  # a stock j first
+        put(hack, 0x1000 + (0x800004A0 - 0x80000400), [0x08000000 | ((0x8004A3C0 >> 2) & 0x3FFFFFF), 0x3C068000])
+        cave = [0x90CD0319, 0x31AD0080, 0x11A0FFFF, 0x3C08B3D5, 0x3C09A040, 0x3529C000, 0x240A1000,
+                0x8D0B0000, 0xAD2B0000, 0x25080004, 0x25290004, 0x254AFFFF, 0x1540FFFA, 0x00000000,
+                0x08103136, 0x24C604D0]
+        put(hack, 0x1000 + (0x8004A3C0 - 0x80000400), cave)
+        p = d.find_payload_copy_loop(bytes(hack))
+        self.assertEqual((p['rom'], p['ram'], p['size']), (0x3D50000, 0x8040C000, 0x4000))
+        self.assertEqual((p['cave'], p['hook'], p['resume']), (0x8004A3C0, 0x800004A0, 0x800004A8))
+        # a byte count (step -4) stays as it is
+        cave[11] = 0x254AFFFC
+        put(hack, 0x1000 + (0x8004A3C0 - 0x80000400), cave)
+        self.assertEqual(d.find_payload_copy_loop(bytes(hack))['size'], 0x1000)
+
     def test_replace_sync(self):
         # aki-roadmap#307: `sync` (any stype) becomes a nop inside the functions given, nothing else changes
         D = bytearray(0x40)
@@ -501,6 +519,7 @@ class MapTests(unittest.TestCase):
         base, hack = bytearray(ROM + size), bytearray(ROM + size)
         rom_of = lambda v: ROM + (v - TEXT)
         put(base, rom_of(0x800467E8), [0x11111111, 0x22222222, 0x33333333, 0x44444444])   # stock table
+        put(base, rom_of(0x8003A9C8), [0x99999999])                                       # end of the zero run
         put(hack, rom_of(0x8003A970), [0x55555555, 0x66666666, 0x77777777, 0x88888888])   # the hack's own, in padding
         put(base, rom_of(0x80040000), [0xAAAAAAAA, 0xBBBBBBBB, 0xCCCCCCCC, 0xDDDDDDDD])   # stock data ...
         put(hack, rom_of(0x80041000), [0xAAAAAAAA, 0xBBBBBBBB, 0xCCCCCCCC, 0xDDDDDDDD])   # ... moved by a relink
@@ -509,6 +528,12 @@ class MapTests(unittest.TestCase):
         repointed, moved, edited = (0x800467E8, 0x8003A970), (0x80040000, 0x80041000), (0x80042000, 0x80042000)
         got = d.padding_table_refs([repointed, moved, edited], bytes(base), bytes(hack), rom_of, rom_of)
         self.assertEqual(got, {repointed})
+        # a short zero run in stock (a few zero words inside a table) is no padding
+        short = bytearray(base)
+        put(short, rom_of(0x8003A990), [0x99999999])
+        self.assertEqual(d.padding_table_refs([repointed], bytes(short), bytes(hack), rom_of, rom_of), set())
+        # bss: no ROM bytes to compare
+        self.assertEqual(d.padding_table_refs([repointed], bytes(base), bytes(hack), rom_of, rom_of, stock_data_end=0x80040000), set())
         # a target outside either ROM is left alone
         self.assertEqual(d.padding_table_refs([(0x800467E8, 0x80100000)], bytes(base), bytes(hack), rom_of, rom_of), set())
 
