@@ -765,7 +765,7 @@
    "version": "0.0.0",
    "tier": "unsupported",
    "converter": "derelink",
-   "note": "Not supported yet: this beta loads its own code in several stages and keeps it among the graphics microcode's data, which the converter can't rebuild yet (aki-roadmap#307).",
+   "note": "Not supported yet: this beta loads its own code in several stages and keeps it among the graphics microcode's data, which the converter can't rebuild yet.",
    "inputs": {
     "sha1": [
      "3636C068BF8268BF29AFE5FDB1C0DA76DA70D3E1"
