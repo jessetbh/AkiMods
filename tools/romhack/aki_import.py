@@ -1418,6 +1418,7 @@ CODES_FIXUPS = {
     # aki-roadmap#205: park checks every hook site holds what the tool knows, unpark puts them back on with Body
     # Shapes' Rev 0 low half (on a fresh list the net change is that one line).
     'legends_unpark': ('legends_park_hooks', ('park', 'unpark')),
+    'legends_menu_pointers': ('legends_menu_pointers', ('fix_pointers',)),   # Legends menu pass: main menu entries
 }
 MAX_EXTRACT = 4 << 30      # a zipped bundle unpacked for import-pj64 may take at most this much disk
 TEXTURE_EXTS = ('.png', '.dds')

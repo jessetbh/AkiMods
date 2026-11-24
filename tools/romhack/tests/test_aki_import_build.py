@@ -1628,16 +1628,16 @@ class CatalogBundles(BuildBase):
         cat = json.load(open(ai.DEFAULT_CATALOG, encoding='utf-8'))
         legends = [e for e in cat['entries'] if e['id'] == 'legends_c64'][0]
         self.assertEqual(legends['codes_fixups'], ['legends_portrait_guards', 'legends_block_guards',
-                                                   'legends_fb_relocate', 'legends_unpark'])
+                                                   'legends_fb_relocate', 'legends_unpark', 'legends_menu_pointers'])
         for n in legends['codes_fixups']:
             module, steps = ai.CODES_FIXUPS[n]
             mod = ai.load_module(module, os.path.join(os.path.dirname(ai.DEFAULT_CATALOG), 'fixups', module + '.py'))
             for s in steps:
                 self.assertTrue(callable(getattr(mod, s)), (n, s))
         self.assertEqual(legends['bake_exclude'], ['Wrestler Info Icon\\Mapping'])
-        # aki-roadmap#300: the main-menu Selection Pointers stay out, as in the tested pack (kept, the menu stops)
-        self.assertEqual([i['section'] for i in legends['codes_leave_out']],
-                         ['WWF Legends\\Interface\\Main Menu\\Main Screen\\Navigation\\Selection Pointers'])
+        # aki-roadmap#300 left the main-menu Selection Pointers out (their Rev 0 pointer halves froze the menu); the menu
+        # pass translates them and legends_menu_pointers moves the pointer halves, so nothing is left out any more
+        self.assertNotIn('codes_leave_out', legends)
         self.assertNotIn('A2E83248CC1DC5A07DABBB68BA481C61C8003D7E', legends['outputs']['codes_sha1'])
         # The fixes refuse a list that isn't Legends': a synthetic list fails, it isn't silently changed.
         with self.assertRaises(ValueError):
