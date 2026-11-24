@@ -93,16 +93,10 @@
     "legends_portrait_guards",
     "legends_block_guards",
     "legends_fb_relocate",
-    "legends_unpark"
-   ],
-   "codes_leave_out": [
-    {
-     "section": "WWF Legends\\Interface\\Main Menu\\Main Screen\\Navigation\\Selection Pointers",
-     "why": "writes Rev 0 pointer values the translation cannot place"
-    }
+    "legends_unpark",
+    "legends_menu_pointers"
    ],
    "known_issues": [
-    "A few of the original's codes are left out, including the main menu's selection pointers",
     "Royal Rumble, Pay Per View and tag matches are untested"
    ],
    "note": "Ropes, body shapes and extra attires work. Exhibition and King of the Ring matches play; Royal Rumble, Pay Per View and tag matches are untested.",
@@ -113,7 +107,8 @@
     ],
     "codes_sha1": [
      "9C32DDE6E48ED87859BAD28A057AA156E4C5E64D",
-     "85362A5A7A4208EFC2847329D87E49612DA9B34A"
+     "85362A5A7A4208EFC2847329D87E49612DA9B34A",
+     "2B779CBFEC2AF6817EBE5B622A86A559DEF22907"
     ]
    }
   },
