@@ -545,6 +545,34 @@ def main_data_evidence(main, pairs):
     return [p for ps in pairs.values() for p in ps if main.data <= p[0] < main.end]
 
 
+PADDING_PROBE = 16      # bytes of the hack's table compared with stock's by padding_table_refs
+PADDING_ZERO_RUN = 0x40 # how much stock zero padding the table has to start in (Remastered's: 0x58 bytes)
+
+
+def padding_table_refs(pairs, base, hack, stock_rom_of, hack_rom_of, stock_data_end=None):
+    """The (stock, hack) pairs whose hack target is a table the hack wrote into space that is zero in the stock ROM, with
+    other contents than stock's at the paired address: the hack repointed code at a table of its own in padding, so the
+    pair says nothing about where stock's data went. GM Spectre's WrestleMania 2000 SK hacks keep the stock layout and
+    keep their own tables, code and strings in the ucode's zero padding (0x80039570-0x8004A420); WCW Saturday Night
+    Remastered points four loads at 0x8003A970 (stock table 0x800467E8), which read as main's early data moving by
+    +0xBE78: the main-data cave search then stopped short of the payload loader at 0x8004A3C0, and 145 changed data
+    words landed on the wrong addresses and were dropped (jessetbh/aki-roadmap#307). Data a relinked hack really moved
+    holds stock's contents at its new address, so its pairs stay. Only pairs whose stock address is initialised data
+    (below stock_data_end: bss has no ROM bytes to compare) and whose target starts PADDING_ZERO_RUN zero bytes of stock."""
+    out = set()
+    zero = bytes(PADDING_PROBE)
+    for s, h in pairs:
+        if stock_data_end is not None and (s >= stock_data_end or h >= stock_data_end):
+            continue
+        hr, sh, ss = hack_rom_of(h), stock_rom_of(h), stock_rom_of(s)
+        if min(hr, sh, ss) < 0 or max(hr, sh, ss) + PADDING_ZERO_RUN > min(len(hack), len(base)):
+            continue
+        new = hack[hr:hr + PADDING_PROBE]
+        if base[sh:sh + PADDING_ZERO_RUN] == bytes(PADDING_ZERO_RUN) and new != zero and new != base[ss:ss + PADDING_PROBE]:
+            out.add((s, h))
+    return out
+
+
 class Analysis:
     """Everything derived from (stock layout, hack ROM): per-section matches, hack placement,
     the address map and the hack-ROM -> stock-ROM map for the code region."""
@@ -674,6 +702,9 @@ class Analysis:
             _, _, _, dlo, dhi = self.place[name]
             if name == 'main':
                 ev = main_data_evidence(self.byname['main'], pairs)
+                mst = self.byname['main']
+                drop = padding_table_refs(ev, self.base, self.hack, mst.rom_of, lambda v: hrom + (v - htext), mst.bss)
+                ev = [p for p in ev if p not in drop]
             else:
                 ev = pairs[name]
                 # the overlay's own data/bss: one shift from its descriptor unless evidence says otherwise
@@ -1209,14 +1240,31 @@ def find_payload(hack):
                 cave=cave, resume=0x80000404)
 
 
+PAYLOAD_HOOK_REACH = 0x100     # how far into main's first code find_payload_copy_loop looks for the hook's `j cave`
+
+
 def find_payload_copy_loop(hack):
-    """The other entry-hook form (Revenge Starrcade 2.0): a `j cave` anywhere in the entry code; the cave sets
-    registers with lui/addiu/ori, then copies words with `lw` from the cart (KSEG1) to Expansion RAM in a loop counted
-    down by 4 (or up to an end address), then jumps back into the entry code. No zeroing."""
-    hook = next((i for i in range(0x50 // 4) if word(hack, 0x1000 + 4 * i) >> 26 == 2), None)
-    if hook is None:
-        return None
-    cave = mips.jump_target(word(hack, 0x1000 + 4 * hook), 0x80000400 + 4 * hook)
+    """The other entry-hook form (Revenge Starrcade 2.0): a `j cave` in the entry code; the cave sets registers with
+    lui/addiu/ori, then copies words with `lw` from the cart (KSEG1) to Expansion RAM in a loop counted down by 4 (or
+    up to an end address), then jumps back into the entry code. No zeroing.
+
+    GM Spectre's WrestleMania 2000 SK hacks (WCW Saturday Night Remastered, Hulkamania 64; jessetbh/aki-roadmap#307)
+    hook the first function after the entry code (`j 0x8004A3C0` at 0x800004A0), write through the uncached alias
+    (0xA040C000), count words down by 1 from `addiu t2, zero, 0x1000`, and jump on into the payload. 'hook' is the
+    hook's address: a hook outside the entry code sits in a function derelink ports, so its cave has to run."""
+    for hook in range(PAYLOAD_HOOK_REACH // 4):
+        if word(hack, 0x1000 + 4 * hook) >> 26 != 2:
+            continue
+        cave = mips.jump_target(word(hack, 0x1000 + 4 * hook), 0x80000400 + 4 * hook)
+        found = payload_copy_loop_at(hack, cave)
+        if found:
+            found.update(cave=cave, resume=0x80000400 + 4 * (hook + 2), hook=0x80000400 + 4 * hook)
+            return found
+    return None
+
+
+def payload_copy_loop_at(hack, cave):
+    """dict(rom, ram, size, zero_lo, zero_hi) of the copy loop at main address `cave`, or None."""
     rom = 0x1000 + (cave - 0x80000400)
     if not 0 <= rom < len(hack) - 0x100:
         return None
@@ -1226,6 +1274,8 @@ def find_payload_copy_loop(hack):
         op, rs, rt, imm = w >> 26, (w >> 21) & 31, (w >> 16) & 31, w & 0xFFFF
         if op == 0x0F:                                          # lui
             regs[rt] = (imm << 16) & 0xFFFFFFFF
+        elif op == 0x09 and rs == 0:                            # addiu rt, zero, imm
+            regs[rt] = mips.sx16(imm) & 0xFFFFFFFF
         elif op == 0x09 and rs in regs and rs == rt:            # addiu rt, rt, imm
             regs[rt] = (regs[rs] + mips.sx16(imm)) & 0xFFFFFFFF
         elif op == 0x0D and rs in regs and rs == rt:            # ori
@@ -1241,10 +1291,16 @@ def find_payload_copy_loop(hack):
             if src not in regs or dst not in regs or cnt not in regs:
                 return None
             s, t, n = regs[src], regs[dst], regs[cnt]
+            if 0xA0400000 <= t < 0xA0800000:                    # the uncached alias of the same RAM
+                t -= 0x20000000
+            # the counter's step: -1 counts words, else bytes
+            step = next((mips.sx16(x & 0xFFFF) for x in rest
+                         if x >> 26 == 0x09 and (x >> 21) & 31 == cnt and (x >> 16) & 31 == cnt), None)
+            if step == -1:
+                n *= 4
             if not (0xB0000000 <= s < 0xB4000000 and 0x80400000 <= t < PAYLOAD_RAM_LIMIT and 0 < n <= PAYLOAD_RAM_LIMIT - t):
                 return None
-            return dict(rom=s - 0xB0000000, ram=t, size=n, zero_lo=None, zero_hi=None, cave=cave,
-                        resume=0x80000400 + 4 * (hook + 2))
+            return dict(rom=s - 0xB0000000, ram=t, size=n, zero_lo=None, zero_hi=None)
     return None
 
 
@@ -1395,7 +1451,10 @@ def discover_extra_code(A):
     regions.append(('cave', hack_main_data[0], hack_main_data[1], lambda v: word(A.hack, hrom + (v - htext)), None))
     for name, slo, shi, hlo, hhi in A.reshaped:
         regions.append(('reshaped', hlo, hhi, lambda v, name=name: word(A.hack, A.hack_rom_of(name, v)), name))
-    skip = {A.payload['cave']} if A.payload else set()
+    # the loader cave itself is no extra code: the runtime loads the payload, and the entry code that jumps to the cave
+    # stays stock. A hook in a function derelink ports (past the entry code, aki-roadmap#307) keeps its cave.
+    entry_end = A.place['entry'][2] if 'entry' in A.place else 0x80000400
+    skip = {A.payload['cave']} if A.payload and A.payload.get('hook', 0x80000400) < entry_end else set()
 
     # the stock functions themselves, not their chunk's span: hacks put code in the padding between them
     # (Revenge Starrcade 2.0 jumps to 0x8002EB04, between the stub at 0x8002E900 and 0x8002EC2C)
@@ -1718,7 +1777,7 @@ def translate_data(A, D, report):
     """Copy the hack's data changes into the stock data images in D (pointers translated).
     Words equal to stock, or whose translation equals stock, keep the stock value."""
     skip = [(lo, hi) for k, sec, lo, hi, nv in A.new_blocks if k == 'cave']
-    if A.payload:
+    if A.payload and A.payload['cave'] not in {x.hack_vram for x in A.extras if x.kind == 'cave'}:
         cave = A.payload['cave']
         skip.append((cave, cave + 0x100))
     changed = 0
@@ -1894,14 +1953,42 @@ def payload_data_owners(A, get, spans):
         for h, l, a in mips.hilo_refs(words):
             if h is not None and p['ram'] <= a < p['ram'] + p['size'] and not in_code(a):
                 owners.setdefault(a & ~3, set()).add(ctx)
-    refs = sorted(owners)
+    # the hack's changed overlay functions can read a table it moved into the payload too: No Mercy Plus V3's ovl_b
+    # 0x8011045C (stock 0x8010EF5C) looks up the entrance walking paths in a pointer table at 0x80471290 instead of
+    # ovl_b's own; translated without that overlay (ovl_e's -0x1530, not ovl_b's -0x1500) every path started 0x30
+    # bytes early and the wrestler walked in from far off camera (aki-roadmap#309). They only decide words no payload
+    # code owns (a payload hook's ownership, aki-roadmap#223, stays as it was).
+    unit_owners = {}
+    for name, units in getattr(A, 'units', {}).items():
+        if name in ('main', 'entry') or name not in getattr(A, 'place', {}):
+            continue
+        srom, stext = A.place[name][:2]
+        for s, h, z in units:
+            words = [word(A.hack, srom + (h - stext) + 4 * i) for i in range(z // 4)]
+            for hh, l, a in mips.hilo_refs(words):
+                if hh is not None and p['ram'] <= a < p['ram'] + p['size'] and not in_code(a):
+                    unit_owners.setdefault(a & ~3, set()).add(name)
+
+    def lookup(table, v):
+        refs = sorted(table)
+        def at(v):
+            i = bisect.bisect_right(refs, v) - 1
+            if i < 0 or v - refs[i] >= PAYLOAD_DATA_REACH or any(refs[i] < b <= v for a, b in spans):
+                return False, None
+            return True, table[refs[i]]
+        return at
+    by_code, by_unit = lookup(owners, None), lookup(unit_owners, None)
 
     def ctx_at(v):
-        i = bisect.bisect_right(refs, v) - 1
-        if i < 0 or v - refs[i] >= PAYLOAD_DATA_REACH or any(refs[i] < b <= v for a, b in spans):
+        """The one overlay owning the word at v, a frozenset when several changed overlay functions do (the caller
+        takes their translation when they agree), or None."""
+        found, cs = by_code(v)
+        if found:
+            return next(iter(cs)) if len(cs) == 1 else None
+        found, cs = by_unit(v)
+        if not found:
             return None
-        cs = owners[refs[i]]
-        return next(iter(cs)) if len(cs) == 1 else None
+        return next(iter(cs)) if len(cs) == 1 else frozenset(cs)
     return ctx_at
 
 
@@ -1942,7 +2029,11 @@ def payload_fixups(A, D, report):
         w = get(v)
         if 0x80000400 <= w < 0x80400000 and w & 3 == 0:
             ctx = data_ctx(v)
-            c = A.map.translate(w, ctx)
+            if isinstance(ctx, frozenset):
+                ts = {A.map.translate(w, x) for x in ctx}
+                ctx, c = (next(iter(ctx)), ts.pop()) if len(ts) == 1 else (None, A.map.translate(w))
+            else:
+                c = A.map.translate(w, ctx)
             if ctx is not None and c != A.map.translate(w):
                 owned += 1
             if c is not None and c != w:
@@ -1966,6 +2057,20 @@ def patch_unsupported_instructions(D, functions, report):
                 put_word(D, rom + 4 * i, (((w >> 16) & 31) << 11) | 0x12)
                 n += 1
     report['cop0_random_replaced'] = n
+
+
+def replace_sync(D, functions, report):
+    """`sync` is a no-op on the N64's CPU, but the live recompiler traps on it ("Unhandled instruction sync"): it
+    becomes a `nop` in the code the runtime recompiles (functions: [(vram, rom, size)] in D). WCW Saturday Night
+    Remastered's copy-loop cave at 0x8003A478 ends in one (jessetbh/aki-roadmap#307)."""
+    n = 0
+    for vram, rom, size in functions:
+        for i in range(size // 4):
+            o = rom + 4 * i
+            if o + 4 <= len(D) and word(D, o) & 0xFFFFF83F == 0x0000000F:      # sync, any stype
+                put_word(D, o, 0)
+                n += 1
+    report['sync_replaced'] = n
 
 
 def overlay_switch_tables(A, D, x):
@@ -2105,8 +2210,21 @@ def padding_code(A, D, sec, t, funcs):
         return None
     end = min(trace_extent(get, t, lo, hi)[0], hi)
     for v in range(t, end, 4):
-        put_word(D, st.rom_of(v), get(v))
+        put_word(D, st.rom_of(v), moved_cave_jump(A, get(v), v))
     return end - t
+
+
+def moved_cave_jump(A, w, pc):
+    """w, or the `j`/`jal` w at pc retargeted to where derelink moved the cave it enters (A.new_blocks): code copied
+    in place (padding code) still jumping to a cave's hack address would run what stock has there. WCW Saturday Night
+    Remastered's `j 0x8003A478` at 0x800336D8, in the padding after func_800336C0 (jessetbh/aki-roadmap#307)."""
+    if w >> 26 not in (2, 3):
+        return w
+    t = mips.jump_target(w, pc)
+    for k, sec, lo, hi, nv in getattr(A, 'new_blocks', []):
+        if k == 'cave' and lo <= t < hi:
+            return mips.with_jump_target(w, nv + (t - lo))
+    return w
 
 
 def kseg1_fixups(A, D, area, ports, report):
@@ -2152,6 +2270,14 @@ def kseg1_fixups(A, D, area, ports, report):
                 lambda v, w, st=st: put_word(D, st.rom_of(v), w), x.vram, x.vram + x.size)
     fix(lambda v: word(area, v - NEW_CODE_VRAM), lambda v, w: put_word(area, v - NEW_CODE_VRAM, w),
         NEW_CODE_VRAM, NEW_CODE_VRAM + len(area) // 4 * 4)
+    # payload code (in D at the payload's ROM offset): WCW Saturday Night Remastered's payload writes through 0xA0520000
+    # (jessetbh/aki-roadmap#307). Only the loader form hooked past the entry code (the SK hacks'): other payloads
+    # (Revenge Starrcade 2.0, No Mercy Plus) keep their code as it was converted and tested.
+    entry_end = A.place['entry'][2] if 'entry' in getattr(A, 'place', {}) else 0x80000400
+    if A.payload and A.payload.get('hook', 0x80000400) >= entry_end:
+        p = A.payload
+        for lo, hi in code_spans(A.extras, 'payload'):
+            fix(lambda v: word(D, p['rom'] + (v - p['ram'])), lambda v, w: put_word(D, p['rom'] + (v - p['ram']), w), lo, hi)
     report['kseg1_fixups'] = fixed
     report['direct_rom_reads'] = rom_reads
 
@@ -2460,25 +2586,34 @@ def _jumpish(w):
 def stub_over(A, D, area, P, first, words_at, targets):
     """Replace payload instruction P (and the one after it, which would sit in the j's delay slot)
     by a jump to a new-code-area stub: `first` (instructions standing in for P), the instruction
-    after P, then back to P + 8 (registered as a payload entry). None if P can't be moved."""
+    after P, then back to P + 8 (registered as a payload entry). When the instruction after P is a branch
+    target, the j goes on the instruction before P instead (it runs first in the stub; back to P + 4).
+    None if P can't be moved."""
     p = A.payload
     w_prev, w_next = words_at(P - 4), words_at(P + 4)
-    if _jumpish(w_prev) or _jumpish(w_next) or (P + 4) in targets:
-        return None
     owner = next((x for x in A.extras if x.kind == 'payload' and x.vram and x.vram <= P < x.vram + x.size), None)
-    if owner is None or P + 8 >= owner.vram + owner.size:
+    if owner is None:
+        return None
+    if not (_jumpish(w_prev) or _jumpish(w_next) or (P + 4) in targets) and P + 8 < owner.vram + owner.size:
+        J, body, back = P, list(first) + [w_next], P + 8
+    elif (P + 4) in targets and not (_jumpish(w_prev) or _jumpish(words_at(P - 8)) or P in targets) \
+            and owner.vram <= P - 4 and P + 4 < owner.vram + owner.size:
+        # the instruction after P is a branch target, so it can't be the j's delay slot: the j goes on the
+        # instruction before P instead, which moves into the stub ahead of P's stand-in (NM+ V3, aki-roadmap#309)
+        J, body, back = P - 4, [w_prev] + list(first), P + 4
+    else:
         return None
     off = (len(area) + 15) & ~15
     area.extend(bytes(off - len(area)))
     sv = NEW_CODE_VRAM + off
-    code = list(first) + [w_next, mips.with_jump_target(0x08000000, P + 8), 0]
+    code = body + [mips.with_jump_target(0x08000000, back), 0]
     for c in code:
         area.extend(c.to_bytes(4, 'big'))
-    rom = p['rom'] + (P - p['ram'])
+    rom = p['rom'] + (J - p['ram'])
     put_word(D, rom, mips.with_jump_target(0x08000000, sv))
     put_word(D, rom + 4, 0)
     A.extras.append(Extra('refresh', None, sv, 4 * len(code)))
-    A.extras.append(Extra('payload', P + 8, P + 8, owner.vram + owner.size - (P + 8)))
+    A.extras.append(Extra('payload', back, back, owner.vram + owner.size - back))
     return sv
 
 
@@ -2619,28 +2754,69 @@ def fix_unreachable_lo(A, D, area, report):
         nw = [word(D, rom + i) for i in range(0, hi - lo, 4)]
         got = {l: a for h, l, a in mips.hilo_refs(nw)}
         targets = {mips.branch_target(w, lo + 4 * i) for i, w in enumerate(nw)} - {None}
-        for h, l, a in mips.hilo_refs(hw):
+        href = list(mips.hilo_refs(hw))
+        odd = {l for h, l, a in href if (lambda cs: cs and not (got.get(l) in cs or cs[0] == a and got.get(l) == a))(
+            A.map.candidates(a, ctx))}
+        for h, l, a in href:
             cs = A.map.candidates(a, ctx)
             if not cs or got.get(l) in cs or cs[0] == a and got.get(l) == a:
                 continue     # rewrite() reached one of them (it may pick a later one for a shift all uses share)
-            want, w = cs[0], nw[l]
+            # Several candidates (overlays with different shifts): take the one whose shift rewrite() gave the other
+            # uses of this lui that it could encode (No Mercy Plus V3's entrance code reads the walking-path tables
+            # at 0x801479AA etc. through a lui shared with 0x8014F814: both shift -0x1500, aki-roadmap#309).
+            shifts = {(got[l2] - a2) & 0xFFFFFFFF for h2, l2, a2 in href
+                      if h2 == h and l2 != l and got.get(l2) is not None and got[l2] != a2}
+            agree = [c for c in cs if (c - a) & 0xFFFFFFFF in shifts]
+            want, w = (agree or cs)[0], nw[l]
             op, rs, rt = w >> 26, (w >> 21) & 31, (w >> 16) & 31
             if l == 0 or l + 2 > len(nw):
                 continue
-            if (op in mips.LOAD_GPR or op == 0x09) and rt and len(cs) == 1:
-                base = rt
+            # rs holds the lui's value plus whatever `addu` added on the way (an array index): a stub that builds
+            # the address from a fresh lui would drop it (NM+ V3's `lui at; addu at, at, v0; lw s2, %lo(at)`, #309).
+            # Those go as rs + delta from the %hi rewrite() chose: addiu k, then the instruction with %lo L.
+            lw_ = nw[h]
+            indexed = (hw[h] >> 16) & 31 != rs or any(
+                x >> 26 == 0 and (x & 0x3F) in (0x20, 0x21, 0x2C, 0x2D) and (x >> 11) & 31 == rs for x in hw[h + 1:l])
+            dlt = ((want - ((lw_ & 0xFFFF) << 16)) & 0xFFFFFFFF) if lw_ >> 26 == 0x0F else None
+            if dlt is not None and dlt >= 0x80000000:
+                dlt -= 0x100000000
+            kl = None
+            if dlt is not None and -0x10000 <= dlt <= 0xFFFE:
+                k = max(-0x8000, min(0x7FFF, dlt))
+                kl = (k, dlt - k)
+            with_lo = lambda b, L: (w & 0xFC1F0000) | (b << 21) | (L & 0xFFFF)
+            addiu_ = lambda d_, s_, k_: (0x09 << 26) | (s_ << 21) | (d_ << 16) | (k_ & 0xFFFF)
+            if op in (0x1A, 0x1B, 0x22, 0x26):
+                # lwl/lwr/ldl/ldr merge into rt: building the address in rt would spoil the half already loaded
+                report.setdefault('unreachable_lo_left', []).append(lo + 4 * l)
+                continue
+            is_load = (op in mips.LOAD_GPR or op == 0x09) and rt and (len(cs) == 1 or agree)
+            if is_load and not indexed:
+                first = [(0x0F << 26) | (rt << 16) | (((want + 0x8000) >> 16) & 0xFFFF), with_lo(rt, want)]
+            elif is_load:
+                if kl is None:
+                    report.setdefault('unreachable_lo_left', []).append(lo + 4 * l)
+                    continue
+                first = [addiu_(rt, rs, kl[0]), with_lo(rt, kl[1])]
             elif op in mips.STORE_OPS:
                 after = nw[l + 1:]
                 value = set() if op in FPR_RT_OPS else {rt}
                 base = next((r for r in (rs, AT) if r and r not in value and overwritten_before_read(after, r)), None)
-                if base is None:
+                if base is not None and not indexed:
+                    first = [(0x0F << 26) | (base << 16) | (((want + 0x8000) >> 16) & 0xFFFF), with_lo(base, want)]
+                elif kl is not None and base is not None:
+                    first = [addiu_(base, rs, kl[0]), with_lo(base, kl[1])]
+                elif kl is not None and rs not in value and l + 1 not in odd:
+                    # no free scratch register: move rs itself to the target and back after the store (NM+ V3's
+                    # entrance code stores through s1, which it reads again; aki-roadmap#309). Not when the next
+                    # instruction is another odd use: it would ride along unfixed in this stub's delay slot copy.
+                    first = [addiu_(rs, rs, kl[0]), with_lo(rs, kl[1]), addiu_(rs, rs, -kl[0])]
+                else:
                     report.setdefault('unreachable_lo_left', []).append(lo + 4 * l)
                     continue
             else:
                 continue
             P = lo + 4 * l
-            first = [(0x0F << 26) | (base << 16) | (((want + 0x8000) >> 16) & 0xFFFF),
-                     (w & 0xFC1F0000) | (base << 21) | (want & 0xFFFF)]
             pw = lambda v: word(D, p['rom'] + (v - p['ram']))
             if stub_over(A, D, area, P, first, pw, targets) is None:
                 report.setdefault('unreachable_lo_left', []).append(P)
@@ -2985,6 +3161,9 @@ def assemble(A, report):
     # COP0 Random reads are supported by the runtime (feat/fullconv); patch_unsupported_instructions()
     # stays for runtimes without it (its mflo stand-in can spin in retry loops).
     report['cop0_random_replaced'] = 0
+    code = [(f['vram'], f['rom'], f['size']) for f in functions]
+    code += [(p.stock_vram, A.byname[p.section].rom_of(p.stock_vram), p.size) for p in ports if p.status == 'changed']
+    replace_sync(D, code, report)
     code_ranges = []
     if A.payload:
         code_ranges.append([A.payload['ram'], A.payload['ram'] + A.payload['size']])

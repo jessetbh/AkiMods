@@ -1,7 +1,7 @@
 {
  "format": "aki-import-catalog",
  "version": 1,
- "about": "Conversions the AKI team tested (aki-roadmap#172, #228): hashes and notes only, no ROM or hack data. inputs.sha1: the hack ROM (.z64 order) a player imports, or its patch file (a patch whose base ROM is missing then names its game); outputs.sha1: the ROM the tested package's patch makes from the port ROM; outputs.codes_sha1: its codes.txt; outputs.content_sha1: its saves and texture images, for packs with no patch or codes (the entry then also names the built conversion). A player-built package gets the tier only when its output matches; otherwise it is Untested.",
+ "about": "Conversions the AKI team tested (aki-roadmap#172, #228): hashes and notes only, no ROM or hack data. inputs.sha1: the hack ROM (.z64 order) a player imports, or its patch file (a patch whose base ROM is missing then names its game); outputs.sha1: the ROM the tested package's patch makes from the port ROM; outputs.codes_sha1: its codes.txt; outputs.content_sha1: its saves and texture images, for packs with no patch or codes (the entry then also names the built conversion). outputs.superseded_sha1: what an older converter built for the hack before a fix changed its build; such a package is not given the tier, and importing the hack again builds the fixed one. A player-built package gets the tier only when its output matches; otherwise it is Untested.",
  "tiers": {
   "verified": "Verified: plays through a match like the original on an emulator.",
   "experimental": "Experimental: runs, with known problems.",
@@ -17,8 +17,7 @@
    "tier": "verified",
    "converter": "import-pj64",
    "known_issues": [
-    "The attract demo never starts",
-    "Codes that change the game's code while it runs do nothing"
+    "The attract demo never starts"
    ],
    "note": "No attract demo: press Start.",
    "outputs": {
@@ -49,6 +48,9 @@
    },
    "outputs": {
     "sha1": [
+     "D4276A9433F0E33FCF2A8F5DFD579053958D1C51"
+    ],
+    "superseded_sha1": [
      "1764DBE1787A1EEC47A200C06EA3C68E45742333"
     ],
     "codes_sha1": [
@@ -100,12 +102,10 @@
     }
    ],
    "known_issues": [
-    "The in-match pause screen draws noise",
-    "Some codes made for the original release do not work",
-    "Codes that change the game's code while it runs do nothing",
-    "Can crash in the menus after a while"
+    "A few of the original's codes are left out, including the main menu's selection pointers",
+    "Royal Rumble, Pay Per View and tag matches are untested"
    ],
-   "note": "The pause screen draws noise. Ropes, body shapes and extra attires do not apply. Can crash on a save in a certain state.",
+   "note": "Ropes, body shapes and extra attires work. Exhibition and King of the Ring matches play; Royal Rumble, Pay Per View and tag matches are untested.",
    "outputs": {
     "sha1": [
      "63BB51FB10C96F8DBC15485740A330B9CDC18374",
@@ -126,10 +126,8 @@
    "converter": "import-pj64",
    "known_issues": [
     "Move codes are not checked against the original",
-    "Codes that change the game's code while it runs do nothing",
     "The attract demo can pick a different venue and teams than the original"
    ],
-   "note": "Menu art needs runtime code writes.",
    "outputs": {
     "sha1": [
      "9B80D00D0723B5E2406A0D5821263B10678E258A"
@@ -213,6 +211,9 @@
    },
    "outputs": {
     "sha1": [
+     "E8C21A29C59D182592A01D02B4AD8DE4E6F68B86"
+    ],
+    "superseded_sha1": [
      "4D6C499D20DFCF54B593E71C05546075678278F8"
     ],
     "codes_sha1": [
@@ -239,6 +240,9 @@
    },
    "outputs": {
     "sha1": [
+     "57DDFC986DE1B06F5F2786E290F7A357CEDCC834"
+    ],
+    "superseded_sha1": [
      "64264DC78F0CA9693F98526E0FB043263A64CF56"
     ],
     "codes_sha1": [
@@ -296,10 +300,9 @@
    "converter": "import-pj64",
    "tier_proposed": true,
    "known_issues": [
-    "Runs without its ROM patch",
-    "Codes that change the game's code while it runs do nothing"
+    "Not yet compared with the original on an emulator"
    ],
-   "note": "Its ROM patch has not been applied yet: not the full hack.",
+   "note": "The full hack, ROM patch included.",
    "outputs": {
     "sha1": [
      "B230E544CE1EE66263BA084E125835B3BA4C9334"
@@ -319,7 +322,6 @@
    "converter": "import-pj64",
    "known_issues": [
     "Move codes are not checked against the original",
-    "Codes that change the game's code while it runs do nothing",
     "The attract demo can pick a different venue and teams than the original"
    ],
    "note": "The pack notes warn of a possible Mall freeze.",
@@ -632,7 +634,8 @@
    },
    "outputs": {
     "sha1": [
-     "66FAED1241D4D0F7FF1BADBDF2DD6D1925BFC96E"
+     "66FAED1241D4D0F7FF1BADBDF2DD6D1925BFC96E",
+     "74766FBE203C74DA564F9F59305B24737F9E3EF0"
     ],
     "codes_sha1": [
      "2905E8C60101B484598579D8B6EBF50300E17A0E"
@@ -758,6 +761,20 @@
    "outputs": {
     "sha1": [
      "869F65C454EA6CFE16338E03FC78FD2C4F653A54"
+    ]
+   }
+  },
+  {
+   "id": "hulkamania64_beta",
+   "name": "WWF Hulkamania 64 - Beta",
+   "game": "wm2k",
+   "version": "0.0.0",
+   "tier": "unsupported",
+   "converter": "derelink",
+   "note": "Not supported yet: this beta loads its own code in several stages and keeps it among the graphics microcode's data, which the converter can't rebuild yet.",
+   "inputs": {
+    "sha1": [
+     "3636C068BF8268BF29AFE5FDB1C0DA76DA70D3E1"
     ]
    }
   }
