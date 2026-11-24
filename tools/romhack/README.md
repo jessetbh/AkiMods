@@ -180,12 +180,12 @@ with `package`, `converter` and `aki_tier`:
   `map_range`, `include`, ...). An entry's `codes_fixups` list then runs, in order, on the
   conversion's `codes.txt`: hack-specific steps the tested pack went through, from `fixups\` (WWF
   Legends: `legends_portrait_guards` #198, `legends_block_guards` #221, `legends_fb_relocate` #249,
-  `legends_unpark` #205; copies of the AkiTools tools). A fix that refuses the list fails the
+  `legends_unpark` #205, `legends_menu_pointers` (its main menu's entries); copies of the AkiTools tools). A fix that refuses the list fails the
   build, since without it that conversion crashes. The item and `aki.json` survey list them in
   `codes_fixups`. After them, an entry's `codes_leave_out` (`[{"section": ..., "why": ...}]`, #300)
   takes cheats the tested pack leaves out out of `codes.txt`, with a `# left out (why):` note above
-  the hack code-writes block; a named section the list lacks fails the build (WWF Legends: its
-  main-menu Selection Pointers, which stop the main menu). Only `codes.txt` changes: a left-out
+  the hack code-writes block; a named section the list lacks fails the build (WWF Legends left out its
+  main-menu Selection Pointers until `legends_menu_pointers` translated them). Only `codes.txt` changes: a left-out
   cheat that writes code needs `bake_exclude` too. Read-me pictures (`.jpg`) beside a Project64
   folder don't stop the distribution from being one bundle.
 - The tools run in the one worker process; a hacked ROM is on disk only while derelink reads it.

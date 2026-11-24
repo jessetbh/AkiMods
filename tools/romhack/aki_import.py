@@ -68,9 +68,10 @@ ENGINE_VERSION = '0.1.0'
 # the next patch version, so the launcher upgrades the installed package) instead of answering have-it with the old
 # package. derelink 2 / import-pj64 2 = 0.3.2 (No Mercy Plus V3 entrances #309, WCW Saturday Night Remastered #307;
 # import-pj64 builds a bundle's ROM patch with derelink). import-pj64 3: a bundle with a music tool says it wants the
-# player's music pack (components.music, aki-roadmap#322; WWF Legends: Challenge 64). A converter the ledger didn't
+# player's music pack (components.music, aki-roadmap#322; WWF Legends: Challenge 64). import-pj64 4: WWF Legends'
+# main menu entries (legends_menu_pointers, its Selection Pointers no longer left out). A converter the ledger didn't
 # record takes the highest.
-CONVERTER_BUILDS = {'derelink': 2, 'import-pj64': 3, 'make_patch_mod': 1, 'texture-pack': 1}
+CONVERTER_BUILDS = {'derelink': 2, 'import-pj64': 4, 'make_patch_mod': 1, 'texture-pack': 1}
 REPLACED_DIR = '.replaced'      # Converted\.replaced\: the packages a rebuild replaced (kept for an Undo)
 
 # The six ports: header game code (0x3B, media + id + region) and the port ROM's SHA-1 (.z64 order), as AKI
@@ -2394,7 +2395,8 @@ class Builder:
     def apply_codes_fixups(self, res, files, entry):
         """The catalog entry's "codes_fixups" on the conversion's codes.txt, in order (aki-roadmap#265): the hack-specific
         steps the tested pack went through after import-pj64 (fixups/*.py, from AkiTools: WWF Legends' menu and block
-        heap guards #198/#221, its cave tables out of the framebuffers #249, its hooks with the Rev 0 low half #205).
+        heap guards #198/#221, its cave tables out of the framebuffers #249, its hooks with the Rev 0 low half #205, its
+        main menu's descriptor pointers moved for Rev 1, legends_menu_pointers).
         One that refuses the list fails the build: without them that conversion crashes (Legends at boot)."""
         names = entry.get('codes_fixups') or []
         if not names:
@@ -2419,9 +2421,9 @@ class Builder:
 
     def apply_codes_leave_out(self, res, files, entry):
         """The catalog entry's "codes_leave_out" (aki-roadmap#300): codes the tested pack leaves out, taken out of the
-        conversion's codes.txt after its fixes (leave_out_sections). WWF Legends' main-menu Selection Pointers writes
-        Rev 0 pointer values the translation can't place: kept on, the main menu stops and the game falls into a broken
-        attract match. A named section the list doesn't have fails the build, like a fix that refuses the list."""
+        conversion's codes.txt after its fixes (leave_out_sections). (WWF Legends' main-menu Selection Pointers were
+        left out here until legends_menu_pointers moved their Rev 0 pointer values; no shipped entry uses it now.) A
+        named section the list doesn't have fails the build, like a fix that refuses the list."""
         items = entry.get('codes_leave_out') or []
         if not items:
             return

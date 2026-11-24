@@ -55,7 +55,26 @@ def codes(text, section):
     return out
 
 
+pspec = importlib.util.spec_from_file_location(
+    'legends_portrait_guards', os.path.join(os.path.dirname(__file__), '..', 'fixups', 'legends_portrait_guards.py'))
+pg = importlib.util.module_from_spec(pspec)
+pspec.loader.exec_module(pg)
+
+
 class MenuPointers(unittest.TestCase):
+    def test_after_the_real_portrait_guards(self):
+        # the catalog's order: legends_portrait_guards (#198) conditions these menu-heap writes first
+        guarded, _ = pg.add_guards(LIST)
+        self.assertIn('D115982C 802B', guarded)
+        new, report = m.fix_pointers(guarded)
+        self.assertEqual(report, {'pointer_writes': 6, 'addresses': 6})
+        for a, v in (('812B65FE', 'BEE0'), ('812B6686', 'BF64'), ('812B68A6', 'BFBE')):
+            self.assertIn('%s %s' % (a, v), new)
+
+    def test_keeps_a_trailing_note(self):
+        new, _ = m.fix_pointers(LIST.replace('812B6796 D422\n', '812B6796 D422 # note\n'))
+        self.assertIn('812B6796 BF22 # note', new)
+
     def test_moves_the_six_pointer_halves_only(self):
         new, report = m.fix_pointers(LIST)
         self.assertEqual(report, {'pointer_writes': 6, 'addresses': 6})
