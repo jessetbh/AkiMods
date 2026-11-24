@@ -812,6 +812,14 @@ def cmd_import_pj64(a):
         if extra_zips:
             report['parts']['textures']['not_imported'] = extra_zips
 
+    # A music tool (aki-roadmap#322): the hack plays its music from a separate pack of 0x<track>.mp3 files the player
+    # downloads (stubbs' No Mercy Thing / Walter's Music Mod: Project64\Music Tool\*.ps1 reading the game's track).
+    # The port plays such a pack itself; the package only says it wants one (the player adds it in AKI Launcher).
+    tools = [p for p in files if os.path.basename(os.path.dirname(p)).lower() == 'music tool' and p.lower().endswith('.ps1')]
+    if a.game == 'nomercy' and tools:
+        aki['components']['music'] = {'naming': 'track-hex-mp3', 'source': 'player'}
+        report['parts']['music'] = {'tool': rel(tools[0]), 'tracks_in_bundle': sum(
+            1 for p in files if re.fullmatch(r'0x[0-9a-f]{1,2}\.mp3', os.path.basename(p), re.I))}
     # Docs the author shipped (per-wrestler CAW formulas and moves lists) go in as references.
     docs, docs_skipped = doc_files(files, folder)
     for p in docs:
