@@ -696,13 +696,18 @@ class Pj64Bundles(BuildBase):
         # aki-roadmap#322: WWF Legends ships Project64\Music Tool\wwf-music-mod.ps1 and plays its music from a pack the
         # player downloads apart: the conversion says it wants one (the player adds it in AKI Launcher); no tool, no say.
         folder = self.bundle()
-        self.write(os.path.relpath(os.path.join(folder, 'Music Tool', 'wwf-music-mod.ps1'), self.dir).replace(os.sep, '/'), b'# tool')
+        tool = os.path.relpath(os.path.join(folder, 'Music Tool'), self.dir).replace(os.sep, '/')
+        self.write(tool + '/wwf-music-mod.ps1', b'# tool')
+        self.write(tool + '/Music/0xE.mp3', b'ID3 not really music')       # a player who unzipped the pack there
+        self.write(tool + '/Music/0x1C - Razor Ramon.txt', b'')
         r = self.build_one([folder])
         self.assertEqual(r['status'], 'converted', r)
         _, aki, _ = check_package(self, r['package'], 'conversion')
         self.assertEqual(aki['components']['music'], {'naming': 'track-hex-mp3', 'source': 'player'})
         with zipfile.ZipFile(r['package']) as z:
-            self.assertFalse([n for n in z.namelist() if n.lower().endswith(('.ps1', '.mp3'))])  # neither the tool nor music
+            names = z.namelist()
+        self.assertFalse([n for n in names if n.lower().endswith(('.ps1', '.mp3'))])  # neither the tool nor music
+        self.assertFalse([n for n in names if 'razor ramon' in n.lower()])          # nor the pack's track notes (as docs)
 
     def test_bundle_without_a_music_tool_has_no_music_component(self):
         r = self.build_one([self.bundle()])

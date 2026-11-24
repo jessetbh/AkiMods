@@ -1106,7 +1106,8 @@ def pak_image(data):
 
 
 DOC_SKIP_DIRS = {'plugin', 'plugins', 'config', 'lang', 'logs', 'save', 'saves', 'screenshots', 'textures',
-                 'hires_texture', 'cache', 'roms', 'tools', 'scripts'}
+                 'hires_texture', 'cache', 'roms', 'tools', 'scripts',
+                 'music tool'}  # aki-roadmap#322: the music tool and a pack unzipped into it (its 0x1C - Name.txt notes)
 DOC_LIMIT = 40
 # Emulator and plugin logs left in a bundle (Showdown 64 ships Project64's "d3d syslog.txt"): not the author's docs.
 DOC_SKIP_NAME = re.compile(r'syslog|(^|[\s_.-])log\.txt$|^(debug|error|crash)[\s_-]?log', re.I)

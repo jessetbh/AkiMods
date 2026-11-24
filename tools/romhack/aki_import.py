@@ -67,8 +67,10 @@ ENGINE_VERSION = '0.1.0'
 # makes. The ledger records it; an entry built at a lower number is built again when its input is imported again (at
 # the next patch version, so the launcher upgrades the installed package) instead of answering have-it with the old
 # package. derelink 2 / import-pj64 2 = 0.3.2 (No Mercy Plus V3 entrances #309, WCW Saturday Night Remastered #307;
-# import-pj64 builds a bundle's ROM patch with derelink). A converter the ledger didn't record takes the highest.
-CONVERTER_BUILDS = {'derelink': 2, 'import-pj64': 2, 'make_patch_mod': 1, 'texture-pack': 1}
+# import-pj64 builds a bundle's ROM patch with derelink). import-pj64 3: a bundle with a music tool says it wants the
+# player's music pack (components.music, aki-roadmap#322; WWF Legends: Challenge 64). A converter the ledger didn't
+# record takes the highest.
+CONVERTER_BUILDS = {'derelink': 2, 'import-pj64': 3, 'make_patch_mod': 1, 'texture-pack': 1}
 REPLACED_DIR = '.replaced'      # Converted\.replaced\: the packages a rebuild replaced (kept for an Undo)
 
 # The six ports: header game code (0x3B, media + id + region) and the port ROM's SHA-1 (.z64 order), as AKI
