@@ -220,6 +220,12 @@ the map for a list translated with an older one; `--move-writes` moves what a `s
 points at. Run the pack after any move. import-pj64 never takes a known stock cartridge in a bundle
 for the hack, and adds derelink's code-watch list to the pack's codes (aki-roadmap#207).
 
+A bundle with a music tool (a `.ps1` in a `Music Tool` folder: stubbs' No Mercy Thing / Walter's Music Mod, as WWF
+Legends: Challenge 64 ships it) gets `components.music` = `{"naming": "track-hex-mp3", "source": "player"}`
+(aki-roadmap#322). Its music is a separate download of `0x<track>.mp3` files; the package carries neither the tool nor
+any music. The player adds their own pack on AKI Launcher's Mods page (it goes to `<game data>\music\<id>\`), and the
+No Mercy port plays it, following the game's current track (Rev 1 `0x80048504`).
+
 Stdlib only. It never writes ROM bytes; tests use synthetic images
 (`python -m unittest discover -s tools/romhack/tests`).
 
